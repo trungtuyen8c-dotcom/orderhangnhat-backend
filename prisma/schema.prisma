@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String      @id @default(uuid()) @db.Uuid
+  email        String      @unique
+  passwordHash String      @map("password_hash")
+  fullName     String?     @map("full_name")
+  tokenVersion Int         @default(0) @map("token_version")
+  isActive     Boolean     @default(true) @map("is_active")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  roles        UserRole[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+model Role {
+  id          Int              @id @default(autoincrement())
+  key         String           @unique
+  name        String
+  description String?
+  isSystem    Boolean          @default(false) @map("is_system")
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          Int              @id @default(autoincrement())
+  key         String           @unique
+  resource    String
+  action      String
+  description String?
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       Int        @map("role_id")
+  permissionId Int        @map("permission_id")
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId    String   @map("user_id") @db.Uuid
+  roleId    Int      @map("role_id")
+  grantedBy String?  @map("granted_by") @db.Uuid
+  grantedAt DateTime @default(now()) @map("granted_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @map("token_hash")
+  jti       String   @db.Uuid
+  expiresAt DateTime @map("expires_at")
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model AccessAudit {
+  id        BigInt   @id @default(autoincrement())
+  actorId   String?  @map("actor_id") @db.Uuid
+  targetId  String?  @map("target_id") @db.Uuid
+  action    String
+  metadata  Json?
+  ipAddress String?  @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("access_audit")
+}
+
+model Customer {
+  id      String  @id @default(uuid()) @db.Uuid
+  name    String
+  fbZalo  String? @map("fb_zalo")
+  phone   String?
+  note    String?
+  createdAt DateTime @default(now()) @map("created_at")
+  orders  Order[]
+
+  @@map("customers")
+}
+
+enum OrderStatus {
+  draft
+  quoted
+  deposited
+  purchasing
+  purchased
+  jp_warehouse
+  customs
+  tax_done
+  vn_warehouse
+  delivered
+  completed
+  closed
+  cancelled
+}
+
+model Order {
+  id          String      @id @default(uuid()) @db.Uuid
+  code        String      @unique
+  customerId  String      @map("customer_id") @db.Uuid
+  status      OrderStatus @default(draft)
+  saleId      String?     @map("sale_id") @db.Uuid
+  totalQuote  Decimal?    @map("total_quote") @db.Decimal(14, 2)
+  deposit     Decimal     @default(0) @db.Decimal(14, 2)
+  paidAt      DateTime?   @map("paid_at")
+  publicToken String      @unique @map("public_token")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  customer    Customer    @relation(fields: [customerId], references: [id])
+  items       OrderItem[]
+  trackings   Tracking[]
+  payments    Payment[]
+
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id           String  @id @default(uuid()) @db.Uuid
+  orderId      String  @map("order_id") @db.Uuid
+  name         String
+  url          String?
+  qty          Int     @default(1)
+  unitPriceJpy Decimal @map("unit_price_jpy") @db.Decimal(12, 2)
+  note         String?
+  order        Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("order_items")
+}
+
+model Tracking {
+  id         String   @id @default(uuid()) @db.Uuid
+  orderId    String?  @map("order_id") @db.Uuid
+  code       String
+  jpName     String?  @map("jp_name")
+  jpPriceJpy Decimal? @map("jp_price_jpy") @db.Decimal(12, 2)
+  jpWeightKg Decimal? @map("jp_weight_kg") @db.Decimal(8, 3)
+  shipmentId String?  @map("shipment_id") @db.Uuid
+  status     String   @default("new")
+  createdAt  DateTime @default(now()) @map("created_at")
+  order      Order?   @relation(fields: [orderId], references: [id])
+  shipment   Shipment? @relation(fields: [shipmentId], references: [id])
+  logs       TrackingLog[]
+
+  @@index([code])
+  @@map("trackings")
+}
+
+model TrackingLog {
+  id         BigInt   @id @default(autoincrement())
+  trackingId String   @map("tracking_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  oldValue   Json?    @map("old_value")
+  newValue   Json?    @map("new_value")
+  reason     String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  tracking   Tracking @relation(fields: [trackingId], references: [id], onDelete: Cascade)
+
+  @@map("tracking_logs")
+}
+
+model Shipment {
+  id         String     @id @default(uuid()) @db.Uuid
+  code       String     @unique
+  departedAt DateTime?  @map("departed_at")
+  arrivedAt  DateTime?  @map("arrived_at")
+  status     String     @default("open")
+  trackings  Tracking[]
+  documents  Document[]
+
+  @@map("shipments")
+}
+
+model Document {
+  id         String   @id @default(uuid()) @db.Uuid
+  orderId    String?  @map("order_id") @db.Uuid
+  shipmentId String?  @map("shipment_id") @db.Uuid
+  type       String
+  objectKey  String   @map("object_key")
+  uploadedBy String?  @map("uploaded_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  shipment   Shipment? @relation(fields: [shipmentId], references: [id])
+
+  @@map("documents")
+}
+
+model Payment {
+  id         String   @id @default(uuid()) @db.Uuid
+  orderId    String   @map("order_id") @db.Uuid
+  type       String
+  amountVnd  Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  walletId   String?  @map("wallet_id") @db.Uuid
+  recordedBy String?  @map("recorded_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  order      Order    @relation(fields: [orderId], references: [id])
+  wallet     Wallet?  @relation(fields: [walletId], references: [id])
+
+  @@map("payments")
+}
+
+model Wallet {
+  id       String        @id @default(uuid()) @db.Uuid
+  name     String        @unique
+  currency String        @default("VND")
+  balance  Decimal       @default(0) @db.Decimal(16, 2)
+  payments Payment[]
+  txns     WalletTxn[]
+
+  @@map("wallets")
+}
+
+model WalletTxn {
+  id           String   @id @default(uuid()) @db.Uuid
+  walletId     String   @map("wallet_id") @db.Uuid
+  amount       Decimal  @db.Decimal(16, 2)
+  type         String
+  refOrderId   String?  @map("ref_order_id") @db.Uuid
+  reconciled   Boolean  @default(false)
+  statementRef String?  @map("statement_ref")
+  createdAt    DateTime @default(now()) @map("created_at")
+  wallet       Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@map("wallet_txns")
+}
+
+model WeightRecon {
+  id        String   @id @default(uuid()) @db.Uuid
+  orderId   String   @map("order_id") @db.Uuid
+  jpWeight  Decimal? @map("jp_weight") @db.Decimal(8, 3)
+  vnWeight  Decimal? @map("vn_weight") @db.Decimal(8, 3)
+  diffKg    Decimal? @map("diff_kg") @db.Decimal(8, 3)
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("weight_recon")
+}

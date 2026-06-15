@@ -226,6 +226,18 @@ model Payment {
   @@map("payments")
 }
 
+model Debt {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @map("customer_id") @db.Uuid
+  orderId    String?  @map("order_id") @db.Uuid
+  balance    Decimal  @default(0) @db.Decimal(14, 2)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([customerId])
+  @@index([orderId])
+  @@map("debts")
+}
+
 model Wallet {
   id       String        @id @default(uuid()) @db.Uuid
   name     String        @unique

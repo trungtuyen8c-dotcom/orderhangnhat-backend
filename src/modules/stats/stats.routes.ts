@@ -1,9 +1,15 @@
 import { Router } from "express";
 import { prisma } from "../../db.js";
+import { redis } from "../../redis.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 
 export const statsRouter = Router();
 statsRouter.use(authenticate);
+
+statsRouter.get("/alerts", async (_req, res) => {
+  const raw = await redis.get("alerts:late_orders");
+  res.json(raw ? JSON.parse(raw) : { count: 0, orders: [] });
+});
 
 statsRouter.get("/", async (_req, res) => {
   const [byStatus, customers, totalOrders] = await Promise.all([

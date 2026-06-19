@@ -80,3 +80,10 @@ trackingRouter.post("/:id/resolve", authorize("trackings.resolve"), async (req, 
   await logAudit({ actorId: req.user!.id, targetId: old.id, action: "tracking.resolved", metadata: { reason: p.data.reason } });
   res.json(updated);
 });
+
+trackingRouter.delete("/:id", authorize("trackings.delete"), async (req, res) => {
+  await prisma.trackingLog.deleteMany({ where: { trackingId: req.params.id } });
+  await prisma.tracking.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "tracking.deleted" });
+  res.json({ ok: true });
+});

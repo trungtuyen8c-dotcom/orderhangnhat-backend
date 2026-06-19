@@ -71,6 +71,32 @@ accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req,
   res.json(wallets);
 });
 
+const walletSchema = z.object({ name: z.string().min(1), currency: z.string().default("VND") });
+accountingRouter.post("/wallets", authorize("wallets.manage"), async (req, res) => {
+  const p = walletSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  if (await prisma.wallet.findUnique({ where: { name: p.data.name } })) return res.status(409).json({ error: "WALLET_EXISTS" });
+  const w = await prisma.wallet.create({ data: { id: uuid(), name: p.data.name, currency: p.data.currency } });
+  await logAudit({ actorId: req.user!.id, targetId: w.id, action: "wallet.created" });
+  res.status(201).json(w);
+});
+
+accountingRouter.patch("/wallets/:id", authorize("wallets.manage"), async (req, res) => {
+  const p = walletSchema.partial().safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const w = await prisma.wallet.update({ where: { id: req.params.id }, data: p.data });
+  await logAudit({ actorId: req.user!.id, targetId: w.id, action: "wallet.updated" });
+  res.json(w);
+});
+
+accountingRouter.delete("/wallets/:id", authorize("wallets.manage"), async (req, res) => {
+  const txns = await prisma.walletTxn.count({ where: { walletId: req.params.id } });
+  if (txns > 0) return res.status(409).json({ error: "HAS_TXNS", message: "Ví còn giao dịch, không xóa được" });
+  await prisma.wallet.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "wallet.deleted" });
+  res.json({ ok: true });
+});
+
 // Đối soát: liệt kê giao dịch chưa đối soát theo ví
 accountingRouter.get("/reconcile", authorize("accounting.reconcile"), async (_req, res) => {
   const txns = await prisma.walletTxn.findMany({ where: { reconciled: false }, orderBy: { createdAt: "desc" }, take: 300, include: { wallet: { select: { name: true } } } });

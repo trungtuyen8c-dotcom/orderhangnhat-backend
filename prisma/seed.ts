@@ -5,28 +5,29 @@ import { v4 as uuid } from "uuid";
 const prisma = new PrismaClient();
 
 const PERMISSIONS = [
-  "orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status",
-  "trackings.list", "trackings.create", "trackings.update", "trackings.resolve",
-  "shipments.list", "shipments.create", "shipments.upload_doc",
+  "orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "orders.delete",
+  "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete",
+  "shipments.list", "shipments.create", "shipments.update", "shipments.delete", "shipments.upload_doc",
   "warehouse.weigh_jp", "warehouse.weigh_vn",
-  "accounting.record_payment", "accounting.refund", "accounting.reconcile",
-  "customers.list", "customers.create", "customers.update",
-  "users.list", "users.create", "users.update", "roles.assign",
+  "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage",
+  "customers.list", "customers.create", "customers.update", "customers.delete",
+  "users.list", "users.create", "users.update", "users.delete",
+  "roles.assign", "roles.create", "roles.update", "roles.delete", "permissions.list",
   "media.upload",
   "system.view_audit_log", "system.manage_settings",
 ];
 
-const ROLES: Record<string, { name: string; perms: string[] | "*" }> = {
-  super_admin: { name: "Super Admin", perms: "*" },
-  admin: { name: "Admin", perms: PERMISSIONS.filter((p) => !p.startsWith("system.manage")) },
-  sale: { name: "Sale", perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update"] },
-  accountant: { name: "Kế toán", perms: ["orders.list", "orders.read", "orders.update_status", "accounting.record_payment", "accounting.refund", "accounting.reconcile"] },
-  buyer: { name: "NV mua", perms: ["orders.list", "orders.read", "orders.update_status", "trackings.create", "trackings.update", "media.upload"] },
-  jp_warehouse: { name: "Kho Nhật", perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.create", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload"] },
-  vn_warehouse: { name: "Kho VN", perms: ["orders.list", "trackings.list", "warehouse.weigh_vn"] },
-  customs: { name: "Hải quan", perms: ["orders.list", "orders.update_status", "shipments.list"] },
-  delivery: { name: "Giao hàng", perms: ["orders.list", "orders.update_status"] },
-  viewer: { name: "Viewer", perms: ["orders.list", "orders.read"] },
+const ROLES: Record<string, { name: string; system: boolean; perms: string[] | "*" }> = {
+  super_admin: { name: "Super Admin", system: true, perms: "*" },
+  admin: { name: "Admin", system: true, perms: PERMISSIONS.filter((p) => !p.startsWith("system.manage")) },
+  sale: { name: "Sale", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update"] },
+  accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage"] },
+  buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "trackings.create", "trackings.update", "media.upload"] },
+  jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.create", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload"] },
+  vn_warehouse: { name: "Kho VN", system: false, perms: ["orders.list", "trackings.list", "warehouse.weigh_vn"] },
+  customs: { name: "Hải quan", system: false, perms: ["orders.list", "orders.update_status", "shipments.list"] },
+  delivery: { name: "Giao hàng", system: false, perms: ["orders.list", "orders.update_status"] },
+  viewer: { name: "Viewer", system: false, perms: ["orders.list", "orders.read"] },
 };
 
 async function main() {
@@ -42,8 +43,8 @@ async function main() {
   for (const [key, def] of Object.entries(ROLES)) {
     const role = await prisma.role.upsert({
       where: { key },
-      update: { name: def.name },
-      create: { key, name: def.name, isSystem: true },
+      update: { name: def.name, isSystem: def.system },
+      create: { key, name: def.name, isSystem: def.system },
     });
     const perms = def.perms === "*" ? [] : def.perms; // super_admin bypass ở code
     await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });

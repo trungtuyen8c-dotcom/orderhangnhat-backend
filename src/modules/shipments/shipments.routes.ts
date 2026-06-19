@@ -29,6 +29,24 @@ shipmentsRouter.post("/", authorize("shipments.create"), async (req, res) => {
   res.status(201).json(s);
 });
 
+const updateShipmentSchema = z.object({ code: z.string().min(1).optional(), status: z.string().optional() });
+shipmentsRouter.patch("/:id", authorize("shipments.update"), async (req, res) => {
+  const p = updateShipmentSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const s = await prisma.shipment.update({ where: { id: req.params.id }, data: p.data });
+  await logAudit({ actorId: req.user!.id, targetId: s.id, action: "shipment.updated" });
+  res.json(s);
+});
+
+shipmentsRouter.delete("/:id", authorize("shipments.delete"), async (req, res) => {
+  const docs = await prisma.document.count({ where: { shipmentId: req.params.id } });
+  if (docs > 0) return res.status(409).json({ error: "HAS_DOCS", message: "Chuyến còn chứng từ" });
+  await prisma.tracking.updateMany({ where: { shipmentId: req.params.id }, data: { shipmentId: null } });
+  await prisma.shipment.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "shipment.deleted" });
+  res.json({ ok: true });
+});
+
 // Upload chứng từ GA (invoice/packing/ingredient/purchase_invoice/tax) qua backend -> MinIO
 shipmentsRouter.post("/documents", authorize("shipments.upload_doc"), upload.single("file"), async (req, res) => {
   const file = req.file;

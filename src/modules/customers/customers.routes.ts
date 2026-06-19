@@ -33,5 +33,14 @@ customersRouter.patch("/:id", authorize("customers.update"), async (req, res) =>
   const parsed = schema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const c = await prisma.customer.update({ where: { id: req.params.id }, data: parsed.data });
+  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "customer.updated" });
   res.json(c);
+});
+
+customersRouter.delete("/:id", authorize("customers.delete"), async (req, res) => {
+  const orders = await prisma.order.count({ where: { customerId: req.params.id } });
+  if (orders > 0) return res.status(409).json({ error: "HAS_ORDERS", message: "Khách còn đơn, không xóa được" });
+  await prisma.customer.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.deleted" });
+  res.json({ ok: true });
 });

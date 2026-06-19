@@ -101,3 +101,45 @@ ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req,
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.status_changed", metadata: { from: order.status, to: parsed.data.status } });
   res.json(updated);
 });
+
+// Sửa đơn (chỉ khi chưa cọc): đổi khách + thay danh sách món
+const editSchema = z.object({
+  customerId: z.string().uuid().optional(),
+  items: z.array(z.object({
+    name: z.string().min(1),
+    url: z.string().optional(),
+    qty: z.number().int().positive().default(1),
+    unitPriceJpy: z.number().nonnegative(),
+  })).min(1).optional(),
+});
+
+ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
+  const p = editSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!["draft", "quoted"].includes(order.status)) {
+    return res.status(409).json({ error: "LOCKED", message: "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá" });
+  }
+  const data: any = {};
+  if (p.data.customerId) data.customerId = p.data.customerId;
+  if (p.data.items) {
+    data.totalQuote = p.data.items.reduce((s, i) => s + i.qty * i.unitPriceJpy, 0);
+    await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
+    data.items = { create: p.data.items };
+  }
+  const updated = await prisma.order.update({ where: { id: order.id }, data });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.updated" });
+  res.json(updated);
+});
+
+ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
+  const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { payments: true, trackings: true } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  if (order.payments.length > 0) return res.status(409).json({ error: "HAS_PAYMENTS", message: "Đơn đã có giao dịch, không xóa được" });
+  // gỡ liên kết tracking trước khi xóa đơn
+  await prisma.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
+  await prisma.order.delete({ where: { id: order.id } });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.deleted" });
+  res.json({ ok: true });
+});

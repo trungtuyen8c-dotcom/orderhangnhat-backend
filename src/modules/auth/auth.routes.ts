@@ -5,7 +5,7 @@ import { prisma } from "../../db.js";
 import { redis } from "../../redis.js";
 import { config } from "../../config.js";
 import { signAccess } from "../../utils/jwt.js";
-import { verifyPassword, sha256 } from "../../utils/password.js";
+import { verifyPassword, hashPassword, sha256 } from "../../utils/password.js";
 import { logAudit } from "../../utils/audit.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 
@@ -88,6 +88,26 @@ authRouter.post("/logout", authenticate, async (req, res) => {
   if (refresh) await prisma.refreshToken.deleteMany({ where: { tokenHash: sha256(refresh) } });
   res.clearCookie(REFRESH_COOKIE, { ...cookieOpts, maxAge: 0 });
   await logAudit({ actorId: u.id, action: "auth.logout", ip: req.ip });
+  res.json({ ok: true });
+});
+
+const changePwSchema = z.object({ oldPassword: z.string().min(1), newPassword: z.string().min(6) });
+
+authRouter.post("/change-password", authenticate, async (req, res) => {
+  const p = changePwSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const u = req.user!;
+  const user = await prisma.user.findUnique({ where: { id: u.id } });
+  if (!user || !(await verifyPassword(p.data.oldPassword, user.passwordHash))) {
+    return res.status(400).json({ error: "WRONG_OLD_PASSWORD" });
+  }
+  await prisma.user.update({
+    where: { id: u.id },
+    data: { passwordHash: await hashPassword(p.data.newPassword), tokenVersion: { increment: 1 } },
+  });
+  await prisma.refreshToken.deleteMany({ where: { userId: u.id } });
+  res.clearCookie(REFRESH_COOKIE, { ...cookieOpts, maxAge: 0 });
+  await logAudit({ actorId: u.id, action: "auth.password_changed", ip: req.ip });
   res.json({ ok: true });
 });
 

@@ -18,6 +18,24 @@ ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
   res.json(orders);
 });
 
+ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
+  const order = await prisma.order.findUnique({
+    where: { id: req.params.id },
+    include: {
+      customer: true,
+      items: true,
+      trackings: { orderBy: { createdAt: "desc" } },
+      payments: { orderBy: { createdAt: "asc" } },
+    },
+  });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  const [debt, documents] = await Promise.all([
+    prisma.debt.findFirst({ where: { orderId: order.id } }),
+    prisma.document.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "desc" } }),
+  ]);
+  res.json({ ...order, debt, documents });
+});
+
 const createSchema = z.object({
   customerId: z.string().uuid(),
   items: z.array(z.object({

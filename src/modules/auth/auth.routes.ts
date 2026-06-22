@@ -12,10 +12,12 @@ import { authenticate } from "../../middlewares/authenticate.js";
 export const authRouter = Router();
 
 const REFRESH_COOKIE = "refresh_token";
+// secure chỉ bật khi chạy HTTPS (đặt COOKIE_SECURE=true). Hiện site HTTP nên mặc định false,
+// nếu bật secure thì cookie không lưu được trên HTTP -> reload mất phiên.
 const cookieOpts = {
   httpOnly: true,
-  secure: config.nodeEnv === "production",
-  sameSite: "strict" as const,
+  secure: process.env.COOKIE_SECURE === "true",
+  sameSite: "lax" as const,
   path: "/api/auth",
   maxAge: config.refreshTtl * 1000,
 };

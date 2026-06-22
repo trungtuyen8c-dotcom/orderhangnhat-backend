@@ -65,7 +65,18 @@ async function findRow(id: string): Promise<number> {
   return 0;
 }
 
+let tabReady = false;
+async function ensureTab(): Promise<void> {
+  if (tabReady) return;
+  const meta = (await api(`?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  if (!meta.sheets?.some((s) => s.properties.title === TAB)) {
+    await api(`:batchUpdate`, "POST", { requests: [{ addSheet: { properties: { title: TAB } } }] });
+  }
+  tabReady = true;
+}
+
 async function ensureHeader(): Promise<void> {
+  await ensureTab();
   const data = (await api(`/values/${encodeURIComponent(TAB)}!A1:A1`, "GET")) as { values?: string[][] };
   if (!data.values?.length) {
     await api(`/values/${encodeURIComponent(TAB)}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [HEADER] });

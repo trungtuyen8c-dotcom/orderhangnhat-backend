@@ -5,32 +5,10 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit, logOrder } from "../../utils/audit.js";
+import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
-
-type Cur = "JPY" | "VND";
-interface PricingInput {
-  items: { qty: number; unitPriceJpy: number }[];
-  exchangeRate?: number | null;
-  shipAmount?: number; shipCurrency?: Cur;
-  surchargeAmount?: number; surchargeCurrency?: Cur;
-  discountAmount?: number; discountCurrency?: Cur;
-}
-
-// totalQuote = tổng JPY của món; totalVnd = quy đổi + phí (JPY x tỉ giá, VND cộng thẳng)
-function computeTotals(p: PricingInput) {
-  const subtotalJpy = p.items.reduce((s, i) => s + i.qty * i.unitPriceJpy, 0);
-  const rate = Number(p.exchangeRate ?? 0);
-  const toVnd = (amt = 0, cur: Cur = "VND") => (cur === "JPY" ? amt * rate : amt);
-  const totalVnd = rate
-    ? subtotalJpy * rate
-      + toVnd(p.shipAmount, p.shipCurrency)
-      + toVnd(p.surchargeAmount, p.surchargeCurrency)
-      - toVnd(p.discountAmount, p.discountCurrency)
-    : null;
-  return { totalQuote: subtotalJpy, totalVnd };
-}
 
 ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
   const orders = await prisma.order.findMany({
@@ -87,8 +65,6 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const d = parsed.data;
-  const { totalQuote, totalVnd } = computeTotals(d);
-
   const order = await prisma.order.create({
     data: {
       id: uuid(),
@@ -96,8 +72,6 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
       customerId: d.customerId,
       saleId: req.user!.id,
       status: "quoted",
-      totalQuote,
-      totalVnd,
       exchangeRate: d.exchangeRate,
       shipAmount: d.shipAmount ?? 0,
       shipCurrency: d.shipCurrency ?? "JPY",
@@ -109,26 +83,18 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
       items: { create: d.items },
     },
   });
+  const totals = await recomputeOrderTotals(order.id);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
-  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd } });
-  res.status(201).json(order);
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd: totals?.totalVnd ?? null } });
+  res.status(201).json({ ...order, ...totals });
 });
 
-// State machine hợp lệ
-const NEXT: Record<string, string[]> = {
-  draft: ["quoted", "closed"],
-  quoted: ["deposited", "closed"],
-  deposited: ["purchasing", "cancelled"],
-  purchasing: ["purchased", "cancelled"],
-  purchased: ["jp_warehouse"],
-  jp_warehouse: ["customs"],
-  customs: ["tax_done"],
-  tax_done: ["vn_warehouse"],
-  vn_warehouse: ["delivered"],
-  delivered: ["completed"],
-};
+const ORDER_STATUSES = [
+  "draft", "quoted", "deposited", "purchasing", "purchased", "jp_warehouse",
+  "customs", "tax_done", "vn_warehouse", "delivered", "completed", "closed", "cancelled",
+] as const;
 
-const statusSchema = z.object({ status: z.string() });
+const statusSchema = z.object({ status: z.enum(ORDER_STATUSES) });
 
 ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req, res) => {
   const parsed = statusSchema.safeParse(req.body);
@@ -136,10 +102,6 @@ ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req,
   const order = await prisma.order.findUnique({ where: { id: req.params.id } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
 
-  const allowed = NEXT[order.status] ?? [];
-  if (!allowed.includes(parsed.data.status)) {
-    return res.status(409).json({ error: "INVALID_TRANSITION", from: order.status, allowed });
-  }
   const updated = await prisma.order.update({
     where: { id: order.id },
     data: { status: parsed.data.status as any },
@@ -185,7 +147,6 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   diff("discountAmount", order.discountAmount, d.discountAmount); if (d.discountAmount !== undefined) data.discountAmount = d.discountAmount;
   diff("discountCurrency", order.discountCurrency, d.discountCurrency); if (d.discountCurrency !== undefined) data.discountCurrency = d.discountCurrency;
 
-  const items = d.items ?? order.items.map((i) => ({ qty: i.qty, unitPriceJpy: Number(i.unitPriceJpy), name: i.name, url: i.url ?? undefined }));
   if (d.items) {
     diff("items", order.items.map((i) => `${i.name} x${i.qty} @${Number(i.unitPriceJpy)}`).join("; "),
       d.items.map((i) => `${i.name} x${i.qty} @${i.unitPriceJpy}`).join("; "));
@@ -193,18 +154,11 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
     data.items = { create: d.items };
   }
 
-  const { totalQuote, totalVnd } = computeTotals({
-    items,
-    exchangeRate: d.exchangeRate ?? (Number(order.exchangeRate ?? 0) || undefined),
-    shipAmount: d.shipAmount ?? Number(order.shipAmount), shipCurrency: (d.shipCurrency ?? order.shipCurrency) as Cur,
-    surchargeAmount: d.surchargeAmount ?? Number(order.surchargeAmount), surchargeCurrency: (d.surchargeCurrency ?? order.surchargeCurrency) as Cur,
-    discountAmount: d.discountAmount ?? Number(order.discountAmount), discountCurrency: (d.discountCurrency ?? order.discountCurrency) as Cur,
-  });
-  data.totalQuote = totalQuote;
-  data.totalVnd = totalVnd;
-  diff("totalVnd", order.totalVnd, totalVnd);
+  await prisma.order.update({ where: { id: order.id }, data });
+  const totals = await recomputeOrderTotals(order.id);
+  diff("totalVnd", order.totalVnd, totals?.totalVnd ?? null);
 
-  const updated = await prisma.order.update({ where: { id: order.id }, data });
+  const updated = await prisma.order.findUnique({ where: { id: order.id } });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.updated" });
   if (changes.length) await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes });
   res.json(updated);

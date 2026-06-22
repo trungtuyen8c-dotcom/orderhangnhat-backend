@@ -186,6 +186,7 @@ model Tracking {
   jpName     String?  @map("jp_name")
   jpPriceJpy Decimal? @map("jp_price_jpy") @db.Decimal(12, 2)
   jpWeightKg Decimal? @map("jp_weight_kg") @db.Decimal(8, 3)
+  unitPriceVndPerKg Decimal? @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
   shipmentId String?  @map("shipment_id") @db.Uuid
   status     String   @default("new")
   createdAt  DateTime @default(now()) @map("created_at")

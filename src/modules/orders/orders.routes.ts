@@ -4,10 +4,33 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
+import { logAudit, logOrder } from "../../utils/audit.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
+
+type Cur = "JPY" | "VND";
+interface PricingInput {
+  items: { qty: number; unitPriceJpy: number }[];
+  exchangeRate?: number | null;
+  shipAmount?: number; shipCurrency?: Cur;
+  surchargeAmount?: number; surchargeCurrency?: Cur;
+  discountAmount?: number; discountCurrency?: Cur;
+}
+
+// totalQuote = tổng JPY của món; totalVnd = quy đổi + phí (JPY x tỉ giá, VND cộng thẳng)
+function computeTotals(p: PricingInput) {
+  const subtotalJpy = p.items.reduce((s, i) => s + i.qty * i.unitPriceJpy, 0);
+  const rate = Number(p.exchangeRate ?? 0);
+  const toVnd = (amt = 0, cur: Cur = "VND") => (cur === "JPY" ? amt * rate : amt);
+  const totalVnd = rate
+    ? subtotalJpy * rate
+      + toVnd(p.shipAmount, p.shipCurrency)
+      + toVnd(p.surchargeAmount, p.surchargeCurrency)
+      - toVnd(p.discountAmount, p.discountCurrency)
+    : null;
+  return { totalQuote: subtotalJpy, totalVnd };
+}
 
 ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
   const orders = await prisma.order.findMany({
@@ -26,6 +49,7 @@ ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
       items: true,
       trackings: { orderBy: { createdAt: "desc" } },
       payments: { orderBy: { createdAt: "asc" } },
+      logs: { orderBy: { createdAt: "desc" }, take: 200 },
     },
   });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
@@ -33,8 +57,20 @@ ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
     prisma.debt.findFirst({ where: { orderId: order.id } }),
     prisma.document.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "desc" } }),
   ]);
-  res.json({ ...order, debt, documents });
+  const logs = order.logs.map((l) => ({ ...l, id: l.id.toString() }));
+  res.json({ ...order, logs, debt, documents });
 });
+
+const curEnum = z.enum(["JPY", "VND"]);
+const pricingSchema = {
+  exchangeRate: z.number().nonnegative().optional(),
+  shipAmount: z.number().nonnegative().optional(),
+  shipCurrency: curEnum.optional(),
+  surchargeAmount: z.number().nonnegative().optional(),
+  surchargeCurrency: curEnum.optional(),
+  discountAmount: z.number().nonnegative().optional(),
+  discountCurrency: curEnum.optional(),
+};
 
 const createSchema = z.object({
   customerId: z.string().uuid(),
@@ -44,27 +80,37 @@ const createSchema = z.object({
     qty: z.number().int().positive().default(1),
     unitPriceJpy: z.number().nonnegative(),
   })).min(1),
+  ...pricingSchema,
 });
 
 ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const { customerId, items } = parsed.data;
-  const total = items.reduce((s, i) => s + i.qty * i.unitPriceJpy, 0);
+  const d = parsed.data;
+  const { totalQuote, totalVnd } = computeTotals(d);
 
   const order = await prisma.order.create({
     data: {
       id: uuid(),
       code: `OHN-${Date.now()}`,
-      customerId,
+      customerId: d.customerId,
       saleId: req.user!.id,
       status: "quoted",
-      totalQuote: total,
+      totalQuote,
+      totalVnd,
+      exchangeRate: d.exchangeRate,
+      shipAmount: d.shipAmount ?? 0,
+      shipCurrency: d.shipCurrency ?? "JPY",
+      surchargeAmount: d.surchargeAmount ?? 0,
+      surchargeCurrency: d.surchargeCurrency ?? "VND",
+      discountAmount: d.discountAmount ?? 0,
+      discountCurrency: d.discountCurrency ?? "VND",
       publicToken: uuid(),
-      items: { create: items },
+      items: { create: d.items },
     },
   });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd } });
   res.status(201).json(order);
 });
 
@@ -99,6 +145,7 @@ ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req,
     data: { status: parsed.data.status as any },
   });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.status_changed", metadata: { from: order.status, to: parsed.data.status } });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "status_changed", changes: [{ field: "status", old: order.status, new: parsed.data.status }] });
   res.json(updated);
 });
 
@@ -111,25 +158,55 @@ const editSchema = z.object({
     qty: z.number().int().positive().default(1),
     unitPriceJpy: z.number().nonnegative(),
   })).min(1).optional(),
+  ...pricingSchema,
 });
 
 ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   const p = editSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+  const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
   if (!["draft", "quoted"].includes(order.status)) {
     return res.status(409).json({ error: "LOCKED", message: "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá" });
   }
+  const d = p.data;
+  const changes: { field: string; old: unknown; new: unknown }[] = [];
+  const diff = (field: string, oldV: unknown, newV: unknown) => {
+    if (newV !== undefined && String(oldV ?? "") !== String(newV ?? "")) changes.push({ field, old: oldV ?? null, new: newV });
+  };
+
   const data: any = {};
-  if (p.data.customerId) data.customerId = p.data.customerId;
-  if (p.data.items) {
-    data.totalQuote = p.data.items.reduce((s, i) => s + i.qty * i.unitPriceJpy, 0);
+  if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
+  diff("exchangeRate", order.exchangeRate, d.exchangeRate); if (d.exchangeRate !== undefined) data.exchangeRate = d.exchangeRate;
+  diff("shipAmount", order.shipAmount, d.shipAmount); if (d.shipAmount !== undefined) data.shipAmount = d.shipAmount;
+  diff("shipCurrency", order.shipCurrency, d.shipCurrency); if (d.shipCurrency !== undefined) data.shipCurrency = d.shipCurrency;
+  diff("surchargeAmount", order.surchargeAmount, d.surchargeAmount); if (d.surchargeAmount !== undefined) data.surchargeAmount = d.surchargeAmount;
+  diff("surchargeCurrency", order.surchargeCurrency, d.surchargeCurrency); if (d.surchargeCurrency !== undefined) data.surchargeCurrency = d.surchargeCurrency;
+  diff("discountAmount", order.discountAmount, d.discountAmount); if (d.discountAmount !== undefined) data.discountAmount = d.discountAmount;
+  diff("discountCurrency", order.discountCurrency, d.discountCurrency); if (d.discountCurrency !== undefined) data.discountCurrency = d.discountCurrency;
+
+  const items = d.items ?? order.items.map((i) => ({ qty: i.qty, unitPriceJpy: Number(i.unitPriceJpy), name: i.name, url: i.url ?? undefined }));
+  if (d.items) {
+    diff("items", order.items.map((i) => `${i.name} x${i.qty} @${Number(i.unitPriceJpy)}`).join("; "),
+      d.items.map((i) => `${i.name} x${i.qty} @${i.unitPriceJpy}`).join("; "));
     await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
-    data.items = { create: p.data.items };
+    data.items = { create: d.items };
   }
+
+  const { totalQuote, totalVnd } = computeTotals({
+    items,
+    exchangeRate: d.exchangeRate ?? (Number(order.exchangeRate ?? 0) || undefined),
+    shipAmount: d.shipAmount ?? Number(order.shipAmount), shipCurrency: (d.shipCurrency ?? order.shipCurrency) as Cur,
+    surchargeAmount: d.surchargeAmount ?? Number(order.surchargeAmount), surchargeCurrency: (d.surchargeCurrency ?? order.surchargeCurrency) as Cur,
+    discountAmount: d.discountAmount ?? Number(order.discountAmount), discountCurrency: (d.discountCurrency ?? order.discountCurrency) as Cur,
+  });
+  data.totalQuote = totalQuote;
+  data.totalVnd = totalVnd;
+  diff("totalVnd", order.totalVnd, totalVnd);
+
   const updated = await prisma.order.update({ where: { id: order.id }, data });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.updated" });
+  if (changes.length) await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes });
   res.json(updated);
 });
 

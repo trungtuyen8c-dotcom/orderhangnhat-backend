@@ -130,6 +130,14 @@ model Order {
   status      OrderStatus @default(draft)
   saleId      String?     @map("sale_id") @db.Uuid
   totalQuote  Decimal?    @map("total_quote") @db.Decimal(14, 2)
+  exchangeRate     Decimal? @map("exchange_rate") @db.Decimal(12, 4)
+  shipAmount       Decimal  @default(0) @map("ship_amount") @db.Decimal(14, 2)
+  shipCurrency     String   @default("JPY") @map("ship_currency")
+  surchargeAmount  Decimal  @default(0) @map("surcharge_amount") @db.Decimal(14, 2)
+  surchargeCurrency String  @default("VND") @map("surcharge_currency")
+  discountAmount   Decimal  @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  discountCurrency String   @default("VND") @map("discount_currency")
+  totalVnd         Decimal? @map("total_vnd") @db.Decimal(16, 2)
   deposit     Decimal     @default(0) @db.Decimal(14, 2)
   paidAt      DateTime?   @map("paid_at")
   publicToken String      @unique @map("public_token")
@@ -138,9 +146,24 @@ model Order {
   items       OrderItem[]
   trackings   Tracking[]
   payments    Payment[]
+  logs        OrderLog[]
 
   @@index([status])
   @@map("orders")
+}
+
+model OrderLog {
+  id        BigInt   @id @default(autoincrement())
+  orderId   String   @map("order_id") @db.Uuid
+  actorId   String?  @map("actor_id") @db.Uuid
+  actorName String?  @map("actor_name")
+  action    String
+  changes   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_logs")
 }
 
 model OrderItem {

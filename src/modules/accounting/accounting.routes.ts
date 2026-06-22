@@ -16,7 +16,7 @@ async function recomputeDebt(orderId: string) {
     const amt = Number(p.amountVnd);
     return p.type === "refund" ? s - amt : s + amt;
   }, 0);
-  const balance = Number(order.totalQuote ?? 0) - paid;
+  const balance = Number(order.totalVnd ?? order.totalQuote ?? 0) - paid;
   const existing = await prisma.debt.findFirst({ where: { orderId } });
   if (existing) await prisma.debt.update({ where: { id: existing.id }, data: { balance } });
   else await prisma.debt.create({ data: { id: uuid(), orderId, customerId: order.customerId, balance } });
@@ -64,6 +64,33 @@ accountingRouter.get("/orders/:id/payments", authorize("orders.read"), async (re
   const payments = await prisma.payment.findMany({ where: { orderId: req.params.id }, orderBy: { createdAt: "asc" } });
   const debt = await prisma.debt.findFirst({ where: { orderId: req.params.id } });
   res.json({ payments, debt });
+});
+
+// Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu
+accountingRouter.get("/debts", authorize("orders.read"), async (_req, res) => {
+  const grouped = await prisma.debt.groupBy({
+    by: ["customerId"],
+    _sum: { balance: true },
+    _max: { updatedAt: true },
+  });
+  const ids = grouped.map((g) => g.customerId);
+  const customers = await prisma.customer.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true, phone: true },
+  });
+  const map = new Map(customers.map((c) => [c.id, c]));
+  const rows = grouped
+    .map((g) => ({
+      customerId: g.customerId,
+      code: g.customerId.slice(0, 8).toUpperCase(),
+      name: map.get(g.customerId)?.name ?? "?",
+      phone: map.get(g.customerId)?.phone ?? null,
+      balance: Number(g._sum.balance ?? 0),
+      updatedAt: g._max.updatedAt,
+    }))
+    .filter((r) => r.balance !== 0)
+    .sort((a, b) => b.balance - a.balance);
+  res.json(rows);
 });
 
 accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {

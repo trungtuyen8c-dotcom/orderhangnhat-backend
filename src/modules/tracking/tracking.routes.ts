@@ -7,6 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
+import { syncTracking, removeTrackingRow } from "../../utils/gsheets.js";
 
 export const trackingRouter = Router();
 trackingRouter.use(authenticate);
@@ -46,6 +47,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const t = await prisma.tracking.create({ data: { id: uuid(), ...p.data, status: p.data.orderId ? "linked" : "new" } });
   if (t.orderId) await recomputeOrderTotals(t.orderId);
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
+  void syncTracking(t);
   res.status(201).json(t);
 });
 
@@ -64,6 +66,7 @@ trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => 
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const t = await prisma.tracking.update({ where: { id: req.params.id }, data: p.data });
   if (t.orderId) await recomputeOrderTotals(t.orderId);
+  void syncTracking(t);
   res.json(t);
 });
 
@@ -100,6 +103,7 @@ trackingRouter.post("/:id/resolve", authorize("trackings.resolve"), async (req, 
   await logAudit({ actorId: req.user!.id, targetId: old.id, action: "tracking.resolved", metadata: { reason: p.data.reason } });
   // cập nhật tổng cả đơn cũ lẫn đơn mới nếu gán lại
   for (const oid of new Set([old.orderId, updated.orderId].filter(Boolean) as string[])) await recomputeOrderTotals(oid);
+  void syncTracking(updated);
   res.json(updated);
 });
 
@@ -108,6 +112,7 @@ trackingRouter.delete("/:id", authorize("trackings.delete"), async (req, res) =>
   await prisma.trackingLog.deleteMany({ where: { trackingId: req.params.id } });
   await prisma.tracking.delete({ where: { id: req.params.id } });
   if (t?.orderId) await recomputeOrderTotals(t.orderId);
+  void removeTrackingRow(req.params.id);
   await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "tracking.deleted" });
   res.json({ ok: true });
 });

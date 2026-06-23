@@ -181,6 +181,9 @@ model OrderItem {
   url          String?
   qty          Int     @default(1)
   unitPriceJpy Decimal @map("unit_price_jpy") @db.Decimal(12, 2)
+  shipJpy      Decimal? @map("ship_jpy") @db.Decimal(12, 2)
+  purchaseDate DateTime? @map("purchase_date")
+  paymentMethod String? @map("payment_method")
   note         String?
   order        Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
 

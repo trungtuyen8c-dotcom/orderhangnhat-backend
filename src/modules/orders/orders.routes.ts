@@ -68,6 +68,9 @@ const createSchema = z.object({
     url: z.string().optional(),
     qty: z.number().int().positive().default(1),
     unitPriceJpy: z.number().nonnegative(),
+    shipJpy: z.number().nonnegative().optional(),
+    purchaseDate: z.coerce.date().optional(),
+    paymentMethod: z.string().optional(),
   })).min(1),
   ...pricingSchema,
 });
@@ -136,6 +139,9 @@ const editSchema = z.object({
     url: z.string().optional(),
     qty: z.number().int().positive().default(1),
     unitPriceJpy: z.number().nonnegative(),
+    shipJpy: z.number().nonnegative().optional(),
+    purchaseDate: z.coerce.date().optional(),
+    paymentMethod: z.string().optional(),
   })).min(1).optional(),
   ...pricingSchema,
 });

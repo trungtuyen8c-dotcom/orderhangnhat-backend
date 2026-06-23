@@ -5,9 +5,21 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
+import { syncTracking } from "../../utils/gsheets.js";
 
 export const warehouseRouter = Router();
 warehouseRouter.use(authenticate);
+
+// Kho VN: nhập mã tracking nội địa VN cho 1 tracking
+const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });
+warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), async (req, res) => {
+  const p = vnTrackSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const t = await prisma.tracking.update({ where: { id: p.data.trackingId }, data: { vnTrackingCode: p.data.vnTrackingCode } });
+  void syncTracking(t);
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.vn_tracking_set" });
+  res.json(t);
+});
 
 // Cân Nhật: cập nhật cân cho tracking
 const jpSchema = z.object({ trackingId: z.string().uuid(), jpWeightKg: z.number().nonnegative() });

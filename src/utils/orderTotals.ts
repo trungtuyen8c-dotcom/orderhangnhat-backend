@@ -16,7 +16,7 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   });
   if (!order) return;
 
-  const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+  const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + Number(i.shipJpy ?? 0), 0);
   const rate = Number(order.exchangeRate ?? 0);
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
   const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd(t), 0);

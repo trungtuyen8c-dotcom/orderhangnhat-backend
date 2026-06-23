@@ -75,6 +75,13 @@ const createSchema = z.object({
   ...pricingSchema,
 });
 
+// Mã đơn JA10001, JA10002... tăng dần
+async function nextOrderCode(): Promise<string> {
+  const last = await prisma.order.findFirst({ where: { code: { startsWith: "JA" } }, orderBy: { code: "desc" }, select: { code: true } });
+  const n = last?.code ? parseInt(last.code.slice(2), 10) || 10000 : 10000;
+  return `JA${n + 1}`;
+}
+
 ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
@@ -82,7 +89,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const order = await prisma.order.create({
     data: {
       id: uuid(),
-      code: `OHN-${Date.now()}`,
+      code: await nextOrderCode(),
       customerId: d.customerId,
       saleId: req.user!.id,
       status: "quoted",

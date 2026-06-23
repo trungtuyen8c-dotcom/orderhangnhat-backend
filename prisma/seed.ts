@@ -73,6 +73,18 @@ async function main() {
     await prisma.wallet.upsert({ where: { name }, update: {}, create: { id: uuid(), name } });
   }
 
+  // Backfill mã KH cho khách cũ chưa có code
+  const noCode = await prisma.customer.findMany({ where: { code: null }, orderBy: { createdAt: "asc" } });
+  if (noCode.length) {
+    const last = await prisma.customer.findFirst({ where: { code: { startsWith: "KH-" } }, orderBy: { code: "desc" }, select: { code: true } });
+    let n = last?.code ? parseInt(last.code.slice(3), 10) || 0 : 0;
+    for (const c of noCode) {
+      n += 1;
+      await prisma.customer.update({ where: { id: c.id }, data: { code: `KH-${String(n).padStart(4, "0")}` } });
+    }
+    console.log(`Backfill mã KH cho ${noCode.length} khách`);
+  }
+
   console.log(`Seed xong. Super admin: ${email} / ${password}`);
 }
 

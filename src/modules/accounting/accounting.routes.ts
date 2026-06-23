@@ -25,6 +25,7 @@ async function recomputeDebt(orderId: string) {
 const paymentSchema = z.object({
   type: z.enum(["deposit", "final", "refund"]),
   amountVnd: z.number().positive(),
+  method: z.string().optional(),
   walletId: z.string().uuid().optional(),
 });
 
@@ -41,7 +42,7 @@ accountingRouter.post("/orders/:id/payments", authorize("accounting.record_payme
   }
 
   const payment = await prisma.payment.create({
-    data: { id: uuid(), orderId: order.id, type: p.data.type, amountVnd: p.data.amountVnd, walletId: p.data.walletId || null, recordedBy: req.user!.id },
+    data: { id: uuid(), orderId: order.id, type: p.data.type, amountVnd: p.data.amountVnd, method: p.data.method || null, walletId: p.data.walletId || null, recordedBy: req.user!.id },
   });
 
   if (p.data.type === "deposit") {

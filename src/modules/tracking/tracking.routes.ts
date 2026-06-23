@@ -38,6 +38,7 @@ const createSchema = z.object({
   jpPriceJpy: z.number().nonnegative().optional(),
   jpWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
+  vnTrackingCode: z.string().optional(),
 });
 
 // NV mua điền tracking
@@ -57,6 +58,7 @@ const updateSchema = z.object({
   jpPriceJpy: z.number().nonnegative().optional(),
   jpWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
+  vnTrackingCode: z.string().optional(),
   shipmentId: z.string().uuid().optional(),
   status: z.string().optional(),
 });

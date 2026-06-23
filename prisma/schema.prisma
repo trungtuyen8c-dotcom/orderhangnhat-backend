@@ -97,9 +97,11 @@ model AccessAudit {
 
 model Customer {
   id      String  @id @default(uuid()) @db.Uuid
+  code    String? @unique
   name    String
   fbZalo  String? @map("fb_zalo")
   phone   String?
+  address String?
   note    String?
   createdAt DateTime @default(now()) @map("created_at")
   orders  Order[]
@@ -137,6 +139,12 @@ model Order {
   surchargeCurrency String  @default("VND") @map("surcharge_currency")
   discountAmount   Decimal  @default(0) @map("discount_amount") @db.Decimal(14, 2)
   discountCurrency String   @default("VND") @map("discount_currency")
+  serviceFeeAmount      Decimal @default(0) @map("service_fee_amount") @db.Decimal(14, 2)
+  serviceFeeCurrency    String  @default("VND") @map("service_fee_currency")
+  jpDomesticShipAmount  Decimal @default(0) @map("jp_domestic_ship_amount") @db.Decimal(14, 2)
+  jpDomesticShipCurrency String @default("JPY") @map("jp_domestic_ship_currency")
+  intlShipAmount        Decimal @default(0) @map("intl_ship_amount") @db.Decimal(14, 2)
+  intlShipCurrency      String  @default("VND") @map("intl_ship_currency")
   totalVnd         Decimal? @map("total_vnd") @db.Decimal(16, 2)
   deposit     Decimal     @default(0) @db.Decimal(14, 2)
   paidAt      DateTime?   @map("paid_at")
@@ -187,6 +195,7 @@ model Tracking {
   jpPriceJpy Decimal? @map("jp_price_jpy") @db.Decimal(12, 2)
   jpWeightKg Decimal? @map("jp_weight_kg") @db.Decimal(8, 3)
   unitPriceVndPerKg Decimal? @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
+  vnTrackingCode String? @map("vn_tracking_code")
   shipmentId String?  @map("shipment_id") @db.Uuid
   status     String   @default("new")
   createdAt  DateTime @default(now()) @map("created_at")
@@ -241,6 +250,7 @@ model Payment {
   orderId    String   @map("order_id") @db.Uuid
   type       String
   amountVnd  Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  method     String?
   walletId   String?  @map("wallet_id") @db.Uuid
   recordedBy String?  @map("recorded_by") @db.Uuid
   createdAt  DateTime @default(now()) @map("created_at")

@@ -48,7 +48,18 @@ const pricingSchema = {
   surchargeCurrency: curEnum.optional(),
   discountAmount: z.number().nonnegative().optional(),
   discountCurrency: curEnum.optional(),
+  serviceFeeAmount: z.number().nonnegative().optional(),
+  serviceFeeCurrency: curEnum.optional(),
+  jpDomesticShipAmount: z.number().nonnegative().optional(),
+  jpDomesticShipCurrency: curEnum.optional(),
+  intlShipAmount: z.number().nonnegative().optional(),
+  intlShipCurrency: curEnum.optional(),
 };
+const PRICING_FIELDS = [
+  "exchangeRate", "shipAmount", "shipCurrency", "surchargeAmount", "surchargeCurrency",
+  "discountAmount", "discountCurrency", "serviceFeeAmount", "serviceFeeCurrency",
+  "jpDomesticShipAmount", "jpDomesticShipCurrency", "intlShipAmount", "intlShipCurrency",
+] as const;
 
 const createSchema = z.object({
   customerId: z.string().uuid(),
@@ -79,6 +90,12 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
       surchargeCurrency: d.surchargeCurrency ?? "VND",
       discountAmount: d.discountAmount ?? 0,
       discountCurrency: d.discountCurrency ?? "VND",
+      serviceFeeAmount: d.serviceFeeAmount ?? 0,
+      serviceFeeCurrency: d.serviceFeeCurrency ?? "VND",
+      jpDomesticShipAmount: d.jpDomesticShipAmount ?? 0,
+      jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
+      intlShipAmount: d.intlShipAmount ?? 0,
+      intlShipCurrency: d.intlShipCurrency ?? "VND",
       publicToken: uuid(),
       items: { create: d.items },
     },
@@ -139,13 +156,10 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
 
   const data: any = {};
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
-  diff("exchangeRate", order.exchangeRate, d.exchangeRate); if (d.exchangeRate !== undefined) data.exchangeRate = d.exchangeRate;
-  diff("shipAmount", order.shipAmount, d.shipAmount); if (d.shipAmount !== undefined) data.shipAmount = d.shipAmount;
-  diff("shipCurrency", order.shipCurrency, d.shipCurrency); if (d.shipCurrency !== undefined) data.shipCurrency = d.shipCurrency;
-  diff("surchargeAmount", order.surchargeAmount, d.surchargeAmount); if (d.surchargeAmount !== undefined) data.surchargeAmount = d.surchargeAmount;
-  diff("surchargeCurrency", order.surchargeCurrency, d.surchargeCurrency); if (d.surchargeCurrency !== undefined) data.surchargeCurrency = d.surchargeCurrency;
-  diff("discountAmount", order.discountAmount, d.discountAmount); if (d.discountAmount !== undefined) data.discountAmount = d.discountAmount;
-  diff("discountCurrency", order.discountCurrency, d.discountCurrency); if (d.discountCurrency !== undefined) data.discountCurrency = d.discountCurrency;
+  for (const f of PRICING_FIELDS) {
+    const nv = (d as any)[f];
+    if (nv !== undefined) { diff(f, (order as any)[f], nv); data[f] = nv; }
+  }
 
   if (d.items) {
     diff("items", order.items.map((i) => `${i.name} x${i.qty} @${Number(i.unitPriceJpy)}`).join("; "),

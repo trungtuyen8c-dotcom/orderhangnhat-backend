@@ -9,7 +9,7 @@ const TAB = process.env.GSHEET_TAB ?? "Tracking";
 
 export const gsheetsEnabled = () => Boolean(SA_EMAIL && SA_KEY && SHEET_ID);
 
-const HEADER = ["ID", "Mã tracking", "Tên (JP)", "Cân (kg)", "Đơn giá đ/kg", "Thành tiền VND", "Đơn (orderId)", "Trạng thái", "Cập nhật"];
+const HEADER = ["ID", "Mã tracking", "Tên (JP)", "Cân (kg)", "Đơn giá đ/kg", "Thành tiền VND", "Tracking VN", "Đơn (orderId)", "Trạng thái", "Cập nhật"];
 
 let cachedToken: { token: string; exp: number } | null = null;
 
@@ -45,7 +45,7 @@ async function api(path: string, method: string, body?: unknown) {
 
 interface TrackingRow {
   id: string; code: string; jpName?: unknown; jpWeightKg?: unknown;
-  unitPriceVndPerKg?: unknown; orderId?: unknown; status?: unknown;
+  unitPriceVndPerKg?: unknown; vnTrackingCode?: unknown; orderId?: unknown; status?: unknown;
 }
 
 function rowValues(t: TrackingRow): (string | number)[] {
@@ -53,7 +53,7 @@ function rowValues(t: TrackingRow): (string | number)[] {
   const unit = Number(t.unitPriceVndPerKg ?? 0);
   return [
     t.id, t.code, String(t.jpName ?? ""), kg || "", unit || "", kg * unit || "",
-    String(t.orderId ?? ""), String(t.status ?? ""), new Date().toISOString(),
+    String(t.vnTrackingCode ?? ""), String(t.orderId ?? ""), String(t.status ?? ""), new Date().toISOString(),
   ];
 }
 
@@ -104,7 +104,7 @@ export async function removeTrackingRow(id: string): Promise<void> {
   if (!gsheetsEnabled()) return;
   try {
     const row = await findRow(id);
-    if (row) await api(`/values/${encodeURIComponent(TAB)}!A${row}:I${row}:clear`, "POST", {});
+    if (row) await api(`/values/${encodeURIComponent(TAB)}!A${row}:J${row}:clear`, "POST", {});
   } catch (e) {
     console.error("[gsheets] removeTrackingRow", (e as Error).message);
   }

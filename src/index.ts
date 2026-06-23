@@ -15,6 +15,7 @@ import { accountingRouter } from "./modules/accounting/accounting.routes.js";
 import { warehouseRouter } from "./modules/warehouse/warehouse.routes.js";
 import { publicRouter } from "./modules/public/public.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
+import { scrapeRouter } from "./modules/scrape/scrape.routes.js";
 
 const app = express();
 app.set("trust proxy", true);
@@ -26,6 +27,7 @@ app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
 app.use("/api/orders", ordersRouter);
+app.use("/api/scrape", scrapeRouter);
 app.use("/api/customers", customersRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/trackings", trackingRouter);

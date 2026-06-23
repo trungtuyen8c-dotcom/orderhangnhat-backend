@@ -21,11 +21,15 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
   const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd(t), 0);
 
+  const jpyFee = (amt: unknown, cur: string) => cur === "JPY" && Number(amt) > 0;
   const hasUnconverted =
     (subtotalJpy > 0
-      || (order.shipCurrency === "JPY" && Number(order.shipAmount) > 0)
-      || (order.surchargeCurrency === "JPY" && Number(order.surchargeAmount) > 0)
-      || (order.discountCurrency === "JPY" && Number(order.discountAmount) > 0))
+      || jpyFee(order.shipAmount, order.shipCurrency)
+      || jpyFee(order.surchargeAmount, order.surchargeCurrency)
+      || jpyFee(order.discountAmount, order.discountCurrency)
+      || jpyFee(order.serviceFeeAmount, order.serviceFeeCurrency)
+      || jpyFee(order.jpDomesticShipAmount, order.jpDomesticShipCurrency)
+      || jpyFee(order.intlShipAmount, order.intlShipCurrency))
     && !rate;
 
   const totalVnd = hasUnconverted
@@ -33,6 +37,9 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
     : subtotalJpy * rate
       + toVnd(Number(order.shipAmount), order.shipCurrency)
       + toVnd(Number(order.surchargeAmount), order.surchargeCurrency)
+      + toVnd(Number(order.serviceFeeAmount), order.serviceFeeCurrency)
+      + toVnd(Number(order.jpDomesticShipAmount), order.jpDomesticShipCurrency)
+      + toVnd(Number(order.intlShipAmount), order.intlShipCurrency)
       - toVnd(Number(order.discountAmount), order.discountCurrency)
       + trackingShip;
 

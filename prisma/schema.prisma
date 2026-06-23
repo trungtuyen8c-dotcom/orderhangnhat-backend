@@ -97,7 +97,7 @@ model AccessAudit {
 
 model Customer {
   id      String  @id @default(uuid()) @db.Uuid
-  code    String? @unique
+  code    String?
   name    String
   fbZalo  String? @map("fb_zalo")
   phone   String?

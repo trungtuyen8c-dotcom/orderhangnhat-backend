@@ -61,6 +61,13 @@ const PRICING_FIELDS = [
   "jpDomesticShipAmount", "jpDomesticShipCurrency", "intlShipAmount", "intlShipCurrency",
 ] as const;
 
+const trackingsField = z.array(z.object({
+  id: z.string().uuid().optional(),
+  code: z.string().min(1),
+  jpWeightKg: z.number().nonnegative().optional(),
+  unitPriceVndPerKg: z.number().nonnegative().optional(),
+})).optional();
+
 const createSchema = z.object({
   customerId: z.string().uuid(),
   items: z.array(z.object({
@@ -72,6 +79,7 @@ const createSchema = z.object({
     purchaseDate: z.coerce.date().optional(),
     paymentMethod: z.string().optional(),
   })).min(1),
+  trackings: trackingsField,
   ...pricingSchema,
 });
 
@@ -110,6 +118,11 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
       items: { create: d.items },
     },
   });
+  if (d.trackings?.length) {
+    await prisma.tracking.createMany({
+      data: d.trackings.map((t) => ({ id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" })),
+    });
+  }
   const totals = await recomputeOrderTotals(order.id);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
   await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd: totals?.totalVnd ?? null } });
@@ -150,13 +163,14 @@ const editSchema = z.object({
     purchaseDate: z.coerce.date().optional(),
     paymentMethod: z.string().optional(),
   })).min(1).optional(),
+  trackings: trackingsField,
   ...pricingSchema,
 });
 
 ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   const p = editSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
+  const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true, trackings: true } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
   if (!["draft", "quoted"].includes(order.status)) {
     return res.status(409).json({ error: "LOCKED", message: "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá" });
@@ -179,6 +193,21 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
       d.items.map((i) => `${i.name} x${i.qty} @${i.unitPriceJpy}`).join("; "));
     await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
     data.items = { create: d.items };
+  }
+
+  // Upsert kiện (tracking) theo id; xóa kiện bị bỏ khỏi danh sách
+  if (d.trackings !== undefined) {
+    const keepIds = d.trackings.filter((t) => t.id).map((t) => t.id!);
+    const toDelete = order.trackings.filter((t) => !keepIds.includes(t.id)).map((t) => t.id);
+    if (toDelete.length) {
+      await prisma.trackingLog.deleteMany({ where: { trackingId: { in: toDelete } } });
+      await prisma.tracking.deleteMany({ where: { id: { in: toDelete } } });
+    }
+    for (const t of d.trackings) {
+      if (t.id) await prisma.tracking.update({ where: { id: t.id }, data: { code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg } });
+      else await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" } });
+    }
+    diff("trackings", order.trackings.map((t) => t.code).join(", "), d.trackings.map((t) => t.code).join(", "));
   }
 
   await prisma.order.update({ where: { id: order.id }, data });

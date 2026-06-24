@@ -198,8 +198,17 @@ async function findHeaderRow(sid: string, tab: string): Promise<number> {
   return 0;
 }
 
-// Điền data đơn vào tab tháng (tên = số tháng) trong file khách, giữ nguyên template.
-export async function syncCustomerOrders(customerId: string): Promise<void> {
+// Nối tiếp sync theo từng khách (tránh race khi tạo nhiều đơn liên tiếp ghi đè nhau)
+const syncLocks = new Map<string, Promise<void>>();
+export function syncCustomerOrders(customerId: string): Promise<void> {
+  const prev = syncLocks.get(customerId) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(() => runCustomerSync(customerId));
+  syncLocks.set(customerId, next);
+  void next.finally(() => { if (syncLocks.get(customerId) === next) syncLocks.delete(customerId); });
+  return next;
+}
+
+async function runCustomerSync(customerId: string): Promise<void> {
   if (!saEnabled()) return;
   try {
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });

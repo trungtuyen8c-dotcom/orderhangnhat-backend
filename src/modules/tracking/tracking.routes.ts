@@ -53,7 +53,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const p = createSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const t = await prisma.tracking.create({ data: { id: uuid(), ...p.data, status: p.data.orderId ? "linked" : "new" } });
-  if (t.orderId) await recomputeOrderTotals(t.orderId);
+  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
   void syncTracking(t);
   res.status(201).json(t);
@@ -113,7 +113,11 @@ trackingRouter.post("/:id/resolve", authorize("trackings.resolve"), async (req, 
   });
   await logAudit({ actorId: req.user!.id, targetId: old.id, action: "tracking.resolved", metadata: { reason: p.data.reason } });
   // cập nhật tổng cả đơn cũ lẫn đơn mới nếu gán lại
-  for (const oid of new Set([old.orderId, updated.orderId].filter(Boolean) as string[])) await recomputeOrderTotals(oid);
+  for (const oid of new Set([old.orderId, updated.orderId].filter(Boolean) as string[])) {
+    await recomputeOrderTotals(oid);
+    const o = await prisma.order.findUnique({ where: { id: oid }, select: { customerId: true } });
+    if (o) void syncCustomerOrders(o.customerId);
+  }
   void syncTracking(updated);
   res.json(updated);
 });
@@ -122,7 +126,7 @@ trackingRouter.delete("/:id", authorize("trackings.delete"), async (req, res) =>
   const t = await prisma.tracking.findUnique({ where: { id: req.params.id } });
   await prisma.trackingLog.deleteMany({ where: { trackingId: req.params.id } });
   await prisma.tracking.delete({ where: { id: req.params.id } });
-  if (t?.orderId) await recomputeOrderTotals(t.orderId);
+  if (t?.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void removeTrackingRow(req.params.id);
   await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "tracking.deleted" });
   res.json({ ok: true });

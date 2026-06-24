@@ -141,6 +141,17 @@ accountingRouter.post("/fund/topup", authorize("wallets.manage"), async (req, re
   res.json({ balance: Number(fund.balance) });
 });
 
+const setSchema = z.object({ amountYen: z.number().nonnegative(), note: z.string().optional() });
+accountingRouter.post("/fund/set", authorize("wallets.manage"), async (req, res) => {
+  const p = setSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await getFund();
+  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: p.data.amountYen } });
+  await prisma.fundTxn.create({ data: { id: uuid(), type: "set", amountYen: p.data.amountYen, note: p.data.note ?? "Đặt số dư" } });
+  await logAudit({ actorId: req.user!.id, action: "fund.set", metadata: { amountYen: p.data.amountYen } });
+  res.json({ balance: Number(fund.balance) });
+});
+
 const allocSchema = z.object({ walletId: z.string().uuid(), amountYen: z.number().positive(), note: z.string().optional() });
 accountingRouter.post("/fund/allocate", authorize("wallets.manage"), async (req, res) => {
   const p = allocSchema.safeParse(req.body);

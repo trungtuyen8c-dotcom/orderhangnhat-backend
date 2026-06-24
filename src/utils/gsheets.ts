@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { prisma } from "../db.js";
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
 // Bật khi có đủ env: GOOGLE_SA_EMAIL, GOOGLE_SA_PRIVATE_KEY, GSHEET_ID (GSHEET_TAB mặc định "Tracking").
@@ -107,5 +108,86 @@ export async function removeTrackingRow(id: string): Promise<void> {
     if (row) await api(`/values/${encodeURIComponent(TAB)}!A${row}:J${row}:clear`, "POST", {});
   } catch (e) {
     console.error("[gsheets] removeTrackingRow", (e as Error).message);
+  }
+}
+
+// ===== Xuất đơn theo từng khách: mỗi khách 1 tab, layout giống file khách =====
+const ORDER_HEADER = [
+  "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB",
+  "% Công", "Tổng tiền (¥)", "Tỷ giá (Yên)", "Tổng tiền KH quy đổi", "Phụ thu- VND", "Cân-Kg", "Đơn giá vận chuyển",
+];
+
+function tabName(name: string): string {
+  return (name || "Khách").replace(/[:\\/?*\[\]]/g, " ").trim().slice(0, 90) || "Khách";
+}
+function fmtDate(d: Date | null | undefined): string {
+  if (!d) return "";
+  const dt = new Date(d);
+  return `${String(dt.getDate()).padStart(2, "0")}/${String(dt.getMonth() + 1).padStart(2, "0")}/${dt.getFullYear()}`;
+}
+
+async function ensureNamedTab(title: string): Promise<void> {
+  const meta = (await api(`?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  if (!meta.sheets?.some((s) => s.properties.title === title)) {
+    await api(`:batchUpdate`, "POST", { requests: [{ addSheet: { properties: { title: title } } }] });
+  }
+}
+
+// Dựng lại toàn bộ tab của 1 khách từ DB (đảm bảo khớp, có dòng TỔNG/CỌC/NỢ).
+export async function syncCustomerOrders(customerId: string): Promise<void> {
+  if (!gsheetsEnabled()) return;
+  try {
+    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) return;
+    const orders = await prisma.order.findMany({
+      where: { customerId },
+      orderBy: { createdAt: "asc" },
+      include: { items: true, trackings: true, payments: true },
+    });
+
+    let totalAll = 0, depositAll = 0;
+    const dataRows: (string | number)[][] = [];
+    for (const o of orders) {
+      const rate = Number(o.exchangeRate ?? 0);
+      totalAll += Number(o.totalVnd ?? 0);
+      depositAll += o.payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
+      const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
+      o.items.forEach((it, idx) => {
+        const giaWeb = it.qty * Number(it.unitPriceJpy);
+        const ship = Number(it.shipJpy ?? 0);
+        const trk = o.trackings[idx];
+        dataRows.push([
+          o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
+          fmtDate(it.purchaseDate ?? o.createdAt),
+          "",
+          String(it.url ?? ""),
+          String(it.paymentMethod ?? ""),
+          giaWeb || "",
+          ship || "",
+          "",
+          giaWeb + ship,
+          rate || "",
+          rate ? Math.round((giaWeb + ship) * rate) : "",
+          idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
+          trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
+          trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
+        ]);
+      });
+    }
+
+    const title = tabName(customer.name);
+    await ensureNamedTab(title);
+    const t = encodeURIComponent(title);
+    await api(`/values/${t}!A1:N100000:clear`, "POST", {});
+    const top = [
+      ["", "", "", "", "", "", "TỔNG TT", totalAll],
+      ["", "", "", "", "", "", "CỌC", depositAll],
+      ["", "", "", "", "", "", "NỢ", totalAll - depositAll],
+      [],
+      ORDER_HEADER,
+    ];
+    await api(`/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [...top, ...dataRows] });
+  } catch (e) {
+    console.error("[gsheets] syncCustomerOrders", (e as Error).message);
   }
 }

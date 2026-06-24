@@ -6,6 +6,7 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit, logOrder } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
+import { syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
@@ -124,6 +125,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     });
   }
   const totals = await recomputeOrderTotals(order.id);
+  void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
   await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd: totals?.totalVnd ?? null } });
   res.status(201).json({ ...order, ...totals });
@@ -215,6 +217,8 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   diff("totalVnd", order.totalVnd, totals?.totalVnd ?? null);
 
   const updated = await prisma.order.findUnique({ where: { id: order.id } });
+  void syncCustomerOrders(order.customerId);
+  if (d.customerId && d.customerId !== order.customerId) void syncCustomerOrders(d.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.updated" });
   if (changes.length) await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes });
   res.json(updated);
@@ -227,6 +231,7 @@ ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
   // gỡ liên kết tracking trước khi xóa đơn
   await prisma.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
   await prisma.order.delete({ where: { id: order.id } });
+  void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.deleted" });
   res.json({ ok: true });
 });

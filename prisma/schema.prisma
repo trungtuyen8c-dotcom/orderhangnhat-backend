@@ -197,6 +197,7 @@ model Tracking {
   jpName     String?  @map("jp_name")
   jpPriceJpy Decimal? @map("jp_price_jpy") @db.Decimal(12, 2)
   jpWeightKg Decimal? @map("jp_weight_kg") @db.Decimal(8, 3)
+  vnWeightKg Decimal? @map("vn_weight_kg") @db.Decimal(8, 3)
   unitPriceVndPerKg Decimal? @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
   vnTrackingCode String? @map("vn_tracking_code")
   shipmentId String?  @map("shipment_id") @db.Uuid
@@ -253,6 +254,9 @@ model Payment {
   orderId    String   @map("order_id") @db.Uuid
   type       String
   amountVnd  Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  currency     String  @default("VND")
+  amountOrig   Decimal @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate Decimal? @map("exchange_rate") @db.Decimal(12, 4)
   method     String?
   walletId   String?  @map("wallet_id") @db.Uuid
   recordedBy String?  @map("recorded_by") @db.Uuid

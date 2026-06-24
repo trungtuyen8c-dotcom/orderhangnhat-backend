@@ -1,9 +1,11 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db.js";
 
-// Tiền ship 1 tracking tính cho khách = cân (kg) x đơn giá (đ/kg)
-export function trackingShipVnd(t: { jpWeightKg: unknown; unitPriceVndPerKg: unknown }): number {
-  return Number(t.jpWeightKg ?? 0) * Number(t.unitPriceVndPerKg ?? 0);
+// Tiền ship 1 tracking = cân (kg) x đơn giá (đ/kg).
+// Ưu tiên cân VN (thực tế); chưa cân VN thì tạm dùng cân JP (báo trước).
+export function trackingShipVnd(t: { jpWeightKg: unknown; vnWeightKg?: unknown; unitPriceVndPerKg: unknown }): number {
+  const kg = t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
+  return kg * Number(t.unitPriceVndPerKg ?? 0);
 }
 
 // Tính lại totalQuote (¥), totalVnd và công nợ của 1 đơn.

@@ -26,8 +26,13 @@ trackingRouter.get("/scrape", authorize("trackings.create"), async (req, res) =>
 });
 
 trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
-  const where = req.query.orderId ? { orderId: String(req.query.orderId) } : {};
-  const rows = await prisma.tracking.findMany({ where, orderBy: { createdAt: "desc" }, take: 200 });
+  const where: { orderId?: string; shipmentId?: string } = {};
+  if (req.query.orderId) where.orderId = String(req.query.orderId);
+  if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
+  const rows = await prisma.tracking.findMany({
+    where, orderBy: { createdAt: "desc" }, take: 300,
+    include: { order: { select: { code: true, customer: { select: { name: true } } } } },
+  });
   res.json(rows);
 });
 
@@ -37,8 +42,10 @@ const createSchema = z.object({
   jpName: z.string().optional(),
   jpPriceJpy: z.number().nonnegative().optional(),
   jpWeightKg: z.number().nonnegative().optional(),
+  vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
   vnTrackingCode: z.string().optional(),
+  shipmentId: z.string().uuid().optional(),
 });
 
 // NV mua điền tracking
@@ -57,6 +64,7 @@ const updateSchema = z.object({
   jpName: z.string().optional(),
   jpPriceJpy: z.number().nonnegative().optional(),
   jpWeightKg: z.number().nonnegative().optional(),
+  vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
   vnTrackingCode: z.string().optional(),
   shipmentId: z.string().uuid().optional(),

@@ -5,6 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
+import { syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const accountingRouter = Router();
 accountingRouter.use(authenticate);
@@ -24,7 +25,9 @@ async function recomputeDebt(orderId: string) {
 
 const paymentSchema = z.object({
   type: z.enum(["deposit", "final", "refund"]),
-  amountVnd: z.number().positive(),
+  amount: z.number().positive(),
+  currency: z.enum(["VND", "JPY"]).default("VND"),
+  exchangeRate: z.number().positive().optional(),
   method: z.string().optional(),
   walletId: z.string().uuid().optional(),
 });
@@ -41,22 +44,39 @@ accountingRouter.post("/orders/:id/payments", authorize("accounting.record_payme
     if (!has) return res.status(403).json({ error: "FORBIDDEN", message: "Thiếu quyền accounting.refund" });
   }
 
+  // Quy đổi sang VND để tính công nợ (công nợ luôn theo VND)
+  if (p.data.currency === "JPY" && !p.data.exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Thu JPY cần nhập tỉ giá" });
+  const amountVnd = p.data.currency === "JPY" ? Math.round(p.data.amount * p.data.exchangeRate!) : p.data.amount;
+
+  // Ví phải cùng tiền tệ với khoản thu
+  if (p.data.walletId) {
+    const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+    if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+    if (wallet.currency !== p.data.currency) return res.status(400).json({ error: "CURRENCY_MISMATCH", message: `Ví ${wallet.name} là ${wallet.currency}, không nhận ${p.data.currency}` });
+  }
+
   const payment = await prisma.payment.create({
-    data: { id: uuid(), orderId: order.id, type: p.data.type, amountVnd: p.data.amountVnd, method: p.data.method || null, walletId: p.data.walletId || null, recordedBy: req.user!.id },
+    data: {
+      id: uuid(), orderId: order.id, type: p.data.type, amountVnd,
+      currency: p.data.currency, amountOrig: p.data.amount, exchangeRate: p.data.exchangeRate ?? null,
+      method: p.data.method || null, walletId: p.data.walletId || null, recordedBy: req.user!.id,
+    },
   });
 
   if (p.data.type === "deposit") {
-    await prisma.order.update({ where: { id: order.id }, data: { deposit: { increment: p.data.amountVnd }, paidAt: order.paidAt ?? new Date() } });
+    await prisma.order.update({ where: { id: order.id }, data: { deposit: { increment: amountVnd }, paidAt: order.paidAt ?? new Date() } });
   }
 
   if (p.data.walletId) {
     const sign = p.data.type === "refund" ? -1 : 1;
-    await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: sign * p.data.amountVnd } } });
-    await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: sign * p.data.amountVnd, type: p.data.type, refOrderId: order.id } });
+    // Ví ghi theo tiền tệ gốc của ví (đã kiểm tra trùng tiền tệ ở trên)
+    await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: sign * p.data.amount } } });
+    await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: sign * p.data.amount, type: p.data.type, refOrderId: order.id } });
   }
 
   await recomputeDebt(order.id);
-  await logAudit({ actorId: req.user!.id, targetId: order.id, action: `payment.${p.data.type}`, metadata: { amount: p.data.amountVnd } });
+  void syncCustomerOrders(order.customerId);
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: `payment.${p.data.type}`, metadata: { amount: p.data.amount, currency: p.data.currency, amountVnd } });
   const debt = await prisma.debt.findFirst({ where: { orderId: order.id } });
   res.status(201).json({ payment, debt });
 });
@@ -129,6 +149,62 @@ accountingRouter.delete("/wallets/:id", authorize("wallets.manage"), async (req,
 accountingRouter.get("/reconcile", authorize("accounting.reconcile"), async (_req, res) => {
   const txns = await prisma.walletTxn.findMany({ where: { reconciled: false }, orderBy: { createdAt: "desc" }, take: 300, include: { wallet: { select: { name: true } } } });
   res.json(txns);
+});
+
+// Sao kê 1 ví: số dư lũy kế (残高) + lọc theo ngày / khách / tracking / từ khóa
+accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req, res) => {
+  const walletId = typeof req.query.walletId === "string" ? req.query.walletId : null;
+  if (!walletId) return res.json({ rows: [], balance: 0 });
+
+  const from = req.query.from ? new Date(String(req.query.from)) : null;
+  const to = req.query.to ? new Date(String(req.query.to)) : null;
+  if (to) to.setHours(23, 59, 59, 999);
+  const customerQ = String(req.query.customer ?? "").trim().toLowerCase();
+  const trackingQ = String(req.query.tracking ?? "").trim().toLowerCase();
+  const q = String(req.query.q ?? "").trim().toLowerCase();
+  const onlyPending = req.query.onlyPending === "true";
+
+  const txns = await prisma.walletTxn.findMany({ where: { walletId }, orderBy: { createdAt: "asc" } });
+
+  const orderIds = [...new Set(txns.map((t) => t.refOrderId).filter(Boolean))] as string[];
+  const orders = orderIds.length
+    ? await prisma.order.findMany({
+        where: { id: { in: orderIds } },
+        select: { id: true, code: true, customer: { select: { name: true, phone: true } }, trackings: { select: { code: true, vnTrackingCode: true } } },
+      })
+    : [];
+  const omap = new Map(orders.map((o) => [o.id, o]));
+
+  let bal = 0;
+  const enriched = txns.map((t) => {
+    bal += Number(t.amount);
+    const o = t.refOrderId ? omap.get(t.refOrderId) : undefined;
+    const trackings = (o?.trackings.flatMap((tr) => [tr.code, tr.vnTrackingCode]) ?? []).filter((x): x is string => !!x);
+    return {
+      id: t.id,
+      date: t.createdAt,
+      amount: Number(t.amount),
+      type: t.type,
+      reconciled: t.reconciled,
+      statementRef: t.statementRef,
+      orderCode: o?.code ?? null,
+      customer: o?.customer?.name ?? null,
+      phone: o?.customer?.phone ?? null,
+      trackings,
+      balance: bal,
+    };
+  });
+
+  let rows = enriched;
+  if (from) rows = rows.filter((r) => r.date >= from);
+  if (to) rows = rows.filter((r) => r.date <= to);
+  if (customerQ) rows = rows.filter((r) => (r.customer ?? "").toLowerCase().includes(customerQ));
+  if (trackingQ) rows = rows.filter((r) => r.trackings.some((c) => c.toLowerCase().includes(trackingQ)));
+  if (q) rows = rows.filter((r) => [r.orderCode, r.customer, r.type, ...r.trackings].some((x) => (x ?? "").toLowerCase().includes(q)));
+  if (onlyPending) rows = rows.filter((r) => !r.reconciled);
+
+  rows.reverse();
+  res.json({ rows, balance: bal });
 });
 
 const reconcileSchema = z.object({ statementRef: z.string().optional() });

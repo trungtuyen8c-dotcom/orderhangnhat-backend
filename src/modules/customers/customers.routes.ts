@@ -24,11 +24,11 @@ customersRouter.get("/", authorize("customers.list"), async (_req, res) => {
 
 const schema = z.object({
   name: z.string().min(1),
-  fbZalo: z.string().optional(),
-  phone: z.string().optional(),
-  address: z.string().optional(),
-  note: z.string().optional(),
-  sheetUrl: z.string().optional(),
+  fbZalo: z.string().nullable().optional(),
+  phone: z.string().nullable().optional(),
+  address: z.string().nullable().optional(),
+  note: z.string().nullable().optional(),
+  sheetUrl: z.string().nullable().optional(),
 });
 
 function withSheet(d: Record<string, unknown>) {

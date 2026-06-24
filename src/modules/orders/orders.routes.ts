@@ -95,30 +95,38 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const d = parsed.data;
-  const order = await prisma.order.create({
-    data: {
-      id: uuid(),
-      code: await nextOrderCode(),
-      customerId: d.customerId,
-      saleId: req.user!.id,
-      status: "quoted",
-      exchangeRate: d.exchangeRate,
-      shipAmount: d.shipAmount ?? 0,
-      shipCurrency: d.shipCurrency ?? "JPY",
-      surchargeAmount: d.surchargeAmount ?? 0,
-      surchargeCurrency: d.surchargeCurrency ?? "VND",
-      discountAmount: d.discountAmount ?? 0,
-      discountCurrency: d.discountCurrency ?? "VND",
-      serviceFeeAmount: d.serviceFeeAmount ?? 0,
-      serviceFeeCurrency: d.serviceFeeCurrency ?? "VND",
-      jpDomesticShipAmount: d.jpDomesticShipAmount ?? 0,
-      jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
-      intlShipAmount: d.intlShipAmount ?? 0,
-      intlShipCurrency: d.intlShipCurrency ?? "VND",
-      publicToken: uuid(),
-      items: { create: d.items },
-    },
-  });
+  const baseData = {
+    id: uuid(),
+    customerId: d.customerId,
+    saleId: req.user!.id,
+    status: "quoted" as const,
+    exchangeRate: d.exchangeRate,
+    shipAmount: d.shipAmount ?? 0,
+    shipCurrency: d.shipCurrency ?? "JPY",
+    surchargeAmount: d.surchargeAmount ?? 0,
+    surchargeCurrency: d.surchargeCurrency ?? "VND",
+    discountAmount: d.discountAmount ?? 0,
+    discountCurrency: d.discountCurrency ?? "VND",
+    serviceFeeAmount: d.serviceFeeAmount ?? 0,
+    serviceFeeCurrency: d.serviceFeeCurrency ?? "VND",
+    jpDomesticShipAmount: d.jpDomesticShipAmount ?? 0,
+    jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
+    intlShipAmount: d.intlShipAmount ?? 0,
+    intlShipCurrency: d.intlShipCurrency ?? "VND",
+    publicToken: uuid(),
+    items: { create: d.items },
+  };
+  // Retry nếu trùng mã do tạo đồng thời
+  let order;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      order = await prisma.order.create({ data: { ...baseData, code: await nextOrderCode() } });
+      break;
+    } catch (e: any) {
+      if (e?.code === "P2002" && attempt < 5) continue;
+      throw e;
+    }
+  }
   if (d.trackings?.length) {
     await prisma.tracking.createMany({
       data: d.trackings.map((t) => ({ id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" })),

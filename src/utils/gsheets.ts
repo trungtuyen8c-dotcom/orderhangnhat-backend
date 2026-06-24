@@ -155,19 +155,17 @@ function orderMonth(o: OrderFull): number {
   return new Date(d).getMonth() + 1;
 }
 
-function buildMonthValues(orders: OrderFull[]): (string | number)[][] {
-  let totalAll = 0, depositAll = 0;
-  const dataRows: (string | number)[][] = [];
+// Chỉ các dòng data A→N (không header, không summary) - điền vào template có sẵn.
+function buildDataRows(orders: OrderFull[]): (string | number)[][] {
+  const rows: (string | number)[][] = [];
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
-    totalAll += Number(o.totalVnd ?? 0);
-    depositAll += o.payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
     o.items.forEach((it, idx) => {
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
       const trk = o.trackings[idx];
-      dataRows.push([
+      rows.push([
         o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         fmtDate(it.purchaseDate ?? o.createdAt),
         "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
@@ -179,17 +177,18 @@ function buildMonthValues(orders: OrderFull[]): (string | number)[][] {
       ]);
     });
   }
-  return [
-    ["", "", "", "", "", "", "TỔNG TT", totalAll],
-    ["", "", "", "", "", "", "CỌC", depositAll],
-    ["", "", "", "", "", "", "NỢ", totalAll - depositAll],
-    [],
-    ORDER_HEADER,
-    ...dataRows,
-  ];
+  return rows;
 }
 
-// Dựng lại các tab tháng ("Tháng N") trong file Sheet riêng của khách.
+// Dò dòng tiêu đề (ô A == "Mã Link") trong tab; trả 0 nếu không thấy.
+async function findHeaderRow(sid: string, tab: string): Promise<number> {
+  const data = (await apiSheet(sid, `/values/${encodeURIComponent(tab)}!A1:A20`, "GET")) as { values?: string[][] };
+  const rows = data.values ?? [];
+  for (let i = 0; i < rows.length; i++) if ((rows[i]?.[0] ?? "").trim() === "Mã Link") return i + 1;
+  return 0;
+}
+
+// Điền data đơn vào tab tháng (tên = số tháng) trong file khách, giữ nguyên template.
 export async function syncCustomerOrders(customerId: string): Promise<void> {
   if (!saEnabled()) return;
   try {
@@ -204,11 +203,19 @@ export async function syncCustomerOrders(customerId: string): Promise<void> {
       (byMonth.get(m) ?? byMonth.set(m, []).get(m)!).push(o);
     }
     for (const [m, list] of byMonth) {
-      const tab = `Tháng ${m}`;
+      const tab = String(m);
       await ensureNamedTab(sid, tab);
       const t = encodeURIComponent(tab);
-      await apiSheet(sid, `/values/${t}!A1:N100000:clear`, "POST", {});
-      await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: buildMonthValues(list) });
+      let header = await findHeaderRow(sid, tab);
+      if (!header) {
+        // Tab chưa có template -> tự ghi 1 dòng tiêu đề ở dòng 1
+        await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [ORDER_HEADER] });
+        header = 1;
+      }
+      const start = header + 1;
+      await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
+      const rows = buildDataRows(list);
+      if (rows.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: rows });
     }
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);

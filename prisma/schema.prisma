@@ -103,6 +103,7 @@ model Customer {
   phone   String?
   address String?
   note    String?
+  sheetId String? @map("sheet_id")
   createdAt DateTime @default(now()) @map("created_at")
   orders  Order[]
 

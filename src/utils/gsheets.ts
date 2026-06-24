@@ -9,6 +9,16 @@ const SHEET_ID = process.env.GSHEET_ID;
 const TAB = process.env.GSHEET_TAB ?? "Tracking";
 
 export const gsheetsEnabled = () => Boolean(SA_EMAIL && SA_KEY && SHEET_ID);
+const saEnabled = () => Boolean(SA_EMAIL && SA_KEY);
+const CUSTOMER_TAB = "Hệ thống";
+
+// Lấy spreadsheet ID từ link hoặc chính ID
+export function parseSheetId(input?: string | null): string | null {
+  if (!input) return null;
+  const m = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  return /^[a-zA-Z0-9_-]{20,}$/.test(input.trim()) ? input.trim() : null;
+}
 
 const HEADER = ["ID", "Mã tracking", "Tên (JP)", "Cân (kg)", "Đơn giá đ/kg", "Thành tiền VND", "Tracking VN", "Đơn (orderId)", "Trạng thái", "Cập nhật"];
 
@@ -33,9 +43,9 @@ async function getToken(): Promise<string> {
   return data.access_token;
 }
 
-async function api(path: string, method: string, body?: unknown) {
+async function apiSheet(sid: string, path: string, method: string, body?: unknown) {
   const token = await getToken();
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}${path}`, {
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}${path}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -43,6 +53,7 @@ async function api(path: string, method: string, body?: unknown) {
   if (!res.ok) throw new Error(`GSHEET_API ${method} ${path} -> ${res.status} ${await res.text()}`);
   return res.json();
 }
+const api = (path: string, method: string, body?: unknown) => apiSheet(SHEET_ID!, path, method, body);
 
 interface TrackingRow {
   id: string; code: string; jpName?: unknown; jpWeightKg?: unknown;
@@ -117,28 +128,26 @@ const ORDER_HEADER = [
   "% Công", "Tổng tiền (¥)", "Tỷ giá (Yên)", "Tổng tiền KH quy đổi", "Phụ thu- VND", "Cân-Kg", "Đơn giá vận chuyển",
 ];
 
-function tabName(name: string): string {
-  return (name || "Khách").replace(/[:\\/?*\[\]]/g, " ").trim().slice(0, 90) || "Khách";
-}
 function fmtDate(d: Date | null | undefined): string {
   if (!d) return "";
   const dt = new Date(d);
   return `${String(dt.getDate()).padStart(2, "0")}/${String(dt.getMonth() + 1).padStart(2, "0")}/${dt.getFullYear()}`;
 }
 
-async function ensureNamedTab(title: string): Promise<void> {
-  const meta = (await api(`?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+async function ensureNamedTab(sid: string, title: string): Promise<void> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
   if (!meta.sheets?.some((s) => s.properties.title === title)) {
-    await api(`:batchUpdate`, "POST", { requests: [{ addSheet: { properties: { title: title } } }] });
+    await apiSheet(sid, `:batchUpdate`, "POST", { requests: [{ addSheet: { properties: { title: title } } }] });
   }
 }
 
-// Dựng lại toàn bộ tab của 1 khách từ DB (đảm bảo khớp, có dòng TỔNG/CỌC/NỢ).
+// Dựng lại tab "Hệ thống" trong file Sheet riêng của khách (customer.sheetId).
 export async function syncCustomerOrders(customerId: string): Promise<void> {
-  if (!gsheetsEnabled()) return;
+  if (!saEnabled()) return;
   try {
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
-    if (!customer) return;
+    if (!customer?.sheetId) return;
+    const sid = customer.sheetId;
     const orders = await prisma.order.findMany({
       where: { customerId },
       orderBy: { createdAt: "asc" },
@@ -175,10 +184,9 @@ export async function syncCustomerOrders(customerId: string): Promise<void> {
       });
     }
 
-    const title = tabName(customer.name);
-    await ensureNamedTab(title);
-    const t = encodeURIComponent(title);
-    await api(`/values/${t}!A1:N100000:clear`, "POST", {});
+    await ensureNamedTab(sid, CUSTOMER_TAB);
+    const t = encodeURIComponent(CUSTOMER_TAB);
+    await apiSheet(sid, `/values/${t}!A1:N100000:clear`, "POST", {});
     const top = [
       ["", "", "", "", "", "", "TỔNG TT", totalAll],
       ["", "", "", "", "", "", "CỌC", depositAll],
@@ -186,7 +194,7 @@ export async function syncCustomerOrders(customerId: string): Promise<void> {
       [],
       ORDER_HEADER,
     ];
-    await api(`/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [...top, ...dataRows] });
+    await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [...top, ...dataRows] });
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);
   }

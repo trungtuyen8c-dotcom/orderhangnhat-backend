@@ -5,6 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
+import { parseSheetId } from "../../utils/gsheets.js";
 
 export const customersRouter = Router();
 customersRouter.use(authenticate);
@@ -27,7 +28,14 @@ const schema = z.object({
   phone: z.string().optional(),
   address: z.string().optional(),
   note: z.string().optional(),
+  sheetUrl: z.string().optional(),
 });
+
+function withSheet(d: Record<string, unknown>) {
+  const { sheetUrl, ...rest } = d as any;
+  if (sheetUrl !== undefined) rest.sheetId = parseSheetId(sheetUrl);
+  return rest;
+}
 
 // Sinh mã KH-0001 tăng dần
 async function nextCustomerCode(): Promise<string> {
@@ -44,7 +52,7 @@ customersRouter.post("/", authorize("customers.create"), async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const code = await nextCustomerCode();
-  const c = await prisma.customer.create({ data: { id: uuid(), code, ...parsed.data } });
+  const c = await prisma.customer.create({ data: { id: uuid(), code, ...withSheet(parsed.data) } });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "customer.created" });
   res.status(201).json(c);
 });
@@ -52,7 +60,7 @@ customersRouter.post("/", authorize("customers.create"), async (req, res) => {
 customersRouter.patch("/:id", authorize("customers.update"), async (req, res) => {
   const parsed = schema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const c = await prisma.customer.update({ where: { id: req.params.id }, data: parsed.data });
+  const c = await prisma.customer.update({ where: { id: req.params.id }, data: withSheet(parsed.data) });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "customer.updated" });
   res.json(c);
 });

@@ -180,6 +180,16 @@ function buildDataRows(orders: OrderFull[]): (string | number)[][] {
   return rows;
 }
 
+// Tìm tab ứng với tháng m, chấp nhận tên "7","07","tháng 7","Tháng 7","T7"...
+async function findMonthTab(sid: string, m: number): Promise<string | null> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  for (const s of meta.sheets ?? []) {
+    const mm = s.properties.title.trim().toLowerCase().match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})$/);
+    if (mm && Number(mm[1]) === m) return s.properties.title;
+  }
+  return null;
+}
+
 // Dò dòng tiêu đề (ô A == "Mã Link") trong tab; trả 0 nếu không thấy.
 async function findHeaderRow(sid: string, tab: string): Promise<number> {
   const data = (await apiSheet(sid, `/values/${encodeURIComponent(tab)}!A1:A20`, "GET")) as { values?: string[][] };
@@ -203,8 +213,8 @@ export async function syncCustomerOrders(customerId: string): Promise<void> {
       (byMonth.get(m) ?? byMonth.set(m, []).get(m)!).push(o);
     }
     for (const [m, list] of byMonth) {
-      const tab = String(m);
-      await ensureNamedTab(sid, tab);
+      let tab = await findMonthTab(sid, m);
+      if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
       let header = await findHeaderRow(sid, tab);
       if (!header) {

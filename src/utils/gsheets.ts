@@ -155,9 +155,10 @@ function orderMonth(o: OrderFull): number {
   return new Date(d).getMonth() + 1;
 }
 
-// Chỉ các dòng data A→N (không header, không summary) - điền vào template có sẵn.
-function buildDataRows(orders: OrderFull[]): (string | number)[][] {
-  const rows: (string | number)[][] = [];
+// Dòng data: A→N (điền vào template) + Q,R (mã tracking, đánh giá) - cùng thứ tự dòng.
+function buildRows(orders: OrderFull[]): { an: (string | number)[][]; qr: string[][] } {
+  const an: (string | number)[][] = [];
+  const qr: string[][] = [];
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
@@ -165,7 +166,7 @@ function buildDataRows(orders: OrderFull[]): (string | number)[][] {
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
       const trk = o.trackings[idx];
-      rows.push([
+      an.push([
         o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         fmtDate(it.purchaseDate ?? o.createdAt),
         "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
@@ -175,9 +176,10 @@ function buildDataRows(orders: OrderFull[]): (string | number)[][] {
         trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
         trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
       ]);
+      qr.push([String(trk?.code ?? ""), String(trk?.review ?? "")]);
     });
   }
-  return rows;
+  return { an, qr };
 }
 
 // Tìm tab ứng với tháng m, chấp nhận tên "7","07","tháng 7","Tháng 7","T7"...
@@ -232,9 +234,13 @@ async function runCustomerSync(customerId: string): Promise<void> {
         header = 1;
       }
       const start = header + 1;
+      const { an, qr } = buildRows(list);
+      // A→N: data (giữ O,P là công thức của template)
       await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
-      const rows = buildDataRows(list);
-      if (rows.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: rows });
+      if (an.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: an });
+      // Q,R: mã tracking + đánh giá (bỏ qua O,P)
+      await apiSheet(sid, `/values/${t}!Q${start}:R100000:clear`, "POST", {});
+      if (qr.length) await apiSheet(sid, `/values/${t}!Q${start}?valueInputOption=USER_ENTERED`, "PUT", { values: qr });
     }
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);

@@ -201,6 +201,7 @@ model Tracking {
   vnWeightKg Decimal? @map("vn_weight_kg") @db.Decimal(8, 3)
   unitPriceVndPerKg Decimal? @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
   vnTrackingCode String? @map("vn_tracking_code")
+  review     String?
   shipmentId String?  @map("shipment_id") @db.Uuid
   status     String   @default("new")
   createdAt  DateTime @default(now()) @map("created_at")

@@ -7,7 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
-import { syncTracking, removeTrackingRow } from "../../utils/gsheets.js";
+import { syncTracking, removeTrackingRow, syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const trackingRouter = Router();
 trackingRouter.use(authenticate);
@@ -67,6 +67,7 @@ const updateSchema = z.object({
   vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
   vnTrackingCode: z.string().optional(),
+  review: z.string().nullable().optional(),
   shipmentId: z.string().uuid().optional(),
   status: z.string().optional(),
 });
@@ -75,7 +76,7 @@ trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => 
   const p = updateSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const t = await prisma.tracking.update({ where: { id: req.params.id }, data: p.data });
-  if (t.orderId) await recomputeOrderTotals(t.orderId);
+  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void syncTracking(t);
   res.json(t);
 });

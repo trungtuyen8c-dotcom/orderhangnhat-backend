@@ -10,7 +10,6 @@ const TAB = process.env.GSHEET_TAB ?? "Tracking";
 
 export const gsheetsEnabled = () => Boolean(SA_EMAIL && SA_KEY && SHEET_ID);
 const saEnabled = () => Boolean(SA_EMAIL && SA_KEY);
-const CUSTOMER_TAB = "Hệ thống";
 
 // Lấy spreadsheet ID từ link hoặc chính ID
 export function parseSheetId(input?: string | null): string | null {
@@ -141,60 +140,76 @@ async function ensureNamedTab(sid: string, title: string): Promise<void> {
   }
 }
 
-// Dựng lại tab "Hệ thống" trong file Sheet riêng của khách (customer.sheetId).
+type OrderFull = Awaited<ReturnType<typeof loadCustomerOrders>>[number];
+function loadCustomerOrders(customerId: string) {
+  return prisma.order.findMany({
+    where: { customerId },
+    orderBy: { createdAt: "asc" },
+    include: { items: true, trackings: true, payments: true },
+  });
+}
+
+// Tháng của đơn theo ngày đặt (món đầu) hoặc ngày tạo
+function orderMonth(o: OrderFull): number {
+  const d = o.items[0]?.purchaseDate ?? o.createdAt;
+  return new Date(d).getMonth() + 1;
+}
+
+function buildMonthValues(orders: OrderFull[]): (string | number)[][] {
+  let totalAll = 0, depositAll = 0;
+  const dataRows: (string | number)[][] = [];
+  for (const o of orders) {
+    const rate = Number(o.exchangeRate ?? 0);
+    totalAll += Number(o.totalVnd ?? 0);
+    depositAll += o.payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
+    const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
+    o.items.forEach((it, idx) => {
+      const giaWeb = it.qty * Number(it.unitPriceJpy);
+      const ship = Number(it.shipJpy ?? 0);
+      const trk = o.trackings[idx];
+      dataRows.push([
+        o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
+        fmtDate(it.purchaseDate ?? o.createdAt),
+        "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
+        giaWeb || "", ship || "", "", giaWeb + ship, rate || "",
+        rate ? Math.round((giaWeb + ship) * rate) : "",
+        idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
+        trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
+        trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
+      ]);
+    });
+  }
+  return [
+    ["", "", "", "", "", "", "TỔNG TT", totalAll],
+    ["", "", "", "", "", "", "CỌC", depositAll],
+    ["", "", "", "", "", "", "NỢ", totalAll - depositAll],
+    [],
+    ORDER_HEADER,
+    ...dataRows,
+  ];
+}
+
+// Dựng lại các tab tháng ("Tháng N") trong file Sheet riêng của khách.
 export async function syncCustomerOrders(customerId: string): Promise<void> {
   if (!saEnabled()) return;
   try {
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer?.sheetId) return;
     const sid = customer.sheetId;
-    const orders = await prisma.order.findMany({
-      where: { customerId },
-      orderBy: { createdAt: "asc" },
-      include: { items: true, trackings: true, payments: true },
-    });
+    const orders = await loadCustomerOrders(customerId);
 
-    let totalAll = 0, depositAll = 0;
-    const dataRows: (string | number)[][] = [];
+    const byMonth = new Map<number, OrderFull[]>();
     for (const o of orders) {
-      const rate = Number(o.exchangeRate ?? 0);
-      totalAll += Number(o.totalVnd ?? 0);
-      depositAll += o.payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
-      const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
-      o.items.forEach((it, idx) => {
-        const giaWeb = it.qty * Number(it.unitPriceJpy);
-        const ship = Number(it.shipJpy ?? 0);
-        const trk = o.trackings[idx];
-        dataRows.push([
-          o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
-          fmtDate(it.purchaseDate ?? o.createdAt),
-          "",
-          String(it.url ?? ""),
-          String(it.paymentMethod ?? ""),
-          giaWeb || "",
-          ship || "",
-          "",
-          giaWeb + ship,
-          rate || "",
-          rate ? Math.round((giaWeb + ship) * rate) : "",
-          idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
-          trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
-          trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
-        ]);
-      });
+      const m = orderMonth(o);
+      (byMonth.get(m) ?? byMonth.set(m, []).get(m)!).push(o);
     }
-
-    await ensureNamedTab(sid, CUSTOMER_TAB);
-    const t = encodeURIComponent(CUSTOMER_TAB);
-    await apiSheet(sid, `/values/${t}!A1:N100000:clear`, "POST", {});
-    const top = [
-      ["", "", "", "", "", "", "TỔNG TT", totalAll],
-      ["", "", "", "", "", "", "CỌC", depositAll],
-      ["", "", "", "", "", "", "NỢ", totalAll - depositAll],
-      [],
-      ORDER_HEADER,
-    ];
-    await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [...top, ...dataRows] });
+    for (const [m, list] of byMonth) {
+      const tab = `Tháng ${m}`;
+      await ensureNamedTab(sid, tab);
+      const t = encodeURIComponent(tab);
+      await apiSheet(sid, `/values/${t}!A1:N100000:clear`, "POST", {});
+      await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: buildMonthValues(list) });
+    }
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);
   }

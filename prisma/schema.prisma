@@ -292,6 +292,27 @@ model Wallet {
   @@map("wallets")
 }
 
+// Quỹ tổng (vốn mua hàng, tính bằng JPY)
+model Fund {
+  id        String   @id @default("main")
+  balance   Decimal  @default(0) @db.Decimal(16, 2)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("fund")
+}
+
+model FundTxn {
+  id        String   @id @default(uuid()) @db.Uuid
+  type      String   // topup | allocate
+  amountYen Decimal  @map("amount_yen") @db.Decimal(16, 2)
+  rate      Decimal? @db.Decimal(12, 4)
+  walletId  String?  @map("wallet_id") @db.Uuid
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("fund_txns")
+}
+
 model WalletTxn {
   id           String   @id @default(uuid()) @db.Uuid
   walletId     String   @map("wallet_id") @db.Uuid

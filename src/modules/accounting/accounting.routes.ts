@@ -119,12 +119,49 @@ accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req,
   res.json(wallets);
 });
 
-const walletSchema = z.object({ name: z.string().min(1), currency: z.string().default("VND") });
+// ===== Quỹ tổng (JPY) =====
+async function getFund() {
+  return prisma.fund.upsert({ where: { id: "main" }, update: {}, create: { id: "main", balance: 0 } });
+}
+
+accountingRouter.get("/fund", authorize("accounting.reconcile"), async (_req, res) => {
+  const fund = await getFund();
+  const txns = await prisma.fundTxn.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
+  res.json({ balance: Number(fund.balance), txns });
+});
+
+const topupSchema = z.object({ amountYen: z.number().positive(), rate: z.number().positive().optional(), note: z.string().optional() });
+accountingRouter.post("/fund/topup", authorize("wallets.manage"), async (req, res) => {
+  const p = topupSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await getFund();
+  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: { increment: p.data.amountYen } } });
+  await prisma.fundTxn.create({ data: { id: uuid(), type: "topup", amountYen: p.data.amountYen, rate: p.data.rate ?? null, note: p.data.note ?? null } });
+  await logAudit({ actorId: req.user!.id, action: "fund.topup", metadata: { amountYen: p.data.amountYen, rate: p.data.rate } });
+  res.json({ balance: Number(fund.balance) });
+});
+
+const allocSchema = z.object({ walletId: z.string().uuid(), amountYen: z.number().positive(), note: z.string().optional() });
+accountingRouter.post("/fund/allocate", authorize("wallets.manage"), async (req, res) => {
+  const p = allocSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+  await getFund();
+  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: { decrement: p.data.amountYen } } });
+  await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: p.data.amountYen } } });
+  await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: p.data.amountYen, type: "fund_allocate" } });
+  await prisma.fundTxn.create({ data: { id: uuid(), type: "allocate", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null } });
+  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "fund.allocate", metadata: { amountYen: p.data.amountYen } });
+  res.json({ balance: Number(fund.balance) });
+});
+
+const walletSchema = z.object({ name: z.string().min(1), currency: z.string().default("VND"), balance: z.number().optional() });
 accountingRouter.post("/wallets", authorize("wallets.manage"), async (req, res) => {
   const p = walletSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   if (await prisma.wallet.findUnique({ where: { name: p.data.name } })) return res.status(409).json({ error: "WALLET_EXISTS" });
-  const w = await prisma.wallet.create({ data: { id: uuid(), name: p.data.name, currency: p.data.currency } });
+  const w = await prisma.wallet.create({ data: { id: uuid(), name: p.data.name, currency: p.data.currency, balance: p.data.balance ?? 0 } });
   await logAudit({ actorId: req.user!.id, targetId: w.id, action: "wallet.created" });
   res.status(201).json(w);
 });

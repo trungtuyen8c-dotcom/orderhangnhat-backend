@@ -229,18 +229,30 @@ function isTrackingCode(v: string): boolean {
 }
 
 // Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
+// Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
 export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  const dateTabs = (meta.sheets ?? [])
+    .map((s) => ({ title: s.properties.title, date: tabDate(s.properties.title) }))
+    .filter((t): t is { title: string; date: Date } => t.date != null);
+  if (!dateTabs.length) return [];
+
   const out: { code: string; date: Date | null }[] = [];
-  for (const s of meta.sheets ?? []) {
-    const date = tabDate(s.properties.title);
-    if (!date) continue; // bỏ TRANG MẪU và tab không phải ngày
-    const tab = encodeURIComponent(s.properties.title);
-    const data = (await apiSheet(sid, `/values/${tab}!E1:E100000`, "GET")) as { values?: string[][] };
-    for (const row of data.values ?? []) {
-      const code = (row?.[0] ?? "").trim();
-      if (isTrackingCode(code)) out.push({ code, date });
-    }
+  const CHUNK = 50;
+  for (let i = 0; i < dateTabs.length; i += CHUNK) {
+    const batch = dateTabs.slice(i, i + CHUNK);
+    const ranges = batch
+      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!E1:E100000`)}`)
+      .join("&");
+    const data = (await apiSheet(sid, `/values:batchGet?${ranges}&majorDimension=COLUMNS`, "GET")) as { valueRanges?: { values?: string[][] }[] };
+    (data.valueRanges ?? []).forEach((vr, idx) => {
+      const date = batch[idx]?.date ?? null;
+      const col = vr.values?.[0] ?? []; // majorDimension=COLUMNS -> values[0] là cột E
+      for (const cell of col) {
+        const code = (cell ?? "").trim();
+        if (isTrackingCode(code)) out.push({ code, date });
+      }
+    });
   }
   return out;
 }

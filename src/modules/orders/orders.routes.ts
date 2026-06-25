@@ -131,6 +131,9 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     await prisma.tracking.createMany({
       data: d.trackings.map((t) => ({ id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" })),
     });
+  } else {
+    // Tự tạo 1 tracking trống gắn đơn -> hiện sẵn ở bảng Chuyến, điền mã tay sau
+    await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: "", status: "linked" } });
   }
   const totals = await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);

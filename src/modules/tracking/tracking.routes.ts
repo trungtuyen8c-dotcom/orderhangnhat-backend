@@ -63,6 +63,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
 
 // Kho Nhật: quét ra tên + giá + cân, gán chuyến
 const updateSchema = z.object({
+  code: z.string().optional(),
   jpName: z.string().optional(),
   jpPriceJpy: z.number().nonnegative().optional(),
   jpWeightKg: z.number().nonnegative().optional(),

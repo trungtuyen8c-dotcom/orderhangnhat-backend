@@ -8,12 +8,32 @@ import { logAudit } from "../../utils/audit.js";
 import { syncTracking, syncPackedFromWarehouse, parseSheetId } from "../../utils/gsheets.js";
 
 export const warehouseRouter = Router();
+
+// Webhook cho Apps Script (KHÔNG qua JWT) — xác thực bằng key bí mật. Đặt TRƯỚC authenticate.
+warehouseRouter.post("/sync-hook", async (req, res) => {
+  const key = String(req.query.key ?? req.headers["x-hook-key"] ?? "");
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
+  if (!cfg?.value || key !== cfg.value) return res.status(401).json({ error: "BAD_KEY" });
+  const r = await syncPackedFromWarehouse();
+  res.json(r);
+});
+
 warehouseRouter.use(authenticate);
 
+async function getHookKey(): Promise<string> {
+  const existing = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
+  if (existing?.value) return existing.value;
+  const k = (uuid() + uuid()).replace(/-/g, "");
+  await prisma.appConfig.upsert({ where: { key: "warehouse_hook_key" }, update: { value: k }, create: { key: "warehouse_hook_key", value: k } });
+  return k;
+}
+
 // Link file kho (bên đóng hàng quét tracking) — lưu trong AppConfig
-warehouseRouter.get("/pack-config", authorize("system.manage_settings"), async (_req, res) => {
+warehouseRouter.get("/pack-config", authorize("system.manage_settings"), async (req, res) => {
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
-  res.json({ sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null });
+  const hookKey = await getHookKey();
+  const hookUrl = `${req.protocol}://${req.get("host")}/api/warehouse/sync-hook?key=${hookKey}`;
+  res.json({ sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null, hookUrl });
 });
 
 const packCfgSchema = z.object({ sheetUrl: z.string().nullable().optional() });

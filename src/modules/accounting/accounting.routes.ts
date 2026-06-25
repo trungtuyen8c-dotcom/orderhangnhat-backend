@@ -278,6 +278,20 @@ accountingRouter.post("/fund/allocate", authorize("wallets.manage"), async (req,
   res.json({ balance: Number(fund.balance) });
 });
 
+// Cashback (tiền mua hàng được hoàn, JPY) -> cộng vào 1 thẻ, tách riêng để báo cáo
+const cashbackSchema = z.object({ walletId: z.string().uuid(), amountYen: z.number().positive(), note: z.string().optional() });
+accountingRouter.post("/cashback", authorize("wallets.manage"), async (req, res) => {
+  const p = cashbackSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+  const updated = await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: p.data.amountYen } } });
+  await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: p.data.amountYen, type: "cashback", statementRef: p.data.note || null } });
+  await prisma.fundTxn.create({ data: { id: uuid(), type: "cashback", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null } });
+  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "wallet.cashback", metadata: { amountYen: p.data.amountYen } });
+  res.json({ balance: Number(updated.balance) });
+});
+
 const walletSchema = z.object({ name: z.string().min(1), currency: z.string().default("VND"), balance: z.number().optional() });
 accountingRouter.post("/wallets", authorize("wallets.manage"), async (req, res) => {
   const p = walletSchema.safeParse(req.body);

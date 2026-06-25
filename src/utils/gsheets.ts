@@ -235,14 +235,14 @@ function isTrackingCode(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null }[]> {
+export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null; tab: string; row: number }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
   const dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, date: tabDate(s.properties.title) }))
     .filter((t): t is { title: string; date: Date } => t.date != null);
   if (!dateTabs.length) return [];
 
-  const out: { code: string; date: Date | null }[] = [];
+  const out: { code: string; date: Date | null; tab: string; row: number }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
@@ -251,12 +251,13 @@ export async function readWarehousePackRows(sid: string): Promise<{ code: string
       .join("&");
     const data = (await apiSheet(sid, `/values:batchGet?${ranges}&majorDimension=COLUMNS`, "GET")) as { valueRanges?: { values?: string[][] }[] };
     (data.valueRanges ?? []).forEach((vr, idx) => {
+      const tab = batch[idx]?.title ?? "";
       const date = batch[idx]?.date ?? null;
       const col = vr.values?.[0] ?? []; // majorDimension=COLUMNS -> values[0] là cột E
-      for (const cell of col) {
+      col.forEach((cell, j) => {
         const code = (cell ?? "").trim();
-        if (isTrackingCode(code)) out.push({ code, date });
-      }
+        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1 });
+      });
     });
   }
   return out;
@@ -273,7 +274,8 @@ export async function syncPackedFromWarehouse(): Promise<{ matched: number; upda
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
   if (!codes.length) return { matched: 0, updated: 0 };
-  const trks = await prisma.tracking.findMany({ where: { code: { in: codes } } });
+  const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true } } } });
+  const trkByCode = new Map(trks.map((t) => [t.code, t]));
   let updated = 0;
   const customers = new Set<string>();
   for (const t of trks) {
@@ -282,13 +284,29 @@ export async function syncPackedFromWarehouse(): Promise<{ matched: number; upda
     await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
     void syncTracking({ ...t, packedAt } as TrackingRow);
     updated++;
-    if (t.orderId) {
-      await recomputeOrderTotals(t.orderId);
-      const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } });
-      if (o) customers.add(o.customerId);
-    }
+    if (t.order) { await recomputeOrderTotals(t.orderId!); customers.add(t.order.customerId); }
   }
   for (const c of customers) await syncCustomerOrders(c);
+
+  // Ghi ngược invoice: Tên hàng (F) + Giá ¥ (G) vào đúng dòng mã trong file kho (cần SA quyền Editor)
+  try {
+    const data: { range: string; values: (string | number)[][] }[] = [];
+    for (const r of rows) {
+      const t = trkByCode.get(r.code);
+      const items = t?.order?.items ?? [];
+      if (!items.length) continue;
+      const name = items.map((i) => i.name).join(" + ");
+      const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+      data.push({ range: `'${r.tab.replace(/'/g, "''")}'!F${r.row}:G${r.row}`, values: [[name, price]] });
+    }
+    const CW = 100;
+    for (let i = 0; i < data.length; i += CW) {
+      await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data: data.slice(i, i + CW) });
+    }
+  } catch (e) {
+    console.error("[gsheets] writeInvoiceToWarehouse", (e as Error).message);
+  }
+
   return { matched: trks.length, updated };
 }
 

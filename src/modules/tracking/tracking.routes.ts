@@ -45,6 +45,8 @@ const createSchema = z.object({
   vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
   vnTrackingCode: z.string().optional(),
+  url: z.string().optional(),
+  packedAt: z.coerce.date().optional(),
   shipmentId: z.string().uuid().optional(),
 });
 
@@ -68,6 +70,8 @@ const updateSchema = z.object({
   unitPriceVndPerKg: z.number().nonnegative().optional(),
   vnTrackingCode: z.string().optional(),
   review: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+  packedAt: z.coerce.date().nullable().optional(),
   shipmentId: z.string().uuid().optional(),
   status: z.string().optional(),
 });

@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { prisma } from "../db.js";
 import { redis } from "../redis.js";
+import { syncPackedFromWarehouse } from "../utils/gsheets.js";
 
 // Cảnh báo: đơn quá 7 ngày kể từ thanh toán mà chưa có tracking
 export async function scanLateOrders(): Promise<string[]> {
@@ -23,4 +24,8 @@ export function startJobs(): void {
   // chạy mỗi giờ
   cron.schedule("0 * * * *", () => { scanLateOrders().catch((e) => console.error("alert job failed", e)); });
   scanLateOrders().catch(() => {});
+  // quét file kho mỗi 15 phút: mã trùng -> đóng hàng về (cam)
+  cron.schedule("*/15 * * * *", () => {
+    syncPackedFromWarehouse().then((r) => { if (r.updated) console.log(`[warehouse] đóng hàng về ${r.updated} tracking`); }).catch((e) => console.error("pack scan failed", e));
+  });
 }

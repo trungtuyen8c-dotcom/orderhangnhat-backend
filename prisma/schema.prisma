@@ -329,6 +329,35 @@ model WalletTxn {
   @@map("wallet_txns")
 }
 
+// Cọc cục theo khách (không gắn đơn) — khách nạp 15tr/25tr, clear theo tháng
+model CustomerDeposit {
+  id          String    @id @default(uuid()) @db.Uuid
+  customerId  String    @map("customer_id") @db.Uuid
+  amountVnd   Decimal   @map("amount_vnd") @db.Decimal(14, 2)
+  payerName   String?   @map("payer_name")
+  method      String?
+  walletId    String?   @map("wallet_id") @db.Uuid
+  note        String?
+  paidAt      DateTime  @map("paid_at")
+  confirmed   Boolean   @default(false)
+  confirmedBy String?   @map("confirmed_by") @db.Uuid
+  confirmedAt DateTime? @map("confirmed_at")
+  recordedBy  String?   @map("recorded_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@index([confirmed])
+  @@map("customer_deposits")
+}
+
+model AppConfig {
+  key       String   @id
+  value     String?
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_config")
+}
+
 model WeightRecon {
   id        String   @id @default(uuid()) @db.Uuid
   orderId   String   @map("order_id") @db.Uuid

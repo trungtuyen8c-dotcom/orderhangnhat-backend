@@ -5,10 +5,34 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { syncTracking } from "../../utils/gsheets.js";
+import { syncTracking, syncPackedFromWarehouse, parseSheetId } from "../../utils/gsheets.js";
 
 export const warehouseRouter = Router();
 warehouseRouter.use(authenticate);
+
+// Link file kho (bên đóng hàng quét tracking) — lưu trong AppConfig
+warehouseRouter.get("/pack-config", authorize("system.manage_settings"), async (_req, res) => {
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
+  res.json({ sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null });
+});
+
+const packCfgSchema = z.object({ sheetUrl: z.string().nullable().optional() });
+warehouseRouter.put("/pack-config", authorize("system.manage_settings"), async (req, res) => {
+  const p = packCfgSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const url = (p.data.sheetUrl ?? "").trim();
+  if (url && !parseSheetId(url)) return res.status(400).json({ error: "BAD_URL", message: "Link Google Sheet không hợp lệ" });
+  await prisma.appConfig.upsert({ where: { key: "warehouse_sheet_id" }, update: { value: url }, create: { key: "warehouse_sheet_id", value: url } });
+  await logAudit({ actorId: req.user!.id, action: "warehouse.pack_config_set" });
+  res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
+});
+
+// Quét file kho ngay: mã trùng -> đóng hàng về (cam)
+warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), async (req, res) => {
+  const r = await syncPackedFromWarehouse();
+  await logAudit({ actorId: req.user!.id, action: "warehouse.sync_pack", metadata: r });
+  res.json(r);
+});
 
 // Kho VN: nhập mã tracking nội địa VN cho 1 tracking
 const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });

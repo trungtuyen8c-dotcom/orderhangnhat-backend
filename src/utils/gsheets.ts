@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { prisma } from "../db.js";
+import { recomputeOrderTotals } from "./orderTotals.js";
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
 // Bật khi có đủ env: GOOGLE_SA_EMAIL, GOOGLE_SA_PRIVATE_KEY, GSHEET_ID (GSHEET_TAB mặc định "Tracking").
@@ -210,6 +211,77 @@ export function syncCustomerOrders(customerId: string): Promise<void> {
   return next;
 }
 
+// ===== Quét file kho (bên đóng hàng): mã trùng tracking -> set "Đóng hàng về" (cam) =====
+// Tên tab kiểu "26.6" / "8.6" = ngày.tháng -> ngày đóng. Bỏ tab không phải ngày (vd "TRANG MẪU").
+function tabDate(title: string): Date | null {
+  const m = title.trim().match(/^0*(\d{1,2})[.\/-]0*(\d{1,2})$/);
+  if (!m) return null;
+  const d = Number(m[1]), mo = Number(m[2]);
+  if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+  const dt = new Date(new Date().getFullYear(), mo - 1, d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
+// Mã tracking hợp lệ: không rỗng, không có dấu cách, >= 8 ký tự chữ-số (bỏ "0", tiêu đề, GK/GH...)
+function isTrackingCode(v: string): boolean {
+  const c = (v ?? "").trim();
+  return c.length >= 8 && /^[A-Za-z0-9._-]+$/.test(c);
+}
+
+// Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
+export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null }[]> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  const out: { code: string; date: Date | null }[] = [];
+  for (const s of meta.sheets ?? []) {
+    const date = tabDate(s.properties.title);
+    if (!date) continue; // bỏ TRANG MẪU và tab không phải ngày
+    const tab = encodeURIComponent(s.properties.title);
+    const data = (await apiSheet(sid, `/values/${tab}!E1:E100000`, "GET")) as { values?: string[][] };
+    for (const row of data.values ?? []) {
+      const code = (row?.[0] ?? "").trim();
+      if (isTrackingCode(code)) out.push({ code, date });
+    }
+  }
+  return out;
+}
+
+// Quét file kho -> tracking nào trùng & chưa đóng thì set packedAt (cam). Trả số khớp / số cập nhật.
+export async function syncPackedFromWarehouse(): Promise<{ matched: number; updated: number }> {
+  if (!saEnabled()) return { matched: 0, updated: 0 };
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
+  const sid = cfg?.value ? parseSheetId(cfg.value) : null;
+  if (!sid) return { matched: 0, updated: 0 };
+  const rows = await readWarehousePackRows(sid);
+  const dateByCode = new Map<string, Date | null>();
+  for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
+  const codes = [...dateByCode.keys()];
+  if (!codes.length) return { matched: 0, updated: 0 };
+  const trks = await prisma.tracking.findMany({ where: { code: { in: codes } } });
+  let updated = 0;
+  const customers = new Set<string>();
+  for (const t of trks) {
+    if (t.packedAt) continue;
+    const packedAt = dateByCode.get(t.code) ?? new Date();
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
+    void syncTracking({ ...t, packedAt } as TrackingRow);
+    updated++;
+    if (t.orderId) {
+      await recomputeOrderTotals(t.orderId);
+      const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } });
+      if (o) customers.add(o.customerId);
+    }
+  }
+  for (const c of customers) await syncCustomerOrders(c);
+  return { matched: trks.length, updated };
+}
+
+// Sổ thu tiền (cọc) cố định cột W:Z, header dòng 5, data từ dòng 6. Cột V (Mã) để khách tự điền.
+// W=Ngày, X=Tên khoản mục, Y=Nội dung, Z=Tiền. 3 ô TỔNG TT/CỌC/NỢ là công thức -> tự nhảy.
+const DEPOSIT_START_ROW = 6;
+function buildDepositRows(deps: { paidAt: Date; note: string | null; amountVnd: unknown }[]): (string | number)[][] {
+  return deps.map((d) => [fmtDate(d.paidAt), "Thu tiền hàng", String(d.note ?? ""), Number(d.amountVnd)]);
+}
+
 async function runCustomerSync(customerId: string): Promise<void> {
   if (!saEnabled()) return;
   try {
@@ -217,30 +289,37 @@ async function runCustomerSync(customerId: string): Promise<void> {
     if (!customer?.sheetId) return;
     const sid = customer.sheetId;
     const orders = await loadCustomerOrders(customerId);
+    const deposits = await prisma.customerDeposit.findMany({ where: { customerId, confirmed: true }, orderBy: { paidAt: "asc" } });
 
-    const byMonth = new Map<number, OrderFull[]>();
-    for (const o of orders) {
-      const m = orderMonth(o);
-      (byMonth.get(m) ?? byMonth.set(m, []).get(m)!).push(o);
-    }
-    for (const [m, list] of byMonth) {
+    const ordersByMonth = new Map<number, OrderFull[]>();
+    for (const o of orders) { const m = orderMonth(o); (ordersByMonth.get(m) ?? ordersByMonth.set(m, []).get(m)!).push(o); }
+    const depsByMonth = new Map<number, typeof deposits>();
+    for (const d of deposits) { const m = new Date(d.paidAt).getMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
+
+    const months = new Set<number>([...ordersByMonth.keys(), ...depsByMonth.keys()]);
+    for (const m of months) {
       let tab = await findMonthTab(sid, m);
       if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
+
+      // ----- Đơn hàng: A→N + Q,R (giữ O,P công thức) -----
+      const list = ordersByMonth.get(m) ?? [];
       let header = await findHeaderRow(sid, tab);
       if (!header) {
-        // Tab chưa có template -> tự ghi 1 dòng tiêu đề ở dòng 1
         await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [ORDER_HEADER] });
         header = 1;
       }
       const start = header + 1;
       const { an, qr } = buildRows(list);
-      // A→N: data (giữ O,P là công thức của template)
       await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
       if (an.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: an });
-      // Q,R: mã tracking + đánh giá (bỏ qua O,P)
       await apiSheet(sid, `/values/${t}!Q${start}:R100000:clear`, "POST", {});
       if (qr.length) await apiSheet(sid, `/values/${t}!Q${start}?valueInputOption=USER_ENTERED`, "PUT", { values: qr });
+
+      // ----- Sổ thu tiền (cọc): W:Z, để trống cột V (Mã) -----
+      const depRows = buildDepositRows(depsByMonth.get(m) ?? []);
+      await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}:Z100000:clear`, "POST", {});
+      if (depRows.length) await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}?valueInputOption=USER_ENTERED`, "PUT", { values: depRows });
     }
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);

@@ -114,6 +114,117 @@ accountingRouter.get("/debts", authorize("orders.read"), async (_req, res) => {
   res.json(rows);
 });
 
+// ===== Ví khách: cọc cục + đối soát theo tháng =====
+// Còn nợ khách = tổng đơn (VND) - (cọc cục + thanh toán theo đơn).
+async function customerLedger(customerId: string) {
+  const orders = await prisma.order.findMany({
+    where: { customerId, status: { not: "cancelled" } },
+    select: { totalVnd: true, createdAt: true },
+  });
+  const deposits = await prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "desc" } });
+  const payments = await prisma.payment.findMany({ where: { order: { customerId } }, select: { amountVnd: true, type: true, createdAt: true } });
+
+  // Chỉ cọc đã xác nhận (tiền thật vào) mới trừ công nợ. Cọc chờ -> pendingTotal.
+  const confirmed = deposits.filter((d) => d.confirmed);
+  const orderTotal = orders.reduce((s, o) => s + Number(o.totalVnd ?? 0), 0);
+  const depositTotal = confirmed.reduce((s, d) => s + Number(d.amountVnd), 0);
+  const pendingTotal = deposits.filter((d) => !d.confirmed).reduce((s, d) => s + Number(d.amountVnd), 0);
+  const paymentTotal = payments.reduce((s, p) => s + (p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd)), 0);
+  const paidTotal = depositTotal + paymentTotal;
+  const debt = orderTotal - paidTotal;
+
+  const mk = (d: Date) => `${new Date(d).getFullYear()}-${String(new Date(d).getMonth() + 1).padStart(2, "0")}`;
+  const months = new Map<string, { order: number; paid: number }>();
+  const bump = (k: string, f: "order" | "paid", v: number) => { const m = months.get(k) ?? { order: 0, paid: 0 }; m[f] += v; months.set(k, m); };
+  for (const o of orders) bump(mk(o.createdAt), "order", Number(o.totalVnd ?? 0));
+  for (const d of confirmed) bump(mk(d.paidAt), "paid", Number(d.amountVnd));
+  for (const p of payments) bump(mk(p.createdAt), "paid", p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd));
+
+  let run = 0;
+  const byMonth = [...months.keys()].sort().map((month) => {
+    const m = months.get(month)!;
+    run += m.paid - m.order;
+    return { month, order: m.order, paid: m.paid, balance: run };
+  });
+  return { orderTotal, depositTotal, pendingTotal, paymentTotal, paidTotal, debt, deposits, byMonth };
+}
+
+accountingRouter.get("/customers/:id/ledger", authorize("orders.read"), async (req, res) => {
+  res.json(await customerLedger(req.params.id));
+});
+
+const depositSchema = z.object({
+  amountVnd: z.number().positive(),
+  payerName: z.string().optional(),
+  method: z.string().optional(),
+  walletId: z.string().uuid().optional(),
+  note: z.string().optional(),
+  paidAt: z.coerce.date().optional(),
+});
+// NV ghi cọc -> trạng thái CHỜ (chưa cộng ví, chưa trừ nợ). Kế toán xác nhận sau.
+accountingRouter.post("/customers/:id/deposits", authorize("accounting.record_payment"), async (req, res) => {
+  const p = depositSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
+  if (!customer) return res.status(404).json({ error: "NOT_FOUND" });
+  if (p.data.walletId) {
+    const w = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+    if (!w) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+    if (w.currency !== "VND") return res.status(400).json({ error: "CURRENCY_MISMATCH", message: "Cọc khách phải vào ví VND" });
+  }
+  const dep = await prisma.customerDeposit.create({
+    data: { id: uuid(), customerId: req.params.id, amountVnd: p.data.amountVnd, payerName: p.data.payerName || null, method: p.data.method || null, walletId: p.data.walletId || null, note: p.data.note || null, paidAt: p.data.paidAt ?? new Date(), recordedBy: req.user!.id },
+  });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.deposit", metadata: { amountVnd: p.data.amountVnd, confirmed: false } });
+  res.status(201).json(dep);
+});
+
+// Kế toán bấm tích: tiền thật đã vào -> cộng ví + trừ nợ
+accountingRouter.post("/customer-deposits/:id/confirm", authorize("accounting.reconcile"), async (req, res) => {
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  if (dep.confirmed) return res.json(dep);
+  const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { confirmed: true, confirmedBy: req.user!.id, confirmedAt: new Date() } });
+  if (dep.walletId) {
+    await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { increment: Number(dep.amountVnd) } } });
+    await prisma.walletTxn.create({ data: { id: uuid(), walletId: dep.walletId, amount: Number(dep.amountVnd), type: "customer_deposit" } });
+  }
+  await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_confirmed", metadata: { amountVnd: Number(dep.amountVnd) } });
+  void syncCustomerOrders(dep.customerId);
+  res.json(updated);
+});
+
+// Hủy xác nhận (bấm nhầm): rút ví ra, về trạng thái chờ
+accountingRouter.post("/customer-deposits/:id/unconfirm", authorize("accounting.reconcile"), async (req, res) => {
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!dep.confirmed) return res.json(dep);
+  const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { confirmed: false, confirmedBy: null, confirmedAt: null } });
+  if (dep.walletId) await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { decrement: Number(dep.amountVnd) } } });
+  await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_unconfirmed" });
+  void syncCustomerOrders(dep.customerId);
+  res.json(updated);
+});
+
+// Danh sách cọc CHỜ xác nhận (kế toán check tối) - kèm tên khách
+accountingRouter.get("/deposits/pending", authorize("accounting.reconcile"), async (_req, res) => {
+  const rows = await prisma.customerDeposit.findMany({ where: { confirmed: false }, orderBy: { createdAt: "desc" }, take: 300 });
+  const ids = [...new Set(rows.map((r) => r.customerId))];
+  const customers = await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, code: true } });
+  const map = new Map(customers.map((c) => [c.id, c]));
+  res.json(rows.map((r) => ({ ...r, customerName: map.get(r.customerId)?.name ?? "?", customerCode: map.get(r.customerId)?.code ?? null })));
+});
+
+accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_payment"), async (req, res) => {
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  if (dep.confirmed && dep.walletId) await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { decrement: Number(dep.amountVnd) } } });
+  await prisma.customerDeposit.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_deleted" });
+  if (dep.confirmed) void syncCustomerOrders(dep.customerId);
+  res.json({ ok: true });
+});
+
 accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {
   const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" } });
   res.json(wallets);

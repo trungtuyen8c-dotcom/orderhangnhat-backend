@@ -225,6 +225,31 @@ accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_p
   res.json({ ok: true });
 });
 
+// Bảng tổng quan: mỗi khách mua bao nhiêu / cọc (đã xác nhận) / còn nợ
+accountingRouter.get("/customer-summary", authorize("orders.read"), async (_req, res) => {
+  const [orderAgg, depAgg, payments, customers] = await Promise.all([
+    prisma.order.groupBy({ by: ["customerId"], where: { status: { not: "cancelled" } }, _sum: { totalVnd: true } }),
+    prisma.customerDeposit.groupBy({ by: ["customerId"], where: { confirmed: true }, _sum: { amountVnd: true } }),
+    prisma.payment.findMany({ select: { amountVnd: true, type: true, order: { select: { customerId: true } } } }),
+    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
+  ]);
+  const cmap = new Map(customers.map((c) => [c.id, c]));
+  const mua = new Map<string, number>();
+  for (const o of orderAgg) mua.set(o.customerId, Number(o._sum.totalVnd ?? 0));
+  const coc = new Map<string, number>();
+  for (const d of depAgg) coc.set(d.customerId, Number(d._sum.amountVnd ?? 0));
+  for (const p of payments) {
+    const cid = p.order?.customerId; if (!cid) continue;
+    coc.set(cid, (coc.get(cid) ?? 0) + (p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd)));
+  }
+  const ids = new Set<string>([...mua.keys(), ...coc.keys()]);
+  const rows = [...ids].map((id) => {
+    const m = mua.get(id) ?? 0, c = coc.get(id) ?? 0;
+    return { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, mua: m, coc: c, no: m - c };
+  }).sort((a, b) => b.no - a.no);
+  res.json(rows);
+});
+
 accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {
   const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" } });
   res.json(wallets);

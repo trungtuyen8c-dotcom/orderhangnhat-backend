@@ -128,10 +128,15 @@ const ORDER_HEADER = [
   "% Công", "Tổng tiền (¥)", "Tỷ giá (Yên)", "Tổng tiền KH quy đổi", "Phụ thu- VND", "Cân-Kg", "Đơn giá vận chuyển",
 ];
 
+// Format theo giờ VN (UTC+7) bất kể timezone của server -> tránh lệch -1 ngày.
+const VN_OFFSET_MS = 7 * 3600 * 1000;
+function vnDate(d: Date | string | number): Date {
+  return new Date(new Date(d).getTime() + VN_OFFSET_MS);
+}
 function fmtDate(d: Date | null | undefined): string {
   if (!d) return "";
-  const dt = new Date(d);
-  return `${String(dt.getDate()).padStart(2, "0")}/${String(dt.getMonth() + 1).padStart(2, "0")}/${dt.getFullYear()}`;
+  const dt = vnDate(d);
+  return `${String(dt.getUTCDate()).padStart(2, "0")}/${String(dt.getUTCMonth() + 1).padStart(2, "0")}/${dt.getUTCFullYear()}`;
 }
 
 async function ensureNamedTab(sid: string, title: string): Promise<void> {
@@ -150,10 +155,10 @@ function loadCustomerOrders(customerId: string) {
   });
 }
 
-// Tháng của đơn theo ngày đặt (món đầu) hoặc ngày tạo
+// Tháng của đơn theo ngày đặt (món đầu) hoặc ngày tạo - theo giờ VN
 function orderMonth(o: OrderFull): number {
   const d = o.items[0]?.purchaseDate ?? o.createdAt;
-  return new Date(d).getMonth() + 1;
+  return vnDate(d).getUTCMonth() + 1;
 }
 
 // Dòng data: A→N (điền vào template) + Q,R (mã tracking, đánh giá) - cùng thứ tự dòng.
@@ -306,7 +311,7 @@ async function runCustomerSync(customerId: string): Promise<void> {
     const ordersByMonth = new Map<number, OrderFull[]>();
     for (const o of orders) { const m = orderMonth(o); (ordersByMonth.get(m) ?? ordersByMonth.set(m, []).get(m)!).push(o); }
     const depsByMonth = new Map<number, typeof deposits>();
-    for (const d of deposits) { const m = new Date(d.paidAt).getMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
+    for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
 
     const months = new Set<number>([...ordersByMonth.keys(), ...depsByMonth.keys()]);
     for (const m of months) {

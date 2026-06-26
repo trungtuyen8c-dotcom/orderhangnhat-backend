@@ -79,6 +79,28 @@ trackingRouter.post("/bulk", authorize("trackings.update"), async (req, res) => 
   res.json({ updated, created, notFound });
 });
 
+// Gom dữ liệu hóa đơn (invoice) từ các tracking được chọn
+const invSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
+trackingRouter.post("/invoice", authorize("trackings.list"), async (req, res) => {
+  const p = invSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const trks = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, include: { order: { include: { items: true, customer: true } } } });
+  const orders = new Map<string, (typeof trks)[number]["order"]>();
+  for (const t of trks) if (t.order) orders.set(t.order.id, t.order);
+  const items: { no: number; name: string; origin: string; unitPriceJpy: number; unit: string; qty: number; amount: number }[] = [];
+  let no = 1, total = 0;
+  for (const o of orders.values()) {
+    for (const it of o!.items) {
+      const amount = it.qty * Number(it.unitPriceJpy);
+      items.push({ no: no++, name: it.name, origin: "", unitPriceJpy: Number(it.unitPriceJpy), unit: "pcs", qty: it.qty, amount });
+      total += amount;
+    }
+  }
+  const consignees = [...new Set([...orders.values()].map((o) => o!.customer?.name).filter(Boolean))] as string[];
+  const addresses = [...new Set([...orders.values()].map((o) => o!.customer?.address).filter(Boolean))] as string[];
+  res.json({ items, total, consignees, addresses });
+});
+
 // NV mua điền tracking
 trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const p = createSchema.safeParse(req.body);

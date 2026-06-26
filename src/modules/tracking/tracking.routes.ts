@@ -50,6 +50,35 @@ const createSchema = z.object({
   shipmentId: z.string().uuid().optional(),
 });
 
+// Backfill: tạo 1 tracking trống cho mọi đơn chưa có tracking (đơn cũ)
+trackingRouter.post("/backfill", authorize("trackings.create"), async (_req, res) => {
+  const orders = await prisma.order.findMany({ where: { status: { not: "cancelled" }, trackings: { none: {} } }, select: { id: true } });
+  if (orders.length) await prisma.tracking.createMany({ data: orders.map((o) => ({ id: uuid(), orderId: o.id, code: "", status: "linked" })) });
+  res.json({ created: orders.length });
+});
+
+// Dán nhiều: gán mã tracking theo mã đơn (mỗi dòng "JA10017<tab>code")
+const bulkSchema = z.object({ items: z.array(z.object({ orderCode: z.string().min(1), code: z.string().min(1) })).min(1) });
+trackingRouter.post("/bulk", authorize("trackings.update"), async (req, res) => {
+  const p = bulkSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  let updated = 0, created = 0;
+  const notFound: string[] = [];
+  const customers = new Set<string>();
+  for (const it of p.data.items) {
+    const order = await prisma.order.findUnique({ where: { code: it.orderCode.trim() }, select: { id: true, customerId: true } });
+    if (!order) { notFound.push(it.orderCode); continue; }
+    const empty = await prisma.tracking.findFirst({ where: { orderId: order.id, code: "" } });
+    if (empty) { await prisma.tracking.update({ where: { id: empty.id }, data: { code: it.code.trim() } }); updated++; }
+    else { await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: it.code.trim(), status: "linked" } }); created++; }
+    customers.add(order.customerId);
+    await recomputeOrderTotals(order.id);
+  }
+  for (const c of customers) void syncCustomerOrders(c);
+  await logAudit({ actorId: req.user!.id, action: "tracking.bulk_assign", metadata: { updated, created, notFound: notFound.length } });
+  res.json({ updated, created, notFound });
+});
+
 // NV mua điền tracking
 trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const p = createSchema.safeParse(req.body);

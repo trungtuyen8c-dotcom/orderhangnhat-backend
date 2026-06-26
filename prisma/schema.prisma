@@ -358,6 +358,24 @@ model AppConfig {
   @@map("app_config")
 }
 
+model BackupRun {
+  id          String    @id @default(uuid()) @db.Uuid
+  kind        String    @default("manual") // manual | scheduled
+  status      String    @default("pending") // pending | running | success | failed
+  scopeDb     Boolean   @default(true) @map("scope_db")
+  scopeFiles  Boolean   @default(true) @map("scope_files")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  sizeBytes   BigInt    @default(0) @map("size_bytes")
+  remotePath  String?   @map("remote_path")
+  error       String?
+  logTail     String?   @map("log_tail")
+  triggeredBy String?   @map("triggered_by") @db.Uuid
+
+  @@index([startedAt])
+  @@map("backup_runs")
+}
+
 model WeightRecon {
   id        String   @id @default(uuid()) @db.Uuid
   orderId   String   @map("order_id") @db.Uuid

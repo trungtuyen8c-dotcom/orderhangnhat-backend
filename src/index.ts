@@ -16,6 +16,7 @@ import { warehouseRouter } from "./modules/warehouse/warehouse.routes.js";
 import { publicRouter } from "./modules/public/public.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { scrapeRouter } from "./modules/scrape/scrape.routes.js";
+import { backupRouter } from "./modules/backup/backup.routes.js";
 
 const app = express();
 app.set("trust proxy", true);
@@ -36,6 +37,7 @@ app.use("/api/accounting", accountingRouter);
 app.use("/api/warehouse", warehouseRouter);
 app.use("/api/public", publicRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/backup", backupRouter);
 
 // Error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

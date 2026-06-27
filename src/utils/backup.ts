@@ -55,7 +55,9 @@ async function listMinioObjects(): Promise<string[]> {
 
 // Chạy 1 backup (async). Cập nhật BackupRun theo tiến trình.
 export async function runBackup(runId: string): Promise<void> {
-  const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15).replace(/(\d{8})(\d{6})/, "$1-$2");
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const ts = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
   const stage = join(STAGE_ROOT, ts);
   const log: string[] = [];
   const add = (m: string) => { log.push(m); };

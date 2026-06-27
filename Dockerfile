@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 # Prisma cần openssl; backup cần pg_dump (postgresql-client) + rclone + tar/gzip
-RUN apt-get update && apt-get install -y openssl postgresql-client rclone tar gzip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y openssl ca-certificates postgresql-client rclone tar gzip && update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

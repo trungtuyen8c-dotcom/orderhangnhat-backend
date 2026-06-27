@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, rm, stat, readdir } from "node:fs/promises";
+import { mkdir, rm, stat, readdir, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { prisma } from "../db.js";
 import { minio, BUCKET } from "../minio.js";
@@ -87,7 +87,14 @@ export async function runBackup(runId: string): Promise<void> {
     await rm(filesDir, { recursive: true, force: true });
     add(`MinIO: ${objs.length} file`);
 
-    // 3) Upload Drive
+    // 3) Config (.env + compose) từ infra mount (nếu có)
+    try {
+      await access("/infra-snapshot");
+      add("archive configs (.env + compose)...");
+      await execFile("tar", ["-czf", join(stage, "configs.tar.gz"), "-C", "/infra-snapshot", "--exclude=.git", "."]);
+    } catch { add("configs: bỏ qua (không thấy /infra-snapshot)"); }
+
+    // 4) Upload Drive
     if (!(await rcloneConnected())) throw new Error("Chưa kết nối Google Drive (chưa dán token)");
     add(`upload -> ${REMOTE}:${REMOTE_DIR}/${ts}`);
     const size = await dirSize(stage);

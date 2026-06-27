@@ -235,14 +235,14 @@ function isTrackingCode(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null; tab: string; row: number }[]> {
-  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number }[]> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   const dateTabs = (meta.sheets ?? [])
-    .map((s) => ({ title: s.properties.title, date: tabDate(s.properties.title) }))
-    .filter((t): t is { title: string; date: Date } => t.date != null);
+    .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
+    .filter((t): t is { title: string; sheetId: number; date: Date } => t.date != null);
   if (!dateTabs.length) return [];
 
-  const out: { code: string; date: Date | null; tab: string; row: number }[] = [];
+  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
@@ -254,9 +254,10 @@ export async function readWarehousePackRows(sid: string): Promise<{ code: string
       const tab = batch[idx]?.title ?? "";
       const date = batch[idx]?.date ?? null;
       const col = vr.values?.[0] ?? []; // majorDimension=COLUMNS -> values[0] là cột E
+      const sheetId = batch[idx]?.sheetId ?? 0;
       col.forEach((cell, j) => {
         const code = (cell ?? "").trim();
-        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1 });
+        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId });
       });
     });
   }
@@ -288,20 +289,42 @@ export async function syncPackedFromWarehouse(): Promise<{ matched: number; upda
   }
   for (const c of customers) await syncCustomerOrders(c);
 
-  // Ghi ngược invoice: Tên hàng (F) + Giá ¥ (G) vào đúng dòng mã trong file kho (cần SA quyền Editor)
+  // Ghi ngược vào file kho (cần SA quyền Editor):
+  // Tên hàng (F) + Giá ¥ (G); Chú ý (U) = note gia cố/mở hàng; Link đối chiếu (V); Số trùng (W) = số món.
+  // Tô màu dòng: đỏ nếu số trùng > 1 (nhắc khai đủ name+giá), xanh nếu có chú ý.
   try {
     const data: { range: string; values: (string | number)[][] }[] = [];
+    const colorReqs: any[] = [];
+    const RED = { red: 0.96, green: 0.80, blue: 0.80 };
+    const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
+    const WHITE = { red: 1, green: 1, blue: 1 };
     for (const r of rows) {
       const t = trkByCode.get(r.code);
-      const items = t?.order?.items ?? [];
-      if (!items.length) continue;
-      const name = items.map((i) => i.name).join(" + ");
-      const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-      data.push({ range: `'${r.tab.replace(/'/g, "''")}'!F${r.row}:G${r.row}`, values: [[name, price]] });
+      if (!t?.order) continue;
+      const items = t.order.items ?? [];
+      const esc = r.tab.replace(/'/g, "''");
+      if (items.length) {
+        const name = items.map((i) => i.name).join(" + ");
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        data.push({ range: `'${esc}'!F${r.row}:G${r.row}`, values: [[name, price]] });
+      }
+      const note = t.order.needsCheck ? (t.order.checkNote?.trim() || "Mở hàng / gia cố") : "";
+      const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
+      const count = items.length;
+      data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
+      const bg = count > 1 ? RED : note ? GREEN : WHITE;
+      colorReqs.push({ repeatCell: {
+        range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 23 },
+        cell: { userEnteredFormat: { backgroundColor: bg } },
+        fields: "userEnteredFormat.backgroundColor",
+      } });
     }
     const CW = 100;
     for (let i = 0; i < data.length; i += CW) {
       await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data: data.slice(i, i + CW) });
+    }
+    for (let i = 0; i < colorReqs.length; i += CW) {
+      await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
     }
   } catch (e) {
     console.error("[gsheets] writeInvoiceToWarehouse", (e as Error).message);

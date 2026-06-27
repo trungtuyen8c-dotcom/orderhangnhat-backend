@@ -149,6 +149,8 @@ model Order {
   totalVnd         Decimal? @map("total_vnd") @db.Decimal(16, 2)
   deposit     Decimal     @default(0) @db.Decimal(14, 2)
   paidAt      DateTime?   @map("paid_at")
+  needsCheck  Boolean     @default(false) @map("needs_check")
+  checkNote   String?     @map("check_note")
   publicToken String      @unique @map("public_token")
   createdAt   DateTime    @default(now()) @map("created_at")
   customer    Customer    @relation(fields: [customerId], references: [id])
@@ -200,19 +202,35 @@ model Tracking {
   jpWeightKg Decimal? @map("jp_weight_kg") @db.Decimal(8, 3)
   vnWeightKg Decimal? @map("vn_weight_kg") @db.Decimal(8, 3)
   unitPriceVndPerKg Decimal? @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
+  shipRateCurrency String @default("VND") @map("ship_rate_currency")
   vnTrackingCode String? @map("vn_tracking_code")
+  cartonId   String?  @map("carton_id") @db.Uuid
   review     String?
   url        String?
   packedAt   DateTime? @map("packed_at")
+  docCapturedAt DateTime? @map("doc_captured_at")
   shipmentId String?  @map("shipment_id") @db.Uuid
   status     String   @default("new")
   createdAt  DateTime @default(now()) @map("created_at")
   order      Order?   @relation(fields: [orderId], references: [id])
   shipment   Shipment? @relation(fields: [shipmentId], references: [id])
+  carton     Carton?  @relation(fields: [cartonId], references: [id])
   logs       TrackingLog[]
 
   @@index([code])
   @@map("trackings")
+}
+
+// Kiện / carton: kho Nhật báo cân tổng; hệ thống cộng cân lẻ tracking để đối soát
+model Carton {
+  id              String     @id @default(uuid()) @db.Uuid
+  code            String
+  declaredWeightKg Decimal?  @map("declared_weight_kg") @db.Decimal(8, 3)
+  note            String?
+  createdAt       DateTime   @default(now()) @map("created_at")
+  trackings       Tracking[]
+
+  @@map("cartons")
 }
 
 model TrackingLog {
@@ -334,6 +352,9 @@ model CustomerDeposit {
   id          String    @id @default(uuid()) @db.Uuid
   customerId  String    @map("customer_id") @db.Uuid
   amountVnd   Decimal   @map("amount_vnd") @db.Decimal(14, 2)
+  currency    String    @default("VND")
+  amountOrig  Decimal   @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate Decimal? @map("exchange_rate") @db.Decimal(12, 4)
   payerName   String?   @map("payer_name")
   method      String?
   walletId    String?   @map("wallet_id") @db.Uuid
@@ -374,6 +395,58 @@ model BackupRun {
 
   @@index([startedAt])
   @@map("backup_runs")
+}
+
+// Chi phí phải trả kho/cty: chakubarai (착불) + gia cố + tiền cân tháng
+model CompanyCost {
+  id           String   @id @default(uuid()) @db.Uuid
+  kind         String   // chakubarai | reinforce | weight | other
+  month        String   // YYYY-MM
+  amountVnd    Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  currency     String   @default("VND")
+  amountOrig   Decimal  @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate Decimal? @map("exchange_rate") @db.Decimal(12, 4)
+  refId        String?  @map("ref_id") @db.Uuid
+  note         String?
+  paid         Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([month])
+  @@map("company_costs")
+}
+
+// Chi phí phát sinh / đền bù khách (hàng vỡ...) - chỉ ghi nhận lỗ nội bộ, KHÔNG động công nợ khách
+model Expense {
+  id           String   @id @default(uuid()) @db.Uuid
+  orderId      String?  @map("order_id") @db.Uuid
+  kind         String   @default("compensation") // compensation | other
+  amountVnd    Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  currency     String   @default("VND")
+  amountOrig   Decimal  @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate Decimal? @map("exchange_rate") @db.Decimal(12, 4)
+  note         String?
+  incurredAt   DateTime @map("incurred_at")
+  recordedBy   String?  @map("recorded_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([orderId])
+  @@map("expenses")
+}
+
+// Lương nhân viên - chỉ super_admin xem
+model Payroll {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  name      String
+  month     String   // YYYY-MM
+  amountVnd Decimal  @map("amount_vnd") @db.Decimal(14, 2)
+  note      String?
+  paid      Boolean  @default(false)
+  paidAt    DateTime? @map("paid_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([month])
+  @@map("payrolls")
 }
 
 model WeightRecon {

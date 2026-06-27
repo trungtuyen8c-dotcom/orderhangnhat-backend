@@ -1,11 +1,14 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db.js";
 
-// Tiền ship 1 tracking = cân (kg) x đơn giá (đ/kg).
+// Tiền ship 1 tracking = cân (kg) x đơn giá/kg (quy về VND).
 // Ưu tiên cân VN (thực tế); chưa cân VN thì tạm dùng cân JP (báo trước).
-export function trackingShipVnd(t: { jpWeightKg: unknown; vnWeightKg?: unknown; unitPriceVndPerKg: unknown }): number {
+// Đơn giá có thể theo VND/kg hoặc JPY/kg (shipRateCurrency); JPY thì nhân tỉ giá.
+export function trackingShipVnd(t: { jpWeightKg: unknown; vnWeightKg?: unknown; unitPriceVndPerKg: unknown; shipRateCurrency?: unknown }, rate = 0): number {
   const kg = t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
-  return kg * Number(t.unitPriceVndPerKg ?? 0);
+  const price = Number(t.unitPriceVndPerKg ?? 0);
+  const perKgVnd = t.shipRateCurrency === "JPY" ? price * rate : price;
+  return kg * perKgVnd;
 }
 
 // Tính lại totalQuote (¥), totalVnd và công nợ của 1 đơn.
@@ -21,11 +24,13 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + Number(i.shipJpy ?? 0), 0);
   const rate = Number(order.exchangeRate ?? 0);
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
-  const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd(t), 0);
+  const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd(t, rate), 0);
 
   const jpyFee = (amt: unknown, cur: string) => cur === "JPY" && Number(amt) > 0;
+  const trackingNeedsRate = order.trackings.some((t) => t.shipRateCurrency === "JPY" && Number(t.unitPriceVndPerKg ?? 0) > 0);
   const hasUnconverted =
     (subtotalJpy > 0
+      || trackingNeedsRate
       || jpyFee(order.shipAmount, order.shipCurrency)
       || jpyFee(order.surchargeAmount, order.surchargeCurrency)
       || jpyFee(order.discountAmount, order.discountCurrency)

@@ -324,7 +324,8 @@ async function runCustomerSync(customerId: string): Promise<void> {
     if (!customer?.sheetId) return;
     const sid = customer.sheetId;
     const orders = await loadCustomerOrders(customerId);
-    const deposits = await prisma.customerDeposit.findMany({ where: { customerId, confirmed: true }, orderBy: { paidAt: "asc" } });
+    // Đẩy ngay khi NV ghi (kế toán xác nhận là việc nội bộ, không chờ mới lên sheet khách)
+    const deposits = await prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "asc" } });
 
     const ordersByMonth = new Map<number, OrderFull[]>();
     for (const o of orders) { const m = orderMonth(o); (ordersByMonth.get(m) ?? ordersByMonth.set(m, []).get(m)!).push(o); }

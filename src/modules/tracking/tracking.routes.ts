@@ -31,7 +31,7 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 300,
-    include: { order: { select: { code: true, customer: { select: { name: true } } } } },
+    include: { order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } } } } },
   });
   res.json(rows);
 });
@@ -44,6 +44,7 @@ const createSchema = z.object({
   jpWeightKg: z.number().nonnegative().optional(),
   vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
+  shipRateCurrency: z.enum(["VND", "JPY"]).optional(),
   vnTrackingCode: z.string().optional(),
   url: z.string().optional(),
   packedAt: z.coerce.date().optional(),
@@ -120,10 +121,13 @@ const updateSchema = z.object({
   jpWeightKg: z.number().nonnegative().optional(),
   vnWeightKg: z.number().nonnegative().optional(),
   unitPriceVndPerKg: z.number().nonnegative().optional(),
+  shipRateCurrency: z.enum(["VND", "JPY"]).optional(),
   vnTrackingCode: z.string().optional(),
+  cartonId: z.string().uuid().nullable().optional(),
   review: z.string().nullable().optional(),
   url: z.string().nullable().optional(),
   packedAt: z.coerce.date().nullable().optional(),
+  docCapturedAt: z.coerce.date().nullable().optional(),
   shipmentId: z.string().uuid().optional(),
   status: z.string().optional(),
 });

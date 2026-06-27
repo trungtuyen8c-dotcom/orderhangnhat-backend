@@ -81,6 +81,8 @@ const createSchema = z.object({
     paymentMethod: z.string().optional(),
   })).min(1),
   trackings: trackingsField,
+  needsCheck: z.boolean().optional(),
+  checkNote: z.string().optional(),
   ...pricingSchema,
 });
 
@@ -113,6 +115,8 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
     intlShipAmount: d.intlShipAmount ?? 0,
     intlShipCurrency: d.intlShipCurrency ?? "VND",
+    needsCheck: d.needsCheck ?? false,
+    checkNote: d.checkNote ?? null,
     publicToken: uuid(),
     items: { create: d.items },
   };
@@ -139,6 +143,45 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
   await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { items: d.items.length, totalVnd: totals?.totalVnd ?? null } });
+  res.status(201).json({ ...order, ...totals });
+});
+
+// Hàng ký gửi / khách tự đem (chỉ vận chuyển, không mua qua mình): đơn không có món mua
+const consignSchema = z.object({
+  customerId: z.string().uuid(),
+  code: z.string().min(1),
+  jpWeightKg: z.number().nonnegative().optional(),
+  vnWeightKg: z.number().nonnegative().optional(),
+  unitPriceVndPerKg: z.number().nonnegative().optional(),
+  shipRateCurrency: z.enum(["VND", "JPY"]).default("VND"),
+  exchangeRate: z.number().positive().optional(),
+  packedAt: z.coerce.date().optional(),
+  review: z.string().optional(),
+});
+ordersRouter.post("/consignment", authorize("orders.create"), async (req, res) => {
+  const p = consignSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const d = p.data;
+  if (d.shipRateCurrency === "JPY" && !d.exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Đơn giá JPY/kg cần nhập tỉ giá" });
+  let order;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      order = await prisma.order.create({ data: {
+        id: uuid(), customerId: d.customerId, saleId: req.user!.id, status: "vn_warehouse",
+        exchangeRate: d.exchangeRate ?? null, publicToken: uuid(), code: await nextOrderCode(),
+      } });
+      break;
+    } catch (e: any) { if (e?.code === "P2002" && attempt < 5) continue; throw e; }
+  }
+  await prisma.tracking.create({ data: {
+    id: uuid(), orderId: order.id, code: d.code, jpWeightKg: d.jpWeightKg ?? null, vnWeightKg: d.vnWeightKg ?? null,
+    unitPriceVndPerKg: d.unitPriceVndPerKg ?? null, shipRateCurrency: d.shipRateCurrency,
+    review: d.review ?? null, packedAt: d.packedAt ?? null, status: "linked",
+  } });
+  const totals = await recomputeOrderTotals(order.id);
+  void syncCustomerOrders(order.customerId);
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.consignment_created" });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "created", changes: { consignment: true, totalVnd: totals?.totalVnd ?? null } });
   res.status(201).json({ ...order, ...totals });
 });
 
@@ -177,6 +220,8 @@ const editSchema = z.object({
     paymentMethod: z.string().optional(),
   })).min(1).optional(),
   trackings: trackingsField,
+  needsCheck: z.boolean().optional(),
+  checkNote: z.string().optional(),
   ...pricingSchema,
 });
 
@@ -195,6 +240,8 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   };
 
   const data: any = {};
+  if (d.needsCheck !== undefined) { diff("needsCheck", order.needsCheck, d.needsCheck); data.needsCheck = d.needsCheck; }
+  if (d.checkNote !== undefined) { diff("checkNote", order.checkNote, d.checkNote); data.checkNote = d.checkNote; }
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
   for (const f of PRICING_FIELDS) {
     const nv = (d as any)[f];
@@ -238,7 +285,29 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
 ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
   const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { payments: true, trackings: true } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
-  if (order.payments.length > 0) return res.status(409).json({ error: "HAS_PAYMENTS", message: "Đơn đã có giao dịch, không xóa được" });
+  const force = req.query.force === "1" || req.query.force === "true";
+  if (order.payments.length > 0) {
+    if (!force) return res.status(409).json({ error: "HAS_PAYMENTS", message: "Đơn đã có giao dịch, không xóa được" });
+    // Force chỉ cho admin/super_admin: xóa cả giao dịch + hoàn lại số dư ví
+    if (!req.user!.roles.some((r) => ["super_admin", "admin"].includes(r)))
+      return res.status(403).json({ error: "FORBIDDEN", message: "Chỉ Admin được xóa đơn đã có giao dịch" });
+    await prisma.$transaction(async (tx) => {
+      for (const p of order.payments) {
+        if (p.walletId) {
+          const sign = p.type === "refund" ? -1 : 1;
+          await tx.wallet.update({ where: { id: p.walletId }, data: { balance: { decrement: sign * Number(p.amountOrig) } } });
+        }
+      }
+      await tx.walletTxn.deleteMany({ where: { refOrderId: order.id } });
+      await tx.payment.deleteMany({ where: { orderId: order.id } });
+      await tx.debt.deleteMany({ where: { orderId: order.id } });
+      await tx.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
+      await tx.order.delete({ where: { id: order.id } });
+    });
+    void syncCustomerOrders(order.customerId);
+    await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.force_deleted", metadata: { payments: order.payments.length } });
+    return res.json({ ok: true });
+  }
   // gỡ liên kết tracking trước khi xóa đơn
   await prisma.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
   await prisma.order.delete({ where: { id: order.id } });

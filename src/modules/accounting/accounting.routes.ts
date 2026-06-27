@@ -154,7 +154,9 @@ accountingRouter.get("/customers/:id/ledger", authorize("orders.read"), async (r
 });
 
 const depositSchema = z.object({
-  amountVnd: z.number().positive(),
+  amount: z.number().positive(),
+  currency: z.enum(["VND", "JPY"]).default("VND"),
+  exchangeRate: z.number().positive().optional(),
   payerName: z.string().optional(),
   method: z.string().optional(),
   walletId: z.string().uuid().optional(),
@@ -167,15 +169,18 @@ accountingRouter.post("/customers/:id/deposits", authorize("accounting.record_pa
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
   if (!customer) return res.status(404).json({ error: "NOT_FOUND" });
+  if (p.data.currency === "JPY" && !p.data.exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Cọc JPY cần nhập tỉ giá" });
+  const amountVnd = p.data.currency === "JPY" ? Math.round(p.data.amount * p.data.exchangeRate!) : p.data.amount;
   if (p.data.walletId) {
     const w = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
     if (!w) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
     if (w.currency !== "VND") return res.status(400).json({ error: "CURRENCY_MISMATCH", message: "Cọc khách phải vào ví VND" });
   }
   const dep = await prisma.customerDeposit.create({
-    data: { id: uuid(), customerId: req.params.id, amountVnd: p.data.amountVnd, payerName: p.data.payerName || null, method: p.data.method || null, walletId: p.data.walletId || null, note: p.data.note || null, paidAt: p.data.paidAt ?? new Date(), recordedBy: req.user!.id },
+    data: { id: uuid(), customerId: req.params.id, amountVnd, currency: p.data.currency, amountOrig: p.data.amount, exchangeRate: p.data.exchangeRate ?? null, payerName: p.data.payerName || null, method: p.data.method || null, walletId: p.data.walletId || null, note: p.data.note || null, paidAt: p.data.paidAt ?? new Date(), recordedBy: req.user!.id },
   });
-  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.deposit", metadata: { amountVnd: p.data.amountVnd, confirmed: false } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.deposit", metadata: { amountVnd, currency: p.data.currency, confirmed: false } });
+  void syncCustomerOrders(req.params.id);
   res.status(201).json(dep);
 });
 
@@ -221,7 +226,7 @@ accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_p
   if (dep.confirmed && dep.walletId) await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { decrement: Number(dep.amountVnd) } } });
   await prisma.customerDeposit.delete({ where: { id: req.params.id } });
   await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_deleted" });
-  if (dep.confirmed) void syncCustomerOrders(dep.customerId);
+  void syncCustomerOrders(dep.customerId);
   res.json({ ok: true });
 });
 
@@ -248,6 +253,97 @@ accountingRouter.get("/customer-summary", authorize("orders.read"), async (_req,
     return { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, mua: m, coc: c, no: m - c };
   }).sort((a, b) => b.no - a.no);
   res.json(rows);
+});
+
+// Báo cáo theo tháng: tổng cân, tổng tiền mua, đã trả - từng khách + tổng. Kèm công nợ hiện tại (luỹ kế).
+// Tiền mua theo createdAt của đơn; cân theo packedAt của tracking (cân VN ưu tiên, chưa có dùng cân JP); đã trả = cọc xác nhận + thanh toán đơn trong tháng.
+accountingRouter.get("/monthly-report", authorize("orders.read"), async (req, res) => {
+  const mk = (d: Date | string) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}`; };
+  const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
+
+  const [orders, trks, deposits, payments, customers, debtAgg] = await Promise.all([
+    prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, createdAt: true } }),
+    prisma.tracking.findMany({ where: { packedAt: { not: null }, orderId: { not: null } }, select: { jpWeightKg: true, vnWeightKg: true, packedAt: true, order: { select: { customerId: true } } } }),
+    prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
+    prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
+    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
+    prisma.debt.groupBy({ by: ["customerId"], _sum: { balance: true } }),
+  ]);
+
+  const cmap = new Map(customers.map((c) => [c.id, c]));
+  type Row = { customerId: string; name: string; code: string | null; canKg: number; mua: number; traTrongThang: number; congNo: number };
+  const rows = new Map<string, Row>();
+  const get = (id: string): Row => {
+    let r = rows.get(id);
+    if (!r) { r = { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, canKg: 0, mua: 0, traTrongThang: 0, congNo: 0 }; rows.set(id, r); }
+    return r;
+  };
+  for (const o of orders) if (mk(o.createdAt) === month) get(o.customerId).mua += Number(o.totalVnd ?? 0);
+  for (const t of trks) { const cid = t.order?.customerId; if (cid && t.packedAt && mk(t.packedAt) === month) get(cid).canKg += t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0); }
+  for (const d of deposits) if (mk(d.paidAt) === month) get(d.customerId).traTrongThang += Number(d.amountVnd);
+  for (const p of payments) { const cid = p.order?.customerId; if (cid && mk(p.createdAt) === month) get(cid).traTrongThang += p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd); }
+  for (const g of debtAgg) { const bal = Number(g._sum.balance ?? 0); if (bal !== 0) get(g.customerId).congNo = bal; }
+
+  const list = [...rows.values()].filter((r) => r.canKg || r.mua || r.traTrongThang || r.congNo).sort((a, b) => b.mua - a.mua);
+  const totals = list.reduce((s, r) => ({ canKg: s.canKg + r.canKg, mua: s.mua + r.mua, traTrongThang: s.traTrongThang + r.traTrongThang, congNo: s.congNo + r.congNo }), { canKg: 0, mua: 0, traTrongThang: 0, congNo: 0 });
+  res.json({ month, rows: list, totals });
+});
+
+// ===== Chi phí phát sinh / đền bù khách (không động công nợ) =====
+const expenseSchema = z.object({
+  orderId: z.string().uuid().optional(),
+  kind: z.enum(["compensation", "other"]).default("compensation"),
+  amount: z.number().positive(),
+  currency: z.enum(["VND", "JPY"]).default("VND"),
+  exchangeRate: z.number().positive().optional(),
+  note: z.string().optional(),
+  incurredAt: z.coerce.date().optional(),
+});
+accountingRouter.post("/expenses", authorize("accounting.record_payment"), async (req, res) => {
+  const p = expenseSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  if (p.data.currency === "JPY" && !p.data.exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Nhập JPY cần tỉ giá" });
+  const amountVnd = p.data.currency === "JPY" ? Math.round(p.data.amount * p.data.exchangeRate!) : p.data.amount;
+  const e = await prisma.expense.create({ data: {
+    id: uuid(), orderId: p.data.orderId ?? null, kind: p.data.kind, amountVnd, currency: p.data.currency,
+    amountOrig: p.data.amount, exchangeRate: p.data.exchangeRate ?? null, note: p.data.note ?? null,
+    incurredAt: p.data.incurredAt ?? new Date(), recordedBy: req.user!.id,
+  } });
+  await logAudit({ actorId: req.user!.id, targetId: e.id, action: "expense.created", metadata: { kind: e.kind, amountVnd } });
+  res.status(201).json(e);
+});
+
+accountingRouter.get("/orders/:id/expenses", authorize("orders.read"), async (req, res) => {
+  const rows = await prisma.expense.findMany({ where: { orderId: req.params.id }, orderBy: { createdAt: "desc" } });
+  res.json(rows);
+});
+
+accountingRouter.delete("/expenses/:id", authorize("accounting.record_payment"), async (req, res) => {
+  await prisma.expense.delete({ where: { id: req.params.id } });
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "expense.deleted" });
+  res.json({ ok: true });
+});
+
+// Báo cáo chi phí phát sinh theo tháng (theo incurredAt)
+accountingRouter.get("/expenses/monthly", authorize("orders.read"), async (req, res) => {
+  const mk = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
+  const all = await prisma.expense.findMany({ orderBy: { incurredAt: "desc" } });
+  const rows = all.filter((e) => mk(e.incurredAt) === month);
+  const orderIds = [...new Set(rows.map((r) => r.orderId).filter(Boolean) as string[])];
+  const orders = await prisma.order.findMany({ where: { id: { in: orderIds } }, select: { id: true, code: true, customer: { select: { name: true } } } });
+  const omap = new Map(orders.map((o) => [o.id, o]));
+  const total = rows.reduce((s, r) => s + Number(r.amountVnd), 0);
+  const compensation = rows.filter((r) => r.kind === "compensation").reduce((s, r) => s + Number(r.amountVnd), 0);
+  res.json({
+    month, total, compensation, other: total - compensation,
+    rows: rows.map((r) => ({
+      id: r.id, kind: r.kind, amountVnd: Number(r.amountVnd), currency: r.currency, amountOrig: Number(r.amountOrig),
+      note: r.note, incurredAt: r.incurredAt,
+      orderCode: r.orderId ? omap.get(r.orderId)?.code ?? null : null,
+      customerName: r.orderId ? omap.get(r.orderId)?.customer?.name ?? null : null,
+    })),
+  });
 });
 
 accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {

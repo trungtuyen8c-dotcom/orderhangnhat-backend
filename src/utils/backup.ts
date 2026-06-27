@@ -65,11 +65,13 @@ export async function runBackup(runId: string): Promise<void> {
     await prisma.backupRun.update({ where: { id: runId }, data: { status: "running" } });
     await mkdir(stage, { recursive: true });
 
-    // 1) Database
-    const dbUrl = process.env.DATABASE_URL;
+    // 1) Database (bỏ query string ?schema=... vì pg_dump không hiểu; dump ra file rồi gzip để bắt lỗi)
+    const dbUrl = (process.env.DATABASE_URL || "").replace(/\?.*$/, "");
     if (!dbUrl) throw new Error("Thiếu DATABASE_URL");
     add("dump database...");
-    await exec(`pg_dump "${dbUrl}" --clean --if-exists | gzip > "${join(stage, "db.sql.gz")}"`, { maxBuffer: 256 * 1024 * 1024 });
+    const sqlFile = join(stage, "db.sql");
+    await execFile("pg_dump", [dbUrl, "--clean", "--if-exists", "-f", sqlFile], { maxBuffer: 256 * 1024 * 1024 });
+    await execFile("gzip", ["-f", sqlFile]); // -> db.sql.gz
 
     // 2) File MinIO -> tar
     add("archive MinIO files...");

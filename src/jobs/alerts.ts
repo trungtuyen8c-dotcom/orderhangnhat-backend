@@ -26,6 +26,6 @@ export function startJobs(): void {
   scanLateOrders().catch(() => {});
   // quét file kho mỗi 2 phút: mã trùng -> đóng hàng về (cam)
   cron.schedule("*/2 * * * *", () => {
-    syncPackedFromWarehouse().then((r) => { if (r.updated) console.log(`[warehouse] đóng hàng về ${r.updated} tracking`); }).catch((e) => console.error("pack scan failed", e));
+    syncPackedFromWarehouse({ recentDays: 45 }).then((r) => { if (r.updated) console.log(`[warehouse] đóng hàng về ${r.updated} tracking`); }).catch((e) => console.error("pack scan failed", e));
   });
 }

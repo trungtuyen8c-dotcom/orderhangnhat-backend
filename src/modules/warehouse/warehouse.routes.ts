@@ -14,7 +14,7 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
   const key = String(req.query.key ?? req.headers["x-hook-key"] ?? "");
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
   if (!cfg?.value || key !== cfg.value) return res.status(401).json({ error: "BAD_KEY" });
-  const r = await syncPackedFromWarehouse();
+  const r = await syncPackedFromWarehouse({ recentDays: 45 });
   res.json(r);
 });
 

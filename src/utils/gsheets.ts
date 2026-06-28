@@ -233,11 +233,13 @@ function isTrackingCode(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
-  const dateTabs = (meta.sheets ?? [])
+  let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
     .filter((t): t is { title: string; sheetId: number; date: Date } => t.date != null);
+  // Chỉ quét tab gần đây cho nhanh (webhook/cron). Tab cũ không có mã mới về.
+  if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
   if (!dateTabs.length) return [];
 
   const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number }[] = [];
@@ -263,12 +265,12 @@ export async function readWarehousePackRows(sid: string): Promise<{ code: string
 }
 
 // Quét file kho -> tracking nào trùng & chưa đóng thì set packedAt (cam). Trả số khớp / số cập nhật.
-export async function syncPackedFromWarehouse(): Promise<{ matched: number; updated: number }> {
+export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): Promise<{ matched: number; updated: number }> {
   if (!saEnabled()) return { matched: 0, updated: 0 };
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: 0, updated: 0 };
-  const rows = await readWarehousePackRows(sid);
+  const rows = await readWarehousePackRows(sid, opts?.recentDays);
   const dateByCode = new Map<string, Date | null>();
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];

@@ -29,6 +29,7 @@ const schema = z.object({
   address: z.string().nullable().optional(),
   note: z.string().nullable().optional(),
   sheetUrl: z.string().nullable().optional(),
+  shipRatePerKg: z.number().nonnegative().nullable().optional(),
 });
 
 function withSheet(d: Record<string, unknown>) {

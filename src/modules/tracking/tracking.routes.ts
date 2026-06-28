@@ -26,14 +26,29 @@ trackingRouter.get("/scrape", authorize("trackings.create"), async (req, res) =>
 });
 
 trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
-  const where: { orderId?: string; shipmentId?: string } = {};
+  const where: any = {};
   if (req.query.orderId) where.orderId = String(req.query.orderId);
   if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
+  // Tồn kho = đã về kho (packedAt) nhưng chưa có tracking VN (chưa đóng đi VN)
+  if (req.query.stock === "1") { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
   const rows = await prisma.tracking.findMany({
-    where, orderBy: { createdAt: "desc" }, take: 300,
+    where, orderBy: { createdAt: "desc" }, take: 500,
     include: { order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
   });
   res.json(rows);
+});
+
+// Gộp: gán 1 mã tracking VN cho nhiều kiện hàng (rời khỏi tồn kho)
+const assignVnSchema = z.object({ ids: z.array(z.string().uuid()).min(1), vnTrackingCode: z.string().min(1) });
+trackingRouter.post("/assign-vn", authorize("trackings.update"), async (req, res) => {
+  const p = assignVnSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids } }, data: { vnTrackingCode: p.data.vnTrackingCode.trim(), status: "vn_received" } });
+  const trks = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { orderId: true, order: { select: { customerId: true } } } });
+  const customers = new Set(trks.map((t) => t.order?.customerId).filter(Boolean) as string[]);
+  for (const c of customers) void syncCustomerOrders(c);
+  await logAudit({ actorId: req.user!.id, action: "tracking.assign_vn", metadata: { count: p.data.ids.length, vn: p.data.vnTrackingCode } });
+  res.json({ assigned: p.data.ids.length });
 });
 
 const createSchema = z.object({

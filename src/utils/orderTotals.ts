@@ -17,14 +17,16 @@ export function trackingShipVnd(t: { jpWeightKg: unknown; vnWeightKg?: unknown; 
 export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuote: number; totalVnd: number | null } | undefined> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: true, trackings: true, payments: true },
+    include: { items: true, trackings: true, payments: true, customer: { select: { shipRatePerKg: true } } },
   });
   if (!order) return;
 
   const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + Number(i.shipJpy ?? 0), 0);
   const rate = Number(order.exchangeRate ?? 0);
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
-  const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd(t, rate), 0);
+  // Đơn giá ship/kg: ưu tiên đặt trên tracking, không có thì lấy mặc định của khách (kho không cần nhập)
+  const custRate = order.customer?.shipRatePerKg != null ? Number(order.customer.shipRatePerKg) : null;
+  const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd({ ...t, unitPriceVndPerKg: t.unitPriceVndPerKg ?? custRate }, rate), 0);
 
   const jpyFee = (amt: unknown, cur: string) => cur === "JPY" && Number(amt) > 0;
   const trackingNeedsRate = order.trackings.some((t) => t.shipRateCurrency === "JPY" && Number(t.unitPriceVndPerKg ?? 0) > 0);

@@ -104,6 +104,7 @@ model Customer {
   address String?
   note    String?
   sheetId String? @map("sheet_id")
+  shipRatePerKg Decimal? @map("ship_rate_per_kg") @db.Decimal(14, 2)
   createdAt DateTime @default(now()) @map("created_at")
   orders  Order[]
 

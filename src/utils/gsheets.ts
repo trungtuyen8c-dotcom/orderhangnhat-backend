@@ -155,16 +155,11 @@ function loadCustomerOrders(customerId: string) {
   });
 }
 
-// Tháng của đơn theo ngày đặt (món đầu) hoặc ngày tạo - theo giờ VN
-function orderMonth(o: OrderFull): number {
-  const d = o.items[0]?.purchaseDate ?? o.createdAt;
-  return vnDate(d).getUTCMonth() + 1;
-}
-
-// Dòng data: A→N (điền vào template) + Q,R (mã tracking, đánh giá) - cùng thứ tự dòng.
-function buildRows(orders: OrderFull[]): { an: (string | number)[][]; qr: string[][] } {
-  const an: (string | number)[][] = [];
-  const qr: string[][] = [];
+// Dòng data theo TỪNG MÓN, gom theo THÁNG NGÀY MUA của chính món đó (không theo ngày tạo đơn).
+// Trả map: tháng -> { an: A→N, qr: Q,R } cùng thứ tự dòng.
+function buildRowsByMonth(orders: OrderFull[]): Map<number, { an: (string | number)[][]; qr: string[][] }> {
+  const byMonth = new Map<number, { an: (string | number)[][]; qr: string[][] }>();
+  const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = { an: [], qr: [] }; byMonth.set(m, b); } return b; };
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
@@ -172,7 +167,9 @@ function buildRows(orders: OrderFull[]): { an: (string | number)[][]; qr: string
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
       const trk = o.trackings[idx];
-      an.push([
+      const m = vnDate(it.purchaseDate ?? o.createdAt).getUTCMonth() + 1;
+      const b = bucket(m);
+      b.an.push([
         o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         fmtDate(it.purchaseDate ?? o.createdAt),
         "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
@@ -182,20 +179,10 @@ function buildRows(orders: OrderFull[]): { an: (string | number)[][]; qr: string
         trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
         trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
       ]);
-      qr.push([String(trk?.code ?? ""), String(trk?.review ?? "")]);
+      b.qr.push([String(trk?.code ?? ""), String(trk?.review ?? "")]);
     });
   }
-  return { an, qr };
-}
-
-// Tìm tab ứng với tháng m, chấp nhận tên "7","07","tháng 7","Tháng 7","T7"...
-async function findMonthTab(sid: string, m: number): Promise<string | null> {
-  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
-  for (const s of meta.sheets ?? []) {
-    const mm = s.properties.title.trim().toLowerCase().match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})$/);
-    if (mm && Number(mm[1]) === m) return s.properties.title;
-  }
-  return null;
+  return byMonth;
 }
 
 // Liệt kê mọi tab dạng tháng -> map {số tháng: tên tab}
@@ -361,28 +348,27 @@ async function runCustomerSync(customerId: string): Promise<void> {
     // Đẩy ngay khi NV ghi (kế toán xác nhận là việc nội bộ, không chờ mới lên sheet khách)
     const deposits = await prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "asc" } });
 
-    const ordersByMonth = new Map<number, OrderFull[]>();
-    for (const o of orders) { const m = orderMonth(o); (ordersByMonth.get(m) ?? ordersByMonth.set(m, []).get(m)!).push(o); }
+    // Mỗi MÓN nhảy vào tháng theo ngày mua của chính nó
+    const rowsByMonth = buildRowsByMonth(orders);
     const depsByMonth = new Map<number, typeof deposits>();
     for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
 
-    // Gồm cả các tab tháng đang tồn tại -> tháng không còn dữ liệu sẽ được dọn (tránh dòng cũ ở lại khi đơn đổi tháng theo ngày mua)
+    // Gồm cả các tab tháng đang tồn tại -> tháng không còn dữ liệu sẽ được dọn (tránh dòng cũ ở lại khi món đổi tháng theo ngày mua)
     const existingTabs = await listMonthTabs(sid);
-    const months = new Set<number>([...ordersByMonth.keys(), ...depsByMonth.keys(), ...existingTabs.keys()]);
+    const months = new Set<number>([...rowsByMonth.keys(), ...depsByMonth.keys(), ...existingTabs.keys()]);
     for (const m of months) {
       let tab = existingTabs.get(m) ?? null;
       if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
 
       // ----- Đơn hàng: A→N + Q,R (giữ O,P công thức) -----
-      const list = ordersByMonth.get(m) ?? [];
+      const { an, qr } = rowsByMonth.get(m) ?? { an: [], qr: [] };
       let header = await findHeaderRow(sid, tab);
       if (!header) {
         await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [ORDER_HEADER] });
         header = 1;
       }
       const start = header + 1;
-      const { an, qr } = buildRows(list);
       await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
       if (an.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: an });
       await apiSheet(sid, `/values/${t}!Q${start}:R100000:clear`, "POST", {});

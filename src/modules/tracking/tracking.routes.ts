@@ -31,7 +31,7 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 300,
-    include: { order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } } } } },
+    include: { order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
   });
   res.json(rows);
 });

@@ -198,6 +198,17 @@ async function findMonthTab(sid: string, m: number): Promise<string | null> {
   return null;
 }
 
+// Liệt kê mọi tab dạng tháng -> map {số tháng: tên tab}
+async function listMonthTabs(sid: string): Promise<Map<number, string>> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties.title`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  const map = new Map<number, string>();
+  for (const s of meta.sheets ?? []) {
+    const mm = s.properties.title.trim().toLowerCase().match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})$/);
+    if (mm) map.set(Number(mm[1]), s.properties.title);
+  }
+  return map;
+}
+
 // Dò dòng tiêu đề (ô A == "Mã Link") trong tab; trả 0 nếu không thấy.
 async function findHeaderRow(sid: string, tab: string): Promise<number> {
   const data = (await apiSheet(sid, `/values/${encodeURIComponent(tab)}!A1:A20`, "GET")) as { values?: string[][] };
@@ -355,9 +366,11 @@ async function runCustomerSync(customerId: string): Promise<void> {
     const depsByMonth = new Map<number, typeof deposits>();
     for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
 
-    const months = new Set<number>([...ordersByMonth.keys(), ...depsByMonth.keys()]);
+    // Gồm cả các tab tháng đang tồn tại -> tháng không còn dữ liệu sẽ được dọn (tránh dòng cũ ở lại khi đơn đổi tháng theo ngày mua)
+    const existingTabs = await listMonthTabs(sid);
+    const months = new Set<number>([...ordersByMonth.keys(), ...depsByMonth.keys(), ...existingTabs.keys()]);
     for (const m of months) {
-      let tab = await findMonthTab(sid, m);
+      let tab = existingTabs.get(m) ?? null;
       if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
 

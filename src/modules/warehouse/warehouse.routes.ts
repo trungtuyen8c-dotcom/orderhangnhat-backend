@@ -5,7 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { syncTracking, syncPackedFromWarehouse, parseSheetId } from "../../utils/gsheets.js";
+import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId } from "../../utils/gsheets.js";
 
 export const warehouseRouter = Router();
 
@@ -14,6 +14,12 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
   const key = String(req.query.key ?? req.headers["x-hook-key"] ?? "");
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
   if (!cfg?.value || key !== cfg.value) return res.status(401).json({ error: "BAD_KEY" });
+  // TỨC THÌ: webhook gửi mã + ô vừa gõ -> khớp đúng 1 dòng. Không có mã -> quét tab gần đây (fallback).
+  const code = req.body?.code;
+  if (code) {
+    const r = await syncPackedOne(String(code), req.body?.tab ? String(req.body.tab) : undefined, req.body?.row ? Number(req.body.row) : undefined);
+    return res.json(r);
+  }
   const r = await syncPackedFromWarehouse({ recentDays: 45 });
   res.json(r);
 });

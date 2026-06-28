@@ -333,6 +333,51 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   return { matched: trks.length, updated };
 }
 
+async function getSheetIdByTitle(sid: string, title: string): Promise<number | null> {
+  const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
+  for (const s of meta.sheets ?? []) if (s.properties.title === title) return s.properties.sheetId;
+  return null;
+}
+
+// TỨC THÌ: khớp đúng 1 mã (từ webhook gửi mã + tab + dòng), không quét tab nào -> nhanh <1s.
+export async function syncPackedOne(code: string, tab?: string, row?: number): Promise<{ matched: boolean }> {
+  if (!saEnabled()) return { matched: false };
+  const c = (code ?? "").trim();
+  if (!isTrackingCode(c)) return { matched: false };
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
+  const sid = cfg?.value ? parseSheetId(cfg.value) : null;
+  if (!sid) return { matched: false };
+  const t = await prisma.tracking.findFirst({ where: { code: c }, include: { order: { include: { items: true } } } });
+  if (!t) return { matched: false };
+  const packedAt = (tab ? tabDate(tab) : null) ?? t.packedAt ?? new Date();
+  if (!t.packedAt) await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
+
+  if (tab && row) {
+    try {
+      const esc = tab.replace(/'/g, "''");
+      const items = t.order?.items ?? [];
+      const data: { range: string; values: (string | number)[][] }[] = [];
+      if (items.length) {
+        const name = items.map((i) => i.name).join(" + ");
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        data.push({ range: `'${esc}'!F${row}:G${row}`, values: [[name, price]] });
+      }
+      const note = t.order?.needsCheck ? (t.order.checkNote?.trim() || "Mở hàng / gia cố") : "";
+      const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
+      const count = items.length;
+      data.push({ range: `'${esc}'!U${row}:W${row}`, values: [[note, link, count]] });
+      await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data });
+      const sheetId = await getSheetIdByTitle(sid, tab);
+      if (sheetId != null) {
+        const bg = count > 1 ? { red: 0.96, green: 0.80, blue: 0.80 } : note ? { red: 0.80, green: 0.93, blue: 0.80 } : { red: 1, green: 1, blue: 1 };
+        await apiSheet(sid, `:batchUpdate`, "POST", { requests: [{ repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 23 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } }] });
+      }
+    } catch (e) { console.error("[gsheets] syncPackedOne", (e as Error).message); }
+  }
+  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
+  return { matched: true };
+}
+
 // Sổ thu tiền (cọc) cố định cột W:Z, header dòng 5, data từ dòng 6. Cột V (Mã) để khách tự điền.
 // W=Ngày, X=Tên khoản mục, Y=Nội dung, Z=Tiền. 3 ô TỔNG TT/CỌC/NỢ là công thức -> tự nhảy.
 const DEPOSIT_START_ROW = 6;

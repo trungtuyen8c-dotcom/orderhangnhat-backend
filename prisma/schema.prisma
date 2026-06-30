@@ -227,6 +227,7 @@ model Carton {
   id              String     @id @default(uuid()) @db.Uuid
   code            String
   declaredWeightKg Decimal?  @map("declared_weight_kg") @db.Decimal(8, 3)
+  packedDate      DateTime?  @map("packed_date")
   note            String?
   createdAt       DateTime   @default(now()) @map("created_at")
   trackings       Tracking[]
@@ -362,6 +363,7 @@ model CustomerDeposit {
   note        String?
   paidAt      DateTime  @map("paid_at")
   confirmed   Boolean   @default(false)
+  isOpening   Boolean   @default(false) @map("is_opening")
   confirmedBy String?   @map("confirmed_by") @db.Uuid
   confirmedAt DateTime? @map("confirmed_at")
   recordedBy  String?   @map("recorded_by") @db.Uuid

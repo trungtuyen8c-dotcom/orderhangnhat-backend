@@ -26,6 +26,42 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
 
 warehouseRouter.use(authenticate);
 
+// ===== Bảng kho VN: tracking đóng từ Nhật, chia theo NGÀY > KIỆN > tracking =====
+const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
+  t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
+
+warehouseRouter.get("/vn-board", authorize("trackings.list"), async (_req, res) => {
+  const trkSelect = {
+    id: true, code: true, cartonId: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true,
+    order: { select: { code: true, customer: { select: { name: true } } } },
+  } as const;
+  const [cartons, loose] = await Promise.all([
+    prisma.carton.findMany({ orderBy: { createdAt: "desc" }, include: { trackings: { select: trkSelect } } }),
+    prisma.tracking.findMany({ where: { packedAt: { not: null }, cartonId: null }, select: trkSelect, orderBy: { packedAt: "desc" } }),
+  ]);
+  type Day = { day: string; cartons: any[]; unassigned: any[] };
+  const days = new Map<string, Day>();
+  const getDay = (k: string) => { let d = days.get(k); if (!d) { d = { day: k, cartons: [], unassigned: [] }; days.set(k, d); } return d; };
+  const NO_DAY = "0000-00-00";
+
+  for (const c of cartons) {
+    const tDays = c.trackings.map((t) => dayKey(t.packedAt)).filter(Boolean) as string[];
+    const k = dayKey(c.packedDate) ?? (tDays.length ? tDays.sort()[0] : NO_DAY);
+    const declared = c.declaredWeightKg != null ? Number(c.declaredWeightKg) : null;
+    const actualKg = Number(c.trackings.reduce((s, t) => s + effKg(t), 0).toFixed(3));
+    getDay(k).cartons.push({
+      id: c.id, code: c.code, note: c.note, declaredWeightKg: declared,
+      actualKg, count: c.trackings.length, diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
+      trackings: c.trackings,
+    });
+  }
+  for (const t of loose) getDay(dayKey(t.packedAt)!).unassigned.push(t);
+
+  const out = [...days.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
+  res.json(out);
+});
+
 async function getHookKey(): Promise<string> {
   const existing = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
   if (existing?.value) return existing.value;

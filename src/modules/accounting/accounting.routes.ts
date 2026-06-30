@@ -164,7 +164,7 @@ const depositSchema = z.object({
   paidAt: z.coerce.date().optional(),
 });
 // NV ghi cọc -> trạng thái CHỜ (chưa cộng ví, chưa trừ nợ). Kế toán xác nhận sau.
-accountingRouter.post("/customers/:id/deposits", authorize("accounting.record_payment"), async (req, res) => {
+accountingRouter.post("/customers/:id/deposits", authorize("accounting.note_deposit"), async (req, res) => {
   const p = depositSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
@@ -228,6 +228,38 @@ accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_p
   await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_deleted" });
   void syncCustomerOrders(dep.customerId);
   res.json({ ok: true });
+});
+
+// ===== Số dư đầu kỳ: 1 bản ghi/khách, dương = khách dư tiền, âm = khách nợ. Không vào ví công ty. =====
+const OPENING_CUTOFF = new Date("2026-06-30T00:00:00.000Z");
+const openingSchema = z.object({ amount: z.number(), currency: z.enum(["VND", "JPY"]).default("VND"), exchangeRate: z.number().positive().optional(), note: z.string().optional() });
+
+accountingRouter.get("/opening-balances", authorize("orders.read"), async (_req, res) => {
+  const rows = await prisma.customerDeposit.findMany({ where: { isOpening: true } });
+  res.json(rows.map((r) => ({ customerId: r.customerId, amountOrig: Number(r.amountOrig), currency: r.currency, exchangeRate: r.exchangeRate != null ? Number(r.exchangeRate) : null, amountVnd: Number(r.amountVnd) })));
+});
+
+accountingRouter.put("/customers/:id/opening-balance", authorize("accounting.record_payment"), async (req, res) => {
+  const p = openingSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const customer = await prisma.customer.findUnique({ where: { id: req.params.id } });
+  if (!customer) return res.status(404).json({ error: "NOT_FOUND" });
+  if (p.data.currency === "JPY" && !p.data.exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Đầu kỳ JPY cần nhập tỉ giá" });
+  const amountVnd = p.data.currency === "JPY" ? Math.round(p.data.amount * p.data.exchangeRate!) : p.data.amount;
+  await prisma.customerDeposit.deleteMany({ where: { customerId: req.params.id, isOpening: true } });
+  let dep = null;
+  if (p.data.amount !== 0) {
+    dep = await prisma.customerDeposit.create({
+      data: {
+        id: uuid(), customerId: req.params.id, amountVnd, currency: p.data.currency, amountOrig: p.data.amount,
+        exchangeRate: p.data.exchangeRate ?? null, note: p.data.note || "Số dư đầu kỳ", paidAt: OPENING_CUTOFF,
+        confirmed: true, confirmedAt: new Date(), confirmedBy: req.user!.id, isOpening: true, recordedBy: req.user!.id,
+      },
+    });
+  }
+  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.opening_balance", metadata: { amountVnd } });
+  void syncCustomerOrders(req.params.id);
+  res.json(dep ?? { cleared: true });
 });
 
 // Bảng tổng quan: mỗi khách mua bao nhiêu / cọc (đã xác nhận) / còn nợ

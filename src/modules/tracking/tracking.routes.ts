@@ -33,7 +33,7 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (req.query.stock === "1") { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 500,
-    include: { order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
+    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
   });
   res.json(rows);
 });
@@ -63,6 +63,7 @@ const createSchema = z.object({
   vnTrackingCode: z.string().optional(),
   url: z.string().optional(),
   packedAt: z.coerce.date().optional(),
+  cartonId: z.string().uuid().optional(),
   shipmentId: z.string().uuid().optional(),
 });
 

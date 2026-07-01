@@ -471,6 +471,86 @@ accountingRouter.delete("/wallets/:id", authorize("wallets.manage"), async (req,
   res.json({ ok: true });
 });
 
+// ===== Sổ giao dịch thẻ: Thu/Chi tự cộng/trừ số dư =====
+// Chi (out) trừ thẻ, Thu (in) cộng thẻ. Chuyển khoản/Nhập tiền dùng endpoint transfer riêng.
+const TXN_CATEGORIES: Record<string, "in" | "out"> = {
+  "Mua hàng": "out",
+  "Hoàn tiền": "in",
+  "Phí dịch vụ": "out",
+  "Phí nạp tiền": "out",
+  "Lỗi giao dịch": "out",
+  "Chi khác": "out",
+};
+
+const walletTxnSchema = z.object({
+  walletId: z.string().uuid(),
+  category: z.string(),
+  amount: z.number().positive(),
+  note: z.string().optional(),
+  date: z.coerce.date().optional(),
+  refOrderId: z.string().uuid().optional(),
+});
+accountingRouter.post("/wallet-txns", authorize("wallets.manage"), async (req, res) => {
+  const p = walletTxnSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const dir = TXN_CATEGORIES[p.data.category];
+  if (!dir) return res.status(400).json({ error: "BAD_CATEGORY", message: "Loại giao dịch không hợp lệ" });
+  const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+  const signed = dir === "out" ? -p.data.amount : p.data.amount;
+  const updated = await prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: signed } } });
+  const txn = await prisma.walletTxn.create({
+    data: { id: uuid(), walletId: wallet.id, amount: signed, type: p.data.category, category: p.data.category, note: p.data.note ?? null, refOrderId: p.data.refOrderId ?? null, createdAt: p.data.date ?? new Date() },
+  });
+  await logAudit({ actorId: req.user!.id, targetId: wallet.id, action: "wallet.txn", metadata: { category: p.data.category, amount: signed } });
+  res.status(201).json({ txn, balance: Number(updated.balance) });
+});
+
+// Chuyển tiền giữa 2 thẻ: 1 lần ghi -> thẻ nguồn trừ, thẻ đích cộng
+const transferSchema = z.object({
+  fromWalletId: z.string().uuid(),
+  toWalletId: z.string().uuid(),
+  amount: z.number().positive(),
+  note: z.string().optional(),
+  date: z.coerce.date().optional(),
+});
+accountingRouter.post("/wallet-transfer", authorize("wallets.manage"), async (req, res) => {
+  const p = transferSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  if (p.data.fromWalletId === p.data.toWalletId) return res.status(400).json({ error: "SAME_WALLET", message: "Thẻ nguồn và đích phải khác nhau" });
+  const [from, to] = await Promise.all([
+    prisma.wallet.findUnique({ where: { id: p.data.fromWalletId } }),
+    prisma.wallet.findUnique({ where: { id: p.data.toWalletId } }),
+  ]);
+  if (!from || !to) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+  if (from.currency !== to.currency) return res.status(400).json({ error: "CURRENCY_MISMATCH", message: "Hai thẻ khác đơn vị tiền, không chuyển trực tiếp được" });
+  const ref = uuid();
+  const at = p.data.date ?? new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.wallet.update({ where: { id: from.id }, data: { balance: { decrement: p.data.amount } } });
+    await tx.wallet.update({ where: { id: to.id }, data: { balance: { increment: p.data.amount } } });
+    await tx.walletTxn.create({ data: { id: uuid(), walletId: from.id, amount: -p.data.amount, type: "Chuyển khoản", category: "Chuyển khoản", note: p.data.note ?? `Chuyển sang ${to.name}`, transferRef: ref, createdAt: at } });
+    await tx.walletTxn.create({ data: { id: uuid(), walletId: to.id, amount: p.data.amount, type: "Nhập tiền", category: "Nhập tiền", note: p.data.note ?? `Nhận từ ${from.name}`, transferRef: ref, createdAt: at } });
+  });
+  await logAudit({ actorId: req.user!.id, action: "wallet.transfer", metadata: { from: from.name, to: to.name, amount: p.data.amount } });
+  res.status(201).json({ ok: true });
+});
+
+// Xóa 1 giao dịch thẻ (hoàn lại số dư). Nếu là chuyển khoản thì hoàn cả 2 vế.
+accountingRouter.delete("/wallet-txns/:id", authorize("wallets.manage"), async (req, res) => {
+  const txn = await prisma.walletTxn.findUnique({ where: { id: req.params.id } });
+  if (!txn) return res.status(404).json({ error: "NOT_FOUND" });
+  const group = txn.transferRef ? await prisma.walletTxn.findMany({ where: { transferRef: txn.transferRef } }) : [txn];
+  await prisma.$transaction(async (tx) => {
+    for (const t of group) {
+      await tx.wallet.update({ where: { id: t.walletId }, data: { balance: { decrement: Number(t.amount) } } });
+      await tx.walletTxn.delete({ where: { id: t.id } });
+    }
+  });
+  await logAudit({ actorId: req.user!.id, targetId: txn.walletId, action: "wallet.txn_deleted", metadata: { category: txn.category } });
+  res.json({ ok: true });
+});
+
 // Đối soát: liệt kê giao dịch chưa đối soát theo ví
 accountingRouter.get("/reconcile", authorize("accounting.reconcile"), async (_req, res) => {
   const txns = await prisma.walletTxn.findMany({ where: { reconciled: false }, orderBy: { createdAt: "desc" }, take: 300, include: { wallet: { select: { name: true } } } });
@@ -511,6 +591,8 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
       date: t.createdAt,
       amount: Number(t.amount),
       type: t.type,
+      category: t.category ?? t.type,
+      note: t.note ?? t.statementRef,
       reconciled: t.reconciled,
       statementRef: t.statementRef,
       orderCode: o?.code ?? null,

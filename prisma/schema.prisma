@@ -153,6 +153,7 @@ model Order {
   needsCheck  Boolean     @default(false) @map("needs_check")
   checkNote   String?     @map("check_note")
   publicToken String      @unique @map("public_token")
+  orderDate   DateTime    @default(now()) @map("order_date")
   createdAt   DateTime    @default(now()) @map("created_at")
   customer    Customer    @relation(fields: [customerId], references: [id])
   items       OrderItem[]
@@ -340,6 +341,9 @@ model WalletTxn {
   walletId     String   @map("wallet_id") @db.Uuid
   amount       Decimal  @db.Decimal(16, 2)
   type         String
+  category     String?
+  note         String?
+  transferRef  String?  @map("transfer_ref") @db.Uuid
   refOrderId   String?  @map("ref_order_id") @db.Uuid
   reconciled   Boolean  @default(false)
   statementRef String?  @map("statement_ref")

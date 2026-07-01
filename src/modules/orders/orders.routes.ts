@@ -13,7 +13,7 @@ ordersRouter.use(authenticate);
 
 ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
   const orders = await prisma.order.findMany({
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ orderDate: "desc" }, { createdAt: "desc" }],
     take: 100,
     include: { customer: { select: { name: true } } },
   });
@@ -71,6 +71,7 @@ const trackingsField = z.array(z.object({
 
 const createSchema = z.object({
   customerId: z.string().uuid(),
+  orderDate: z.coerce.date().optional(),
   items: z.array(z.object({
     name: z.string().min(1),
     url: z.string().optional(),
@@ -102,6 +103,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     customerId: d.customerId,
     saleId: req.user!.id,
     status: "quoted" as const,
+    orderDate: d.orderDate ?? new Date(),
     exchangeRate: d.exchangeRate,
     shipAmount: d.shipAmount ?? 0,
     shipCurrency: d.shipCurrency ?? "JPY",
@@ -210,6 +212,7 @@ ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req,
 // Sửa đơn (chỉ khi chưa cọc): đổi khách + thay danh sách món
 const editSchema = z.object({
   customerId: z.string().uuid().optional(),
+  orderDate: z.coerce.date().optional(),
   items: z.array(z.object({
     name: z.string().min(1),
     url: z.string().optional(),
@@ -240,6 +243,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   };
 
   const data: any = {};
+  if (d.orderDate !== undefined) { diff("orderDate", order.orderDate, d.orderDate); data.orderDate = d.orderDate; }
   if (d.needsCheck !== undefined) { diff("needsCheck", order.needsCheck, d.needsCheck); data.needsCheck = d.needsCheck; }
   if (d.checkNote !== undefined) { diff("checkNote", order.checkNote, d.checkNote); data.checkNote = d.checkNote; }
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }

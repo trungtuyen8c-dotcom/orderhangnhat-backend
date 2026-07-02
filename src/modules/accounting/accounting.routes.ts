@@ -476,6 +476,8 @@ accountingRouter.delete("/wallets/:id", authorize("wallets.manage"), async (req,
 const TXN_CATEGORIES: Record<string, "in" | "out"> = {
   "Mua hàng": "out",
   "Hoàn tiền": "in",
+  "Nạp tiền": "in",
+  "Thu khác": "in",
   "Phí dịch vụ": "out",
   "Phí nạp tiền": "out",
   "Lỗi giao dịch": "out",
@@ -511,6 +513,7 @@ const transferSchema = z.object({
   fromWalletId: z.string().uuid(),
   toWalletId: z.string().uuid(),
   amount: z.number().positive(),
+  fee: z.number().nonnegative().optional(),
   note: z.string().optional(),
   date: z.coerce.date().optional(),
 });
@@ -531,8 +534,13 @@ accountingRouter.post("/wallet-transfer", authorize("wallets.manage"), async (re
     await tx.wallet.update({ where: { id: to.id }, data: { balance: { increment: p.data.amount } } });
     await tx.walletTxn.create({ data: { id: uuid(), walletId: from.id, amount: -p.data.amount, type: "Chuyển khoản", category: "Chuyển khoản", note: p.data.note ?? `Chuyển sang ${to.name}`, transferRef: ref, createdAt: at } });
     await tx.walletTxn.create({ data: { id: uuid(), walletId: to.id, amount: p.data.amount, type: "Nhập tiền", category: "Nhập tiền", note: p.data.note ?? `Nhận từ ${from.name}`, transferRef: ref, createdAt: at } });
+    // Phí chuyển (nếu có) -> trừ thêm thẻ nguồn, cùng nhóm transferRef để xóa hoàn cả cụm
+    if (p.data.fee && p.data.fee > 0) {
+      await tx.wallet.update({ where: { id: from.id }, data: { balance: { decrement: p.data.fee } } });
+      await tx.walletTxn.create({ data: { id: uuid(), walletId: from.id, amount: -p.data.fee, type: "Phí dịch vụ", category: "Phí dịch vụ", note: `Phí chuyển sang ${to.name}`, transferRef: ref, createdAt: at } });
+    }
   });
-  await logAudit({ actorId: req.user!.id, action: "wallet.transfer", metadata: { from: from.name, to: to.name, amount: p.data.amount } });
+  await logAudit({ actorId: req.user!.id, action: "wallet.transfer", metadata: { from: from.name, to: to.name, amount: p.data.amount, fee: p.data.fee ?? 0 } });
   res.status(201).json({ ok: true });
 });
 
@@ -576,7 +584,7 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
   const orders = orderIds.length
     ? await prisma.order.findMany({
         where: { id: { in: orderIds } },
-        select: { id: true, code: true, customer: { select: { name: true, phone: true } }, trackings: { select: { code: true, vnTrackingCode: true } } },
+        select: { id: true, code: true, fixRequest: true, customer: { select: { name: true, phone: true } }, trackings: { select: { code: true, vnTrackingCode: true } } },
       })
     : [];
   const omap = new Map(orders.map((o) => [o.id, o]));
@@ -595,7 +603,9 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
       note: t.note ?? t.statementRef,
       reconciled: t.reconciled,
       statementRef: t.statementRef,
+      orderId: t.refOrderId ?? null,
       orderCode: o?.code ?? null,
+      fixRequest: o?.fixRequest ?? null,
       customer: o?.customer?.name ?? null,
       phone: o?.customer?.phone ?? null,
       trackings,

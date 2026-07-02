@@ -154,6 +154,10 @@ model Order {
   checkNote   String?     @map("check_note")
   publicToken String      @unique @map("public_token")
   orderDate   DateTime    @default(now()) @map("order_date")
+  source      String      @default("normal")
+  yahooPaidAt DateTime?   @map("yahoo_paid_at")
+  fixRequest     String?   @map("fix_request")
+  fixRequestedAt DateTime? @map("fix_requested_at")
   createdAt   DateTime    @default(now()) @map("created_at")
   customer    Customer    @relation(fields: [customerId], references: [id])
   items       OrderItem[]

@@ -6,16 +6,24 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit, logOrder } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
+import { applyOrderCardCharges, reverseOrderCardCharges } from "../../utils/orderCard.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
 
 ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
+  const src = req.query.source;
+  const where = src === "yahoo" ? { source: "yahoo" }
+    : req.query.exclude === "yahoo" ? { source: { not: "yahoo" } } : undefined;
   const orders = await prisma.order.findMany({
+    where,
     orderBy: [{ orderDate: "desc" }, { createdAt: "desc" }],
     take: 100,
-    include: { customer: { select: { name: true } } },
+    include: {
+      customer: { select: { name: true } },
+      ...(src === "yahoo" ? { items: { select: { unitPriceJpy: true, qty: true, shipJpy: true } } } : {}),
+    },
   });
   res.json(orders);
 });
@@ -72,6 +80,7 @@ const trackingsField = z.array(z.object({
 const createSchema = z.object({
   customerId: z.string().uuid(),
   orderDate: z.coerce.date().optional(),
+  source: z.enum(["normal", "yahoo"]).optional(),
   items: z.array(z.object({
     name: z.string().min(1),
     url: z.string().optional(),
@@ -104,6 +113,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     saleId: req.user!.id,
     status: "quoted" as const,
     orderDate: d.orderDate ?? new Date(),
+    source: d.source ?? "normal",
     exchangeRate: d.exchangeRate,
     shipAmount: d.shipAmount ?? 0,
     shipCurrency: d.shipCurrency ?? "JPY",
@@ -141,6 +151,9 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     // Tự tạo 1 tracking trống gắn đơn -> hiện sẵn ở bảng Chuyến, điền mã tay sau
     await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: "", status: "linked" } });
   }
+  // Yahoo (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán"
+  if ((d.source ?? "normal") !== "yahoo")
+    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate });
   const totals = await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
@@ -275,6 +288,11 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   }
 
   await prisma.order.update({ where: { id: order.id }, data });
+  // Yahoo chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới
+  if (d.items && (order.source !== "yahoo" || order.yahooPaidAt)) {
+    await reverseOrderCardCharges(prisma, order.id);
+    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate });
+  }
   const totals = await recomputeOrderTotals(order.id);
   diff("totalVnd", order.totalVnd, totals?.totalVnd ?? null);
 
@@ -284,6 +302,63 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.updated" });
   if (changes.length) await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes });
   res.json(updated);
+});
+
+// Yahoo "thanh toán sau": bấm đã TT -> chọn thẻ + ngày -> lúc này mới trừ thẻ
+const paySchema = z.object({ walletId: z.string().uuid(), paidAt: z.coerce.date().optional() });
+ordersRouter.post("/:id/pay", authorize("orders.update"), async (req, res) => {
+  const p = paySchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  if (order.source !== "yahoo") return res.status(409).json({ error: "NOT_YAHOO", message: "Chỉ đơn Yahoo mới thanh toán sau" });
+  if (order.yahooPaidAt) return res.status(409).json({ error: "ALREADY_PAID", message: "Đơn đã thanh toán" });
+  const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+  // gán thẻ vào tất cả món rồi trừ (dùng chung logic auto-charge)
+  await prisma.orderItem.updateMany({ where: { orderId: order.id }, data: { paymentMethod: wallet.name } });
+  const items = order.items.map((i) => ({ unitPriceJpy: i.unitPriceJpy, qty: i.qty, shipJpy: i.shipJpy, paymentMethod: wallet.name }));
+  await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate });
+  const paidAt = p.data.paidAt ?? new Date();
+  await prisma.order.update({ where: { id: order.id }, data: { yahooPaidAt: paidAt } });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.yahoo_paid", metadata: { wallet: wallet.name } });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { yahooThanhToan: wallet.name } });
+  res.json({ ok: true });
+});
+
+// Hủy thanh toán Yahoo -> hoàn tiền về thẻ
+ordersRouter.post("/:id/unpay", authorize("orders.update"), async (req, res) => {
+  const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  if (order.source !== "yahoo" || !order.yahooPaidAt) return res.status(409).json({ error: "NOT_PAID", message: "Đơn chưa thanh toán" });
+  await reverseOrderCardCharges(prisma, order.id);
+  await prisma.order.update({ where: { id: order.id }, data: { yahooPaidAt: null } });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.yahoo_unpaid" });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { yahooHuyThanhToan: true } });
+  res.json({ ok: true });
+});
+
+// Kế toán yêu cầu sale sửa đơn (khi giao dịch/tiền sai)
+const fixSchema = z.object({ note: z.string().min(1) });
+ordersRouter.post("/:id/request-fix", authorize("accounting.reconcile"), async (req, res) => {
+  const p = fixSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST", message: "Nhập nội dung yêu cầu sửa" });
+  const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.order.update({ where: { id: order.id }, data: { fixRequest: p.data.note, fixRequestedAt: new Date() } });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.fix_requested", metadata: { note: p.data.note } });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { yeuCauSua: p.data.note } });
+  res.json({ ok: true });
+});
+
+// Sale đánh dấu đã sửa xong -> gỡ yêu cầu
+ordersRouter.post("/:id/resolve-fix", authorize("orders.update"), async (req, res) => {
+  const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+  if (!order) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.order.update({ where: { id: order.id }, data: { fixRequest: null, fixRequestedAt: null } });
+  await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.fix_resolved" });
+  await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { daSuaXong: true } });
+  res.json({ ok: true });
 });
 
 ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
@@ -302,6 +377,7 @@ ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
           await tx.wallet.update({ where: { id: p.walletId }, data: { balance: { decrement: sign * Number(p.amountOrig) } } });
         }
       }
+      await reverseOrderCardCharges(tx, order.id);
       await tx.walletTxn.deleteMany({ where: { refOrderId: order.id } });
       await tx.payment.deleteMany({ where: { orderId: order.id } });
       await tx.debt.deleteMany({ where: { orderId: order.id } });
@@ -312,7 +388,8 @@ ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
     await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.force_deleted", metadata: { payments: order.payments.length } });
     return res.json({ ok: true });
   }
-  // gỡ liên kết tracking trước khi xóa đơn
+  // hoàn số dư thẻ (Mua hàng auto) + gỡ liên kết tracking trước khi xóa đơn
+  await reverseOrderCardCharges(prisma, order.id);
   await prisma.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
   await prisma.order.delete({ where: { id: order.id } });
   void syncCustomerOrders(order.customerId);

@@ -51,6 +51,11 @@ export async function scrapeItem(url: string): Promise<ScrapedItem> {
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i);
     if (m) name = m[1];
   }
+  // 2b. Yahoo Auctions mới render bằng __NEXT_DATA__ (không còn JSON-LD/og:title)
+  if (!name) {
+    const m = html.match(/"productName"\s*:\s*"((?:[^"\\]|\\.)*)"/) || html.match(/"title"\s*:\s*"((?:[^"\\]|\\.){3,200})"/);
+    if (m) { try { name = JSON.parse('"' + m[1] + '"'); } catch { name = m[1]; } }
+  }
   if (name) name = name.split(/[｜|]/)[0].trim();
 
   // 3. Fallback giá: tìm "price": trong __NEXT_DATA__ / JSON

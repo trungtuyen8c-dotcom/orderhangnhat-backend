@@ -21,3 +21,6 @@ npm run dev
 
 Auth: JWT 15p + refresh 7d (httpOnly cookie) + Redis JTI blacklist. RBAC qua `authorize(permission)`.
 Super admin seed: `admin@orderhn.local` / `Admin@12345` (đổi qua env).
+
+## Deploy
+CI/CD: push `main` -> GitHub Actions build image -> GHCR (`ghcr.io/trungtuyen8c-dotcom/orderhangnhat-backend`) -> auto SSH deploy VPS.

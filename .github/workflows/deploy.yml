@@ -1,9 +1,11 @@
 name: Build & Deploy Backend
 
+# Tạm tắt auto-trigger (dùng lại quy trình rsync thủ công) — chỉ chạy khi bấm tay qua workflow_dispatch.
+# Muốn bật lại auto: bỏ comment khối push bên dưới.
 on:
-  push:
-    branches: [main]
-    tags: ["v*.*.*"]
+  # push:
+  #   branches: [main]
+  #   tags: ["v*.*.*"]
   workflow_dispatch:
 
 env:

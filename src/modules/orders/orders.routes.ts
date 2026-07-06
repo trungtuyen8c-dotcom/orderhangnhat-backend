@@ -8,24 +8,54 @@ import { logAudit, logOrder } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { applyOrderCardCharges, reverseOrderCardCharges } from "../../utils/orderCard.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { detectMarketplace } from "../../utils/scrape.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
 
+// Nguồn "thanh toán sau" (lên đơn trước, trừ thẻ khi bấm Đã thanh toán) - không đụng thẻ lúc tạo
+const PAY_LATER_SOURCES = ["yahoo", "mercari"] as const;
+
+// Chặn dán nhầm link Yahoo vào đơn Mercari và ngược lại (source phải khớp domain link món hàng)
+function findWrongMarketplaceUrl(source: string, items: { url?: string }[]): string | null {
+  if (source !== "yahoo" && source !== "mercari") return null;
+  for (const i of items) {
+    if (!i.url) continue;
+    const detected = detectMarketplace(i.url);
+    if (detected && detected !== source) return i.url;
+  }
+  return null;
+}
+
 ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
-  const src = req.query.source;
-  const where = src === "yahoo" ? { source: "yahoo" }
-    : req.query.exclude === "yahoo" ? { source: { not: "yahoo" } } : undefined;
+  const src = String(req.query.source ?? "");
+  const excludeList = String(req.query.exclude ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const isPayLater = (PAY_LATER_SOURCES as readonly string[]).includes(src);
+  const where = isPayLater ? { source: src }
+    : excludeList.length ? { source: { notIn: excludeList } } : undefined;
   const orders = await prisma.order.findMany({
     where,
     orderBy: [{ orderDate: "desc" }, { createdAt: "desc" }],
-    take: 100,
     include: {
       customer: { select: { name: true } },
-      ...(src === "yahoo" ? { items: { select: { unitPriceJpy: true, qty: true, shipJpy: true } } } : {}),
+      trackings: { select: { id: true, code: true, review: true, url: true }, orderBy: { createdAt: "asc" } },
+      items: isPayLater
+        ? { select: { unitPriceJpy: true, qty: true, shipJpy: true, url: true, paymentMethod: true } }
+        : { select: { url: true, paymentMethod: true } },
     },
   });
   res.json(orders);
+});
+
+// Đơn bị kế toán yêu cầu sửa, chưa xử lý xong -> hiện chuông thông báo cho sale
+ordersRouter.get("/fix-requests", authorize("orders.update"), async (req, res) => {
+  const orders = await prisma.order.findMany({
+    where: { fixRequest: { not: null } },
+    orderBy: { fixRequestedAt: "desc" },
+    take: 50,
+    select: { id: true, code: true, fixRequest: true, customer: { select: { name: true } } },
+  });
+  res.json(orders.map((o) => ({ id: o.id, code: o.code, fixRequest: o.fixRequest, customer: o.customer?.name ?? null })));
 });
 
 ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
@@ -80,7 +110,8 @@ const trackingsField = z.array(z.object({
 const createSchema = z.object({
   customerId: z.string().uuid(),
   orderDate: z.coerce.date().optional(),
-  source: z.enum(["normal", "yahoo"]).optional(),
+  source: z.enum(["normal", "yahoo", "mercari"]).optional(),
+  nick: z.string().optional(),
   items: z.array(z.object({
     name: z.string().min(1),
     url: z.string().optional(),
@@ -107,6 +138,8 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const d = parsed.data;
+  const wrongUrl = findWrongMarketplaceUrl(d.source ?? "normal", d.items);
+  if (wrongUrl) return res.status(400).json({ error: "WRONG_MARKETPLACE", message: `Link không khớp: ${wrongUrl}` });
   const baseData = {
     id: uuid(),
     customerId: d.customerId,
@@ -114,6 +147,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     status: "quoted" as const,
     orderDate: d.orderDate ?? new Date(),
     source: d.source ?? "normal",
+    nick: d.nick ?? null,
     exchangeRate: d.exchangeRate,
     shipAmount: d.shipAmount ?? 0,
     shipCurrency: d.shipCurrency ?? "JPY",
@@ -151,8 +185,8 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     // Tự tạo 1 tracking trống gắn đơn -> hiện sẵn ở bảng Chuyến, điền mã tay sau
     await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: "", status: "linked" } });
   }
-  // Yahoo (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán"
-  if ((d.source ?? "normal") !== "yahoo")
+  // Yahoo/Mercari (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán"
+  if (!(PAY_LATER_SOURCES as readonly string[]).includes(d.source ?? "normal"))
     await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate });
   const totals = await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);
@@ -226,6 +260,7 @@ ordersRouter.patch("/:id/status", authorize("orders.update_status"), async (req,
 const editSchema = z.object({
   customerId: z.string().uuid().optional(),
   orderDate: z.coerce.date().optional(),
+  nick: z.string().optional(),
   items: z.array(z.object({
     name: z.string().min(1),
     url: z.string().optional(),
@@ -250,6 +285,10 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
     return res.status(409).json({ error: "LOCKED", message: "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá" });
   }
   const d = p.data;
+  if (d.items) {
+    const wrongUrl = findWrongMarketplaceUrl(order.source, d.items);
+    if (wrongUrl) return res.status(400).json({ error: "WRONG_MARKETPLACE", message: `Link không khớp: ${wrongUrl}` });
+  }
   const changes: { field: string; old: unknown; new: unknown }[] = [];
   const diff = (field: string, oldV: unknown, newV: unknown) => {
     if (newV !== undefined && String(oldV ?? "") !== String(newV ?? "")) changes.push({ field, old: oldV ?? null, new: newV });
@@ -260,6 +299,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   if (d.needsCheck !== undefined) { diff("needsCheck", order.needsCheck, d.needsCheck); data.needsCheck = d.needsCheck; }
   if (d.checkNote !== undefined) { diff("checkNote", order.checkNote, d.checkNote); data.checkNote = d.checkNote; }
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
+  if (d.nick !== undefined) { diff("nick", order.nick, d.nick); data.nick = d.nick; }
   for (const f of PRICING_FIELDS) {
     const nv = (d as any)[f];
     if (nv !== undefined) { diff(f, (order as any)[f], nv); data[f] = nv; }
@@ -288,8 +328,8 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   }
 
   await prisma.order.update({ where: { id: order.id }, data });
-  // Yahoo chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới
-  if (d.items && (order.source !== "yahoo" || order.yahooPaidAt)) {
+  // Yahoo/Mercari chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới
+  if (d.items && (!(PAY_LATER_SOURCES as readonly string[]).includes(order.source) || order.yahooPaidAt)) {
     await reverseOrderCardCharges(prisma, order.id);
     await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate });
   }
@@ -304,14 +344,14 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   res.json(updated);
 });
 
-// Yahoo "thanh toán sau": bấm đã TT -> chọn thẻ + ngày -> lúc này mới trừ thẻ
+// Yahoo/Mercari "thanh toán sau": bấm đã TT -> chọn thẻ + ngày -> lúc này mới trừ thẻ
 const paySchema = z.object({ walletId: z.string().uuid(), paidAt: z.coerce.date().optional() });
 ordersRouter.post("/:id/pay", authorize("orders.update"), async (req, res) => {
   const p = paySchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
-  if (order.source !== "yahoo") return res.status(409).json({ error: "NOT_YAHOO", message: "Chỉ đơn Yahoo mới thanh toán sau" });
+  if (!(PAY_LATER_SOURCES as readonly string[]).includes(order.source)) return res.status(409).json({ error: "NOT_YAHOO", message: "Chỉ đơn Yahoo/Mercari mới thanh toán sau" });
   if (order.yahooPaidAt) return res.status(409).json({ error: "ALREADY_PAID", message: "Đơn đã thanh toán" });
   const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
   if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
@@ -326,11 +366,11 @@ ordersRouter.post("/:id/pay", authorize("orders.update"), async (req, res) => {
   res.json({ ok: true });
 });
 
-// Hủy thanh toán Yahoo -> hoàn tiền về thẻ
+// Hủy thanh toán Yahoo/Mercari -> hoàn tiền về thẻ
 ordersRouter.post("/:id/unpay", authorize("orders.update"), async (req, res) => {
   const order = await prisma.order.findUnique({ where: { id: req.params.id } });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
-  if (order.source !== "yahoo" || !order.yahooPaidAt) return res.status(409).json({ error: "NOT_PAID", message: "Đơn chưa thanh toán" });
+  if (!(PAY_LATER_SOURCES as readonly string[]).includes(order.source) || !order.yahooPaidAt) return res.status(409).json({ error: "NOT_PAID", message: "Đơn chưa thanh toán" });
   await reverseOrderCardCharges(prisma, order.id);
   await prisma.order.update({ where: { id: order.id }, data: { yahooPaidAt: null } });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.yahoo_unpaid" });

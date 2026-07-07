@@ -295,6 +295,29 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
   return { rows: out, blankRows };
 }
 
+// Dọn màu + checkbox "Đã xử lý" cũ ở các dòng có BILL/thùng nhưng mã tracking đã bị xóa/để trống.
+async function clearBlankRows(sid: string, blankRows: { tab: string; row: number; sheetId: number }[]): Promise<void> {
+  if (!blankRows.length) return;
+  try {
+    const WHITE = { red: 1, green: 1, blue: 1 };
+    const colorReqs: any[] = [];
+    for (const br of blankRows) {
+      colorReqs.push({ repeatCell: {
+        range: { sheetId: br.sheetId, startRowIndex: br.row - 1, endRowIndex: br.row, startColumnIndex: 0, endColumnIndex: 24 },
+        cell: { userEnteredFormat: { backgroundColor: WHITE } },
+        fields: "userEnteredFormat.backgroundColor",
+      } });
+      colorReqs.push({ setDataValidation: { range: { sheetId: br.sheetId, startRowIndex: br.row - 1, endRowIndex: br.row, startColumnIndex: 23, endColumnIndex: 24 } } });
+    }
+    const CW = 100;
+    for (let i = 0; i < colorReqs.length; i += CW) {
+      await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
+    }
+  } catch (e) {
+    console.error("[gsheets] clearBlankRows", (e as Error).message);
+  }
+}
+
 // Quét file kho -> tracking nào trùng & chưa đóng thì set packedAt (cam). Trả số khớp / số cập nhật.
 export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): Promise<{ matched: number; updated: number }> {
   if (!saEnabled()) return { matched: 0, updated: 0 };
@@ -305,7 +328,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const dateByCode = new Map<string, Date | null>();
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
-  if (!codes.length) return { matched: 0, updated: 0 };
+  if (!codes.length) { await clearBlankRows(sid, blankRows); return { matched: 0, updated: 0 }; }
   const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true } } } });
 
   // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng

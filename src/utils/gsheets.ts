@@ -295,12 +295,17 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   if (!codes.length) return { matched: 0, updated: 0 };
   const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true } } } });
 
+  // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
+  const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
+  const isLocked = (d: Date | null) => (d ? lockedDates.has(new Date(d).toISOString().slice(0, 10)) : false);
+
   // Mã quét được nhưng chưa có tracking nào trong hệ thống (tracking sai/chưa nhập) -> tạo mồ côi
   // để không mất dấu hàng: sẽ hiện ở /control/unmatched + board Kho VN "chưa gắn", chờ sale/buyer resolve.
   const knownCodes = new Set(trks.map((t) => t.code));
   for (const c of codes) {
     if (knownCodes.has(c)) continue;
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt: dateByCode.get(c) ?? new Date(), status: "new" } });
+    const packedAt = dateByCode.get(c) ?? new Date();
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt) } });
     trks.push({ ...created, order: null } as (typeof trks)[number]);
   }
 
@@ -312,7 +317,9 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const t of trks) {
     if (t.packedAt) continue;
     const packedAt = dateByCode.get(t.code) ?? new Date();
-    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
+    const lateAfterLock = isLocked(packedAt);
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock } });
+    t.lateAfterLock = lateAfterLock;
     void syncTracking({ ...t, packedAt } as TrackingRow);
     updated++;
     if (t.order) { await recomputeOrderTotals(t.orderId!); customers.add(t.order.customerId); }
@@ -363,10 +370,11 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   // Nếu kho đã tự sửa tên (F khác tên hệ thống tính ra) -> không ghi đè, lưu lại customsName để dùng khi xuất hóa đơn.
   // Chú ý (U) = note gia cố/mở hàng + số dòng cần quét khi 1 mã dùng chung nhiều đơn; Link đối chiếu (V); Số trùng (W) = số món.
   // Cột X = checkbox "Đã xử lý" - kho tự tick khi đã xử lý xong (đổi tên/mở hàng/quét đủ dòng) -> tắt màu, không cần đợi hệ thống.
-  // Màu dòng theo ưu tiên: đã tick X -> trắng; đổi tên -> cam; trùng tracking (nhiều đơn 1 mã) -> xanh lá; mở hàng/gia cố -> vàng.
+  // Màu dòng theo ưu tiên: đã tick X -> trắng; quét sau khi chốt ngày -> tím (cần khai bổ sung); đổi tên -> cam; trùng tracking -> xanh lá; mở hàng/gia cố -> vàng.
   try {
     const data: { range: string; values: (string | number)[][] }[] = [];
     const colorReqs: any[] = [];
+    const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
     const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
     const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
     const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
@@ -383,6 +391,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       if (!orders.length) continue;
       const items = orders.flatMap((o) => o.items ?? []);
       const esc = r.tab.replace(/'/g, "''");
+      const isLate = group.some((t) => t.lateAfterLock);
+      if (r.resolved && isLate) for (const t of group) if (t.lateAfterLock) await prisma.tracking.update({ where: { id: t.id }, data: { lateAfterLock: false } });
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
@@ -398,13 +408,14 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       }
       const dbCount = (trksByCode.get(r.code) ?? []).length;
       const scannedCount = (rowsByCode.get(r.code) ?? []).length;
+      const lateNote = isLate && !r.resolved ? "Quét SAU KHI đã chốt ngày - cần khai bổ sung hải quan riêng" : "";
       const scanNote = dbCount > 1 ? `Mã dùng chung ${dbCount} đơn - đã quét ${scannedCount}/${dbCount} dòng` : "";
       const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
-      const note = [scanNote, checkNote].filter(Boolean).join(" | ");
+      const note = [lateNote, scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
-      const bg = r.resolved ? WHITE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE;
+      const bg = r.resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
       colorReqs.push({ repeatCell: {
         range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 24 },
         cell: { userEnteredFormat: { backgroundColor: bg } },
@@ -445,16 +456,17 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: false };
   const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } } });
+  const packedAt = (tab ? tabDate(tab) : null) ?? group[0]?.packedAt ?? new Date();
+  const locked = Boolean(await prisma.packDayLock.findUnique({ where: { date: new Date(packedAt.toISOString().slice(0, 10) + "T00:00:00") } }));
   let t = group[0];
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); cron 2 phút sau sẽ gán kiện theo BILL/thùng.
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt: (tab ? tabDate(tab) : null) ?? new Date(), status: "new" } });
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked } });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
   }
-  const packedAt = (tab ? tabDate(tab) : null) ?? t.packedAt ?? new Date();
-  if (!t.packedAt) await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
+  if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
 
   if (tab && row) {
     try {
@@ -484,20 +496,24 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
         }
       }
       const dbCount = group.length;
+      const isLate = locked || group.some((x) => x.lateAfterLock);
+      if (resolved && isLate) for (const x of group) if (x.lateAfterLock) await prisma.tracking.update({ where: { id: x.id }, data: { lateAfterLock: false } });
+      const lateNote = isLate && !resolved ? "Quét SAU KHI đã chốt ngày - cần khai bổ sung hải quan riêng" : "";
       const scanNote = dbCount > 1 ? `Mã dùng chung ${dbCount} đơn - đã quét 1/${dbCount} dòng` : "";
       const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
-      const note = [scanNote, checkNote].filter(Boolean).join(" | ");
+      const note = [lateNote, scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${row}:W${row}`, values: [[note, link, count]] });
       await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data });
       const sheetId = await getSheetIdByTitle(sid, tab);
       if (sheetId != null) {
+        const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
         const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
         const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
         const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
         const WHITE = { red: 1, green: 1, blue: 1 };
-        const bg = resolved ? WHITE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE;
+        const bg = resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
         await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
           { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } },
           { setDataValidation: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 }, rule: { condition: { type: "BOOLEAN" }, strict: true } } },

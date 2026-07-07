@@ -158,6 +158,43 @@ warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), async (r
   res.json(r);
 });
 
+// "Chốt ngày" khai hải quan: mã tracking quét vào SAU khi ngày đã chốt sẽ bị đánh dấu lateAfterLock,
+// không gộp vào invoice ngày đó nữa (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
+warehouseRouter.get("/day-locks", authorize("system.manage_settings"), async (_req, res) => {
+  const rows = await prisma.packDayLock.findMany({ orderBy: { date: "desc" }, take: 60 });
+  res.json(rows);
+});
+const dayLockSchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
+warehouseRouter.post("/day-locks", authorize("system.manage_settings"), async (req, res) => {
+  const p = dayLockSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const date = new Date(`${p.data.date}T00:00:00`);
+  const row = await prisma.packDayLock.upsert({ where: { date }, update: {}, create: { date, lockedBy: req.user!.id } });
+  await logAudit({ actorId: req.user!.id, action: "warehouse.day_lock", metadata: { date: p.data.date } });
+  res.status(201).json(row);
+});
+warehouseRouter.delete("/day-locks/:date", authorize("system.manage_settings"), async (req, res) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "BAD_REQUEST" });
+  const date = new Date(`${req.params.date}T00:00:00`);
+  await prisma.packDayLock.deleteMany({ where: { date } });
+  await logAudit({ actorId: req.user!.id, action: "warehouse.day_unlock", metadata: { date: req.params.date } });
+  res.json({ ok: true });
+});
+
+// Danh sách tracking quét sau khi ngày đã chốt - cần khai bổ sung hải quan riêng
+warehouseRouter.get("/late-after-lock", authorize("system.manage_settings"), async (_req, res) => {
+  const rows = await prisma.tracking.findMany({
+    where: { lateAfterLock: true },
+    orderBy: { packedAt: "desc" }, take: 200,
+    select: { id: true, code: true, packedAt: true, order: { select: { code: true, customer: { select: { name: true } } } } },
+  });
+  res.json(rows);
+});
+warehouseRouter.post("/late-after-lock/:id/resolve", authorize("system.manage_settings"), async (req, res) => {
+  await prisma.tracking.update({ where: { id: req.params.id }, data: { lateAfterLock: false } });
+  res.json({ ok: true });
+});
+
 // Kho VN: nhập mã tracking nội địa VN cho 1 tracking
 const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });
 warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), async (req, res) => {

@@ -217,6 +217,8 @@ model Tracking {
   packedAt          DateTime?     @map("packed_at")
   // Tên khai hải quan - kho Nhật tự sửa trong sheet (cột F) để dễ thông quan; khác tên gốc thì giữ lại đây, dùng khi xuất hóa đơn
   customsName       String?       @map("customs_name")
+  // Quét vào đúng ngày đã "chốt" khai hải quan (PackDayLock) -> không gộp vào invoice ngày đó nữa, cần khai bổ sung riêng
+  lateAfterLock     Boolean       @default(false) @map("late_after_lock")
   status            String        @default("new")
   createdAt         DateTime      @default(now()) @map("created_at")
   order             Order?        @relation(fields: [orderId], references: [id])
@@ -225,6 +227,15 @@ model Tracking {
 
   @@index([code])
   @@map("trackings")
+}
+
+// Ngày đã "chốt" khai hải quan (nộp invoice) - mã tracking quét vào sau khi ngày này đã chốt sẽ bị đánh dấu lateAfterLock
+model PackDayLock {
+  date      DateTime @id @db.Date
+  lockedAt  DateTime @default(now()) @map("locked_at")
+  lockedBy  String?  @map("locked_by") @db.Uuid
+
+  @@map("pack_day_locks")
 }
 
 // Kiện / carton: kho Nhật báo cân tổng; hệ thống cộng cân lẻ tracking để đối soát

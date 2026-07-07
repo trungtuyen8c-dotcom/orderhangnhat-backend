@@ -245,6 +245,12 @@ function isTrackingCode(v: string): boolean {
   return c.length >= 8 && /^[A-Za-z0-9._-]+$/.test(c);
 }
 
+// Checkbox "Đã xử lý" đọc formatted value -> tùy locale bảng tính có thể ra "TRUE" hoặc "ĐÚNG" (đã tick), chấp nhận vài biến thể
+function isChecked(v: string): boolean {
+  const s = (v ?? "").trim().toUpperCase();
+  return s === "TRUE" || s === "ĐÚNG" || s === "1";
+}
+
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
 export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[]> {
@@ -273,8 +279,7 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
       codeCol.forEach((cell, j) => {
         const code = (cell ?? "").trim();
         if (isTrackingCode(code)) {
-          const done = (doneCol[j] ?? "").trim().toUpperCase();
-          out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: done === "TRUE" });
+          out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: isChecked(doneCol[j] ?? "") });
         }
       });
     });
@@ -421,11 +426,14 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         cell: { userEnteredFormat: { backgroundColor: bg } },
         fields: "userEnteredFormat.backgroundColor",
       } });
-      // Đảm bảo ô X là checkbox để kho tick, không phải gõ tay TRUE/FALSE
-      colorReqs.push({ setDataValidation: {
-        range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 23, endColumnIndex: 24 },
-        rule: { condition: { type: "BOOLEAN" }, strict: true },
-      } });
+      // Chỉ dòng có màu (cần xử lý) mới hiện checkbox "Đã xử lý"; dòng bình thường/đã xử lý xong thì bỏ checkbox, dọn sạch ô X.
+      const xRange = { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 23, endColumnIndex: 24 };
+      if (bg !== WHITE) {
+        colorReqs.push({ setDataValidation: { range: xRange, rule: { condition: { type: "BOOLEAN" }, strict: true } } });
+      } else {
+        colorReqs.push({ setDataValidation: { range: xRange } });
+        if (r.resolved) data.push({ range: `'${esc}'!X${r.row}`, values: [[""]] });
+      }
     }
     const CW = 100;
     for (let i = 0; i < data.length; i += CW) {
@@ -482,7 +490,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
       // Đọc lại F (tên) + X (đã xử lý) hiện tại của dòng để không đè tên kho đã tự sửa
       const cur = (await apiSheet(sid, `/values:batchGet?ranges=${encodeURIComponent(`'${esc}'!F${row}`)}&ranges=${encodeURIComponent(`'${esc}'!X${row}`)}`, "GET")) as { valueRanges?: { values?: string[][] }[] };
       const curName = (cur.valueRanges?.[0]?.values?.[0]?.[0] ?? "").trim();
-      const resolved = (cur.valueRanges?.[1]?.values?.[0]?.[0] ?? "").trim().toUpperCase() === "TRUE";
+      const resolved = isChecked(cur.valueRanges?.[1]?.values?.[0]?.[0] ?? "");
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
@@ -505,18 +513,23 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${row}:W${row}`, values: [[note, link, count]] });
+      const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
+      const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
+      const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
+      const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
+      const WHITE = { red: 1, green: 1, blue: 1 };
+      const bg = resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
+      if (bg === WHITE && resolved) data.push({ range: `'${esc}'!X${row}`, values: [[""]] });
       await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data });
       const sheetId = await getSheetIdByTitle(sid, tab);
       if (sheetId != null) {
-        const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
-        const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
-        const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
-        const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
-        const WHITE = { red: 1, green: 1, blue: 1 };
-        const bg = resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
+        // Chỉ dòng có màu (cần xử lý) mới hiện checkbox "Đã xử lý"; dòng bình thường/đã xử lý xong thì bỏ checkbox.
+        const xRange = { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 };
         await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
           { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } },
-          { setDataValidation: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 }, rule: { condition: { type: "BOOLEAN" }, strict: true } } },
+          bg !== WHITE
+            ? { setDataValidation: { range: xRange, rule: { condition: { type: "BOOLEAN" }, strict: true } } }
+            : { setDataValidation: { range: xRange } },
         ] });
       }
     } catch (e) { console.error("[gsheets] syncPackedOne", (e as Error).message); }

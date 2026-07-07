@@ -130,6 +130,26 @@ warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res
   res.status(201).json(t);
 });
 
+// Gỡ tracking khỏi Kho VN: nếu mồ côi (không thuộc đơn nào) thì xóa hẳn - an toàn vì không có gì để mất.
+// Nếu thuộc đơn thật thì KHÔNG xóa (dữ liệu đơn/kế toán phải giữ nguyên) - chỉ reset trạng thái đóng gói
+// để biến mất khỏi board, quét sheet lại vẫn tự nhảy vào bình thường.
+warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (req, res) => {
+  const t = await prisma.tracking.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!t.orderId) {
+    await prisma.trackingLog.deleteMany({ where: { trackingId: t.id } });
+    await prisma.tracking.delete({ where: { id: t.id } });
+    await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.deleted", metadata: { code: t.code } });
+  } else {
+    await prisma.tracking.update({
+      where: { id: t.id },
+      data: { packedAt: null, cartonId: null, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false },
+    });
+    await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
+  }
+  res.json({ ok: true });
+});
+
 async function getHookKey(): Promise<string> {
   const existing = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
   if (existing?.value) return existing.value;

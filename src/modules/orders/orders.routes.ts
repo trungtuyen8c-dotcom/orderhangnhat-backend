@@ -58,6 +58,29 @@ ordersRouter.get("/fix-requests", authorize("orders.update"), async (req, res) =
   res.json(orders.map((o) => ({ id: o.id, code: o.code, fixRequest: o.fixRequest, customer: o.customer?.name ?? null })));
 });
 
+// Cảnh báo trùng link sản phẩm / mã tracking với đơn khác - để sale tự xác nhận trước khi lưu, không tự chặn.
+ordersRouter.get("/check-duplicate", authorize("orders.list"), async (req, res) => {
+  const url = String(req.query.url ?? "").trim();
+  const code = String(req.query.code ?? "").trim();
+  const excludeOrderId = String(req.query.excludeOrderId ?? "").trim();
+  const urlOrders = url
+    ? await prisma.orderItem.findMany({
+        where: { url, ...(excludeOrderId ? { orderId: { not: excludeOrderId } } : {}) },
+        select: { order: { select: { code: true } } },
+      })
+    : [];
+  const codeOrders = code
+    ? await prisma.tracking.findMany({
+        where: { code, orderId: { not: null }, ...(excludeOrderId ? { NOT: { orderId: excludeOrderId } } : {}) },
+        select: { order: { select: { code: true } } },
+      })
+    : [];
+  res.json({
+    urlOrders: [...new Set(urlOrders.map((i) => i.order.code))],
+    codeOrders: [...new Set(codeOrders.map((t) => t.order!.code))],
+  });
+});
+
 ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
   const order = await prisma.order.findUnique({
     where: { id: req.params.id },

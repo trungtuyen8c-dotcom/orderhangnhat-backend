@@ -28,7 +28,6 @@ trackingRouter.get("/scrape", authorize("trackings.create"), async (req, res) =>
 trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   const where: any = {};
   if (req.query.orderId) where.orderId = String(req.query.orderId);
-  if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
   // Tồn kho = đã về kho (packedAt) nhưng chưa có tracking VN (chưa đóng đi VN)
   if (req.query.stock === "1") { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
   const customerQ = String(req.query.customer ?? "").trim();
@@ -66,7 +65,6 @@ const createSchema = z.object({
   url: z.string().optional(),
   packedAt: z.coerce.date().optional(),
   cartonId: z.string().uuid().optional(),
-  shipmentId: z.string().uuid().optional(),
 });
 
 // Backfill: tạo 1 tracking trống cho mọi đơn chưa có tracking (đơn cũ)
@@ -131,7 +129,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   res.status(201).json(t);
 });
 
-// Kho Nhật: quét ra tên + giá + cân, gán chuyến
+// Kho Nhật: quét ra tên + giá + cân
 const updateSchema = z.object({
   code: z.string().optional(),
   jpName: z.string().optional(),
@@ -145,8 +143,6 @@ const updateSchema = z.object({
   review: z.string().nullable().optional(),
   url: z.string().nullable().optional(),
   packedAt: z.coerce.date().nullable().optional(),
-  docCapturedAt: z.coerce.date().nullable().optional(),
-  shipmentId: z.string().uuid().optional(),
   status: z.string().optional(),
 });
 

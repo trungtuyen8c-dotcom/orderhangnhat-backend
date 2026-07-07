@@ -143,11 +143,10 @@ async function storageOverdueCount(): Promise<number> {
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
   const weekAgo = new Date(Date.now() - 7 * 86400000);
-  const [lateOrders, notReviewed, pendingDeposits, docNotCaptured, unmatched, missingPrice, cartons, overdue, storageOverdue] = await Promise.all([
+  const [lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue] = await Promise.all([
     prisma.order.count({ where: { status: { not: "cancelled" }, trackings: { none: {} }, createdAt: { lt: weekAgo } } }),
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
-    prisma.tracking.count({ where: { packedAt: { not: null }, docCapturedAt: null } }),
     prisma.tracking.count({ where: { orderId: null } }),
     prisma.order.count({ where: { status: { not: "cancelled" }, totalVnd: null } }),
     prisma.carton.findMany({ where: { declaredWeightKg: { not: null } }, include: { trackings: { select: { jpWeightKg: true, vnWeightKg: true } } } }),
@@ -159,7 +158,7 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     return Math.abs(actual - Number(c.declaredWeightKg)) > 0.1;
   }).length;
   res.json({
-    lateOrders, notReviewed, pendingDeposits, docNotCaptured, unmatched, missingPrice, cartonMismatch,
+    lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
     overdueDebts: overdue.list.length, storageOverdue,
   });
 });

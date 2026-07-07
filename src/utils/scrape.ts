@@ -3,7 +3,9 @@ export interface ScrapedItem { name: string | null; priceJpy: number | null; }
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 // Chỉ cho phép Yahoo / Mercari (tránh SSRF + đúng phạm vi)
-const ALLOWED = [/(^|\.)yahoo\.co\.jp$/, /(^|\.)mercari\.com$/, /(^|\.)mercari\.jp$/];
+const YAHOO_RE = /(^|\.)yahoo\.co\.jp$/;
+const MERCARI_RE = [/(^|\.)mercari\.com$/, /(^|\.)mercari\.jp$/];
+const ALLOWED = [YAHOO_RE, ...MERCARI_RE];
 
 export function isAllowedUrl(url: string): boolean {
   try {
@@ -11,6 +13,16 @@ export function isAllowedUrl(url: string): boolean {
     if (u.protocol !== "https:" && u.protocol !== "http:") return false;
     return ALLOWED.some((re) => re.test(u.hostname));
   } catch { return false; }
+}
+
+// Xác định link thuộc marketplace nào, dùng để chặn dán nhầm link Yahoo vào đơn Mercari và ngược lại
+export function detectMarketplace(url: string): "yahoo" | "mercari" | null {
+  try {
+    const h = new URL(url).hostname;
+    if (YAHOO_RE.test(h)) return "yahoo";
+    if (MERCARI_RE.some((re) => re.test(h))) return "mercari";
+    return null;
+  } catch { return null; }
 }
 
 export async function scrapeItem(url: string): Promise<ScrapedItem> {

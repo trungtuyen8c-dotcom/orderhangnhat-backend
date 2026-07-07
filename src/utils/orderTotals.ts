@@ -11,6 +11,24 @@ export function trackingShipVnd(t: { jpWeightKg: unknown; vnWeightKg?: unknown; 
   return kg * perKgVnd;
 }
 
+// Số dư nợ 1 đơn. Có tỉ giá -> nợ theo VND (paid = tổng amountVnd các phiếu thu/chi).
+// Chưa có tỉ giá (khách trả thẳng ¥) -> KHÔNG ép subtotal ¥ thành số ₫ (sai đơn vị), giữ nợ theo ¥
+// và chỉ trừ phần đã thu bằng ¥ (payments currency=JPY dùng amountOrig).
+export function computeDebtBalance(
+  order: { totalVnd: unknown; totalQuote: unknown },
+  payments: { type: string; amountVnd: unknown; currency: string; amountOrig: unknown }[],
+): { balance: number; currency: "VND" | "JPY" } {
+  if (order.totalVnd != null) {
+    const paidVnd = payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
+    return { balance: Number(order.totalVnd) - paidVnd, currency: "VND" };
+  }
+  const paidJpy = payments.reduce((s, p) => {
+    if (p.currency !== "JPY") return s;
+    return p.type === "refund" ? s - Number(p.amountOrig) : s + Number(p.amountOrig);
+  }, 0);
+  return { balance: Number(order.totalQuote ?? 0) - paidJpy, currency: "JPY" };
+}
+
 // Tính lại totalQuote (¥), totalVnd và công nợ của 1 đơn.
 // totalVnd = subtotal¥ x tỉ giá + ship + phụ thu - giảm (¥ x tỉ giá, ₫ cộng thẳng) + ship các tracking gán đơn.
 // Chưa có tỉ giá mà còn khoản ¥ chưa quy đổi -> totalVnd = null.
@@ -57,9 +75,8 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   // Công nợ chỉ cập nhật khi đã có (giữ nguyên: công nợ phát sinh khi ghi tiền)
   const existing = await prisma.debt.findFirst({ where: { orderId } });
   if (existing) {
-    const paid = order.payments.reduce((s, p) => (p.type === "refund" ? s - Number(p.amountVnd) : s + Number(p.amountVnd)), 0);
-    const balance = Number(totalVnd ?? subtotalJpy) - paid;
-    await prisma.debt.update({ where: { id: existing.id }, data: { balance } });
+    const { balance, currency } = computeDebtBalance({ totalVnd, totalQuote: subtotalJpy }, order.payments);
+    await prisma.debt.update({ where: { id: existing.id }, data: { balance, currency } });
   }
 
   return { totalQuote: subtotalJpy, totalVnd };

@@ -6,6 +6,7 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { computeDebtBalance } from "../../utils/orderTotals.js";
 
 export const accountingRouter = Router();
 accountingRouter.use(authenticate);
@@ -13,14 +14,10 @@ accountingRouter.use(authenticate);
 async function recomputeDebt(orderId: string) {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { payments: true } });
   if (!order) return;
-  const paid = order.payments.reduce((s, p) => {
-    const amt = Number(p.amountVnd);
-    return p.type === "refund" ? s - amt : s + amt;
-  }, 0);
-  const balance = Number(order.totalVnd ?? order.totalQuote ?? 0) - paid;
+  const { balance, currency } = computeDebtBalance(order, order.payments);
   const existing = await prisma.debt.findFirst({ where: { orderId } });
-  if (existing) await prisma.debt.update({ where: { id: existing.id }, data: { balance } });
-  else await prisma.debt.create({ data: { id: uuid(), orderId, customerId: order.customerId, balance } });
+  if (existing) await prisma.debt.update({ where: { id: existing.id }, data: { balance, currency } });
+  else await prisma.debt.create({ data: { id: uuid(), orderId, customerId: order.customerId, balance, currency } });
 }
 
 const paymentSchema = z.object({
@@ -89,8 +86,10 @@ accountingRouter.get("/orders/:id/payments", authorize("orders.read"), async (re
 
 // Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu
 accountingRouter.get("/debts", authorize("orders.read"), async (_req, res) => {
+  // Bảng này hiển thị số ₫ - chỉ gộp nợ VND, nợ ¥ (khách trả thẳng, chưa có tỉ giá) không trộn vào đây
   const grouped = await prisma.debt.groupBy({
     by: ["customerId"],
+    where: { currency: "VND" },
     _sum: { balance: true },
     _max: { updatedAt: true },
   });
@@ -299,7 +298,7 @@ accountingRouter.get("/monthly-report", authorize("orders.read"), async (req, re
     prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
     prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
     prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-    prisma.debt.groupBy({ by: ["customerId"], _sum: { balance: true } }),
+    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true } }),
   ]);
 
   const cmap = new Map(customers.map((c) => [c.id, c]));
@@ -381,6 +380,75 @@ accountingRouter.get("/expenses/monthly", authorize("orders.read"), async (req, 
 accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {
   const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" } });
   res.json(wallets);
+});
+
+// Chỉ tên ví (không balance) - cho sale chọn PTTT khi tạo/sửa đơn, không cần quyền accounting.reconcile
+accountingRouter.get("/wallets/names", authorize("orders.create"), async (_req, res) => {
+  const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" }, select: { name: true } });
+  res.json(wallets.map((w) => w.name));
+});
+
+// id/tên/currency (không balance) - cho sale/NV mua chọn thẻ khi bấm "Đã thanh toán", không cần accounting.reconcile
+accountingRouter.get("/wallets/basic", authorize("orders.update"), async (_req, res) => {
+  const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true, currency: true } });
+  res.json(wallets);
+});
+
+// Bảng đối soát theo từng ngày trong tháng: bám mốc wallet.balance hiện tại (số đúng, kể cả có số dư
+// ban đầu nhập tay lúc tạo ví không có dòng sổ tương ứng) rồi lùi theo giao dịch, KHÔNG cộng dồn từ 0.
+accountingRouter.get("/wallets/:id/daily-summary", authorize("accounting.reconcile"), async (req, res) => {
+  const wallet = await prisma.wallet.findUnique({ where: { id: req.params.id } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+
+  const monthStr = String(req.query.month ?? "");
+  const monthDate = /^\d{4}-\d{2}$/.test(monthStr) ? new Date(`${monthStr}-01T00:00:00`) : new Date();
+  const year = monthDate.getFullYear(), month = monthDate.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthEnd = new Date(year, month, daysInMonth, 23, 59, 59, 999);
+
+  const [txns, actuals] = await Promise.all([
+    prisma.walletTxn.findMany({ where: { walletId: wallet.id }, orderBy: { createdAt: "asc" } }),
+    prisma.walletDailyActual.findMany({ where: { walletId: wallet.id, date: { gte: new Date(year, month, 1), lte: monthEnd } } }),
+  ]);
+  const current = Number(wallet.balance);
+  const actualByDay = new Map(actuals.map((a) => [a.date.toISOString().slice(0, 10), Number(a.actualBalance)]));
+
+  let afterCursor = 0;
+  for (const t of txns) if (t.createdAt > monthEnd) afterCursor += Number(t.amount);
+
+  const days: any[] = [];
+  for (let d = daysInMonth; d >= 1; d--) {
+    const dayEnd = new Date(year, month, d, 23, 59, 59, 999);
+    const dayStart = new Date(year, month, d, 0, 0, 0, 0);
+    let sameDay = 0;
+    for (const t of txns) if (t.createdAt >= dayStart && t.createdAt <= dayEnd) sameDay += Number(t.amount);
+    const closing = current - afterCursor;
+    const opening = closing - sameDay;
+    afterCursor += sameDay;
+
+    const dateKey = dayStart.toISOString().slice(0, 10);
+    const actual = actualByDay.has(dateKey) ? actualByDay.get(dateKey)! : null;
+    days.push({ date: dateKey, opening, closing, actual, diff: actual == null ? null : actual - closing });
+  }
+  days.reverse();
+
+  res.json({ walletId: wallet.id, name: wallet.name, currency: wallet.currency, month: `${year}-${String(month + 1).padStart(2, "0")}`, days });
+});
+
+accountingRouter.put("/wallets/:id/daily-actual", authorize("accounting.reconcile"), async (req, res) => {
+  const p = z.object({ date: z.string(), actualBalance: z.number() }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "VALIDATION", details: p.error.issues });
+  const wallet = await prisma.wallet.findUnique({ where: { id: req.params.id } });
+  if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
+
+  const date = new Date(`${p.data.date}T00:00:00`);
+  const row = await prisma.walletDailyActual.upsert({
+    where: { walletId_date: { walletId: wallet.id, date } },
+    update: { actualBalance: p.data.actualBalance, updatedBy: req.user!.id },
+    create: { walletId: wallet.id, date, actualBalance: p.data.actualBalance, updatedBy: req.user!.id },
+  });
+  await logAudit({ actorId: req.user!.id, targetId: wallet.id, action: "wallet.daily_actual_set", metadata: { date: p.data.date, actualBalance: p.data.actualBalance } });
+  res.json({ date: p.data.date, actualBalance: Number(row.actualBalance) });
 });
 
 // ===== Quỹ tổng (JPY) =====

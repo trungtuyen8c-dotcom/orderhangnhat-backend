@@ -18,7 +18,7 @@ async function reinforceUnit(): Promise<number> {
 }
 
 // Báo cáo phải trả kho/cty theo tháng
-companyCostRouter.get("/report", authorize("accounting.reconcile"), async (req, res) => {
+companyCostRouter.get("/report", authorize("companycost.view"), async (req, res) => {
   const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
   const unit = await reinforceUnit();
 
@@ -85,7 +85,7 @@ companyCostRouter.delete("/:id", authorize("accounting.record_payment"), async (
 });
 
 // Cấu hình đơn giá gia cố
-companyCostRouter.get("/reinforce-price", authorize("accounting.reconcile"), async (_req, res) => {
+companyCostRouter.get("/reinforce-price", authorize("companycost.view"), async (_req, res) => {
   res.json({ unit: await reinforceUnit() });
 });
 companyCostRouter.put("/reinforce-price", authorize("system.manage_settings"), async (req, res) => {

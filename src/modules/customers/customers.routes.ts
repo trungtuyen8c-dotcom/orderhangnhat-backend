@@ -5,7 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { parseSheetId } from "../../utils/gsheets.js";
+import { parseSheetId, syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const customersRouter = Router();
 customersRouter.use(authenticate);
@@ -13,13 +13,19 @@ customersRouter.use(authenticate);
 customersRouter.get("/", authorize("customers.list"), async (_req, res) => {
   const rows = await prisma.customer.findMany({ orderBy: { createdAt: "desc" }, take: 500 });
   // Gộp doanh số (tổng VND các đơn) + công nợ (tổng dư nợ) theo khách
+  // Nợ tách riêng VND/JPY - khách trả thẳng ¥ (chưa có tỉ giá) không bị ép nhầm sang ₫
   const [revenue, debts] = await Promise.all([
     prisma.order.groupBy({ by: ["customerId"], _sum: { totalVnd: true } }),
-    prisma.debt.groupBy({ by: ["customerId"], _sum: { balance: true } }),
+    prisma.debt.groupBy({ by: ["customerId", "currency"], _sum: { balance: true } }),
   ]);
   const rev = new Map(revenue.map((r) => [r.customerId, Number(r._sum.totalVnd ?? 0)]));
-  const debtMap = new Map(debts.map((d) => [d.customerId, Number(d._sum.balance ?? 0)]));
-  res.json(rows.map((c) => ({ ...c, revenue: rev.get(c.id) ?? 0, debt: debtMap.get(c.id) ?? 0 })));
+  const debtMap = new Map<string, number>();
+  const debtJpyMap = new Map<string, number>();
+  for (const d of debts) {
+    const m = d.currency === "JPY" ? debtJpyMap : debtMap;
+    m.set(d.customerId, (m.get(d.customerId) ?? 0) + Number(d._sum.balance ?? 0));
+  }
+  res.json(rows.map((c) => ({ ...c, revenue: rev.get(c.id) ?? 0, debt: debtMap.get(c.id) ?? 0, debtJpy: debtJpyMap.get(c.id) ?? 0 })));
 });
 
 const schema = z.object({
@@ -64,6 +70,15 @@ customersRouter.patch("/:id", authorize("customers.update"), async (req, res) =>
   const c = await prisma.customer.update({ where: { id: req.params.id }, data: withSheet(parsed.data) });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "customer.updated" });
   res.json(c);
+});
+
+// Đẩy lại toàn bộ đơn + sổ cọc cũ vào sheet khách (dùng khi mới đổi link sheet)
+customersRouter.post("/:id/sync-sheet", authorize("customers.update"), async (req, res) => {
+  const c = await prisma.customer.findUnique({ where: { id: req.params.id } });
+  if (!c) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!c.sheetId) return res.status(400).json({ error: "NO_SHEET", message: "Khách chưa có link Sheet" });
+  await syncCustomerOrders(c.id);
+  res.json({ ok: true });
 });
 
 customersRouter.delete("/:id", authorize("customers.delete"), async (req, res) => {

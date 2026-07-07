@@ -7,7 +7,7 @@ const prisma = new PrismaClient();
 const PERMISSIONS = [
   "orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "orders.delete",
   "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete",
-  "shipments.list", "shipments.create", "shipments.update", "shipments.delete", "shipments.upload_doc",
+  "shipments.list", "shipments.upload_doc",
   "warehouse.weigh_jp", "warehouse.weigh_vn",
   "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage",
   "customers.list", "customers.create", "customers.update", "customers.delete",
@@ -15,16 +15,17 @@ const PERMISSIONS = [
   "roles.assign", "roles.create", "roles.update", "roles.delete", "permissions.list",
   "media.upload",
   "control.view",
+  "companycost.view",
   "system.view_audit_log", "system.manage_settings",
 ];
 
 const ROLES: Record<string, { name: string; system: boolean; perms: string[] | "*" }> = {
   super_admin: { name: "Super Admin", system: true, perms: "*" },
   admin: { name: "Admin", system: true, perms: PERMISSIONS.filter((p) => !p.startsWith("system.manage")) },
-  sale: { name: "Sale", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.create", "shipments.update", "shipments.delete", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view"] },
-  accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage"] },
-  buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "trackings.create", "trackings.update", "media.upload", "accounting.note_deposit"] },
-  jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.create", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload", "control.view"] },
+  sale: { name: "Sale", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view"] },
+  accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage", "companycost.view"] },
+  buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view", "companycost.view"] },
+  jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload", "control.view"] },
   vn_warehouse: { name: "Kho VN", system: false, perms: ["trackings.list", "warehouse.weigh_vn"] },
   customs: { name: "Hải quan", system: false, perms: ["orders.list", "orders.update_status", "shipments.list"] },
   delivery: { name: "Giao hàng", system: false, perms: ["orders.list", "orders.update_status"] },

@@ -369,11 +369,12 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     const single = rowMatch.get(`${r.tab}|${r.row}`);
     const targets = single ? [single] : (trksByCode.get(r.code) ?? []);
     for (const t of targets) {
-      const data: { cartonId?: string; packedAt?: Date } = {};
+      const data: { cartonId?: string; packedAt?: Date; packRow?: number } = {};
       if (!t.cartonId) data.cartonId = cartonId;
       // Ghép được đúng 1-1 với dòng vật lý -> ngày dòng đó là chuẩn; mã dùng chung nhiều ngày có thể
       // đã bị khoá packedAt theo ngày quét đầu tiên (sai), sửa lại khớp đúng kiện/ngày thật.
       if (single && r.date && t.packedAt && r.date.toISOString().slice(0, 10) !== new Date(t.packedAt).toISOString().slice(0, 10)) data.packedAt = r.date;
+      if (t.packRow !== r.row) data.packRow = r.row;
       if (Object.keys(data).length) { await prisma.tracking.update({ where: { id: t.id }, data }); Object.assign(t, data); }
     }
   }
@@ -503,6 +504,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
     group.push(t);
   }
   if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
+  if (row && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
 
   if (tab && row) {
     try {

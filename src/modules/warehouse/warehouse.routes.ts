@@ -48,8 +48,8 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
   const customerQ = String(req.query.customer ?? "").trim();
   const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
   const [cartons, loose] = await Promise.all([
-    prisma.carton.findMany({ orderBy: { createdAt: "desc" }, include: { trackings: { where: { ...boardWhere, ...customerFilter }, select: trkSelect } } }),
-    prisma.tracking.findMany({ where: { packedAt: { not: null }, cartonId: null, ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: { packedAt: "desc" } }),
+    prisma.carton.findMany({ orderBy: { createdAt: "desc" }, include: { trackings: { where: { ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "asc" }, { packRow: "asc" }] } } }),
+    prisma.tracking.findMany({ where: { packedAt: { not: null }, cartonId: null, ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "desc" }, { packRow: "asc" }] }),
   ]);
   type Day = { day: string; cartons: any[]; unassigned: any[] };
   const days = new Map<string, Day>();

@@ -533,37 +533,82 @@ accountingRouter.put("/wallets/:id/daily-actual", authorize("accounting.reconcil
   res.json({ date: p.data.date, actualBalance: Number(row.actualBalance) });
 });
 
-// ===== Quỹ tổng (JPY) =====
+// ===== Quỹ tổng (JPY): NV ghi -> CHỜ xác nhận (chưa đụng số dư) -> kế toán Xác nhận thì tiền mới thực đổi =====
 async function getFund() {
   return prisma.fund.upsert({ where: { id: "main" }, update: {}, create: { id: "main", balance: 0 } });
 }
 
-accountingRouter.get("/fund", authorize("accounting.reconcile"), async (_req, res) => {
+async function applyFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; note: string | null }) {
+  const amt = Number(t.amountYen);
+  if (t.type === "topup") await prisma.fund.update({ where: { id: "main" }, data: { balance: { increment: amt } } });
+  else if (t.type === "set") await prisma.fund.update({ where: { id: "main" }, data: { balance: amt } });
+  else if (t.type === "allocate") {
+    await prisma.fund.update({ where: { id: "main" }, data: { balance: { decrement: amt } } });
+    await prisma.wallet.update({ where: { id: t.walletId! }, data: { balance: { increment: amt } } });
+    await prisma.walletTxn.create({ data: { id: uuid(), walletId: t.walletId!, amount: amt, type: "fund_allocate", refFundTxnId: t.id } });
+  } else if (t.type === "cashback") {
+    await prisma.wallet.update({ where: { id: t.walletId! }, data: { balance: { increment: amt } } });
+    await prisma.walletTxn.create({ data: { id: uuid(), walletId: t.walletId!, amount: amt, type: "cashback", statementRef: t.note ?? null, refFundTxnId: t.id } });
+  }
+}
+async function reverseFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; prevBalance: unknown }) {
+  const amt = Number(t.amountYen);
+  if (t.type === "topup") await prisma.fund.update({ where: { id: "main" }, data: { balance: { decrement: amt } } });
+  else if (t.type === "set") await prisma.fund.update({ where: { id: "main" }, data: { balance: Number(t.prevBalance ?? 0) } });
+  else if (t.type === "allocate") {
+    await prisma.fund.update({ where: { id: "main" }, data: { balance: { increment: amt } } });
+    await prisma.wallet.update({ where: { id: t.walletId! }, data: { balance: { decrement: amt } } });
+    await prisma.walletTxn.deleteMany({ where: { refFundTxnId: t.id } });
+  } else if (t.type === "cashback") {
+    await prisma.wallet.update({ where: { id: t.walletId! }, data: { balance: { decrement: amt } } });
+    await prisma.walletTxn.deleteMany({ where: { refFundTxnId: t.id } });
+  }
+}
+
+accountingRouter.get("/fund", authorize("accounting.reconcile"), async (req, res) => {
   const fund = await getFund();
-  const txns = await prisma.fundTxn.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
-  res.json({ balance: Number(fund.balance), txns });
+  const status = String(req.query.status ?? "all");
+  const where = status === "pending" ? { confirmed: false, fixRequest: null }
+    : status === "confirmed" ? { confirmed: true }
+    : status === "fix_request" ? { fixRequest: { not: null } }
+    : {};
+  const txns = await prisma.fundTxn.findMany({ where, orderBy: { createdAt: "desc" }, take: 200 });
+  const uids = [...new Set(txns.flatMap((t) => [t.recordedBy, t.confirmedBy]).filter((x): x is string => !!x))];
+  const users = await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, fullName: true, email: true } });
+  const umap = new Map(users.map((u) => [u.id, u.fullName ?? u.email]));
+  res.json({
+    balance: Number(fund.balance),
+    txns: txns.map((t) => ({ ...t, recordedByName: t.recordedBy ? umap.get(t.recordedBy) ?? null : null, confirmedByName: t.confirmedBy ? umap.get(t.confirmedBy) ?? null : null })),
+  });
+});
+
+accountingRouter.get("/fund/counts", authorize("accounting.reconcile"), async (_req, res) => {
+  const [pending, confirmed, fixRequest, all] = await Promise.all([
+    prisma.fundTxn.count({ where: { confirmed: false, fixRequest: null } }),
+    prisma.fundTxn.count({ where: { confirmed: true } }),
+    prisma.fundTxn.count({ where: { fixRequest: { not: null } } }),
+    prisma.fundTxn.count(),
+  ]);
+  res.json({ pending, confirmed, fixRequest, all });
 });
 
 const topupSchema = z.object({ amountYen: z.number().positive(), rate: z.number().positive().optional(), note: z.string().optional() });
 accountingRouter.post("/fund/topup", authorize("wallets.manage"), async (req, res) => {
   const p = topupSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  await getFund();
-  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: { increment: p.data.amountYen } } });
-  await prisma.fundTxn.create({ data: { id: uuid(), type: "topup", amountYen: p.data.amountYen, rate: p.data.rate ?? null, note: p.data.note ?? null } });
-  await logAudit({ actorId: req.user!.id, action: "fund.topup", metadata: { amountYen: p.data.amountYen, rate: p.data.rate } });
-  res.json({ balance: Number(fund.balance) });
+  const t = await prisma.fundTxn.create({ data: { id: uuid(), type: "topup", amountYen: p.data.amountYen, rate: p.data.rate ?? null, note: p.data.note ?? null, recordedBy: req.user!.id } });
+  await logAudit({ actorId: req.user!.id, action: "fund.topup_recorded", metadata: { amountYen: p.data.amountYen, rate: p.data.rate } });
+  res.status(201).json(t);
 });
 
 const setSchema = z.object({ amountYen: z.number().nonnegative(), note: z.string().optional() });
 accountingRouter.post("/fund/set", authorize("wallets.manage"), async (req, res) => {
   const p = setSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  await getFund();
-  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: p.data.amountYen } });
-  await prisma.fundTxn.create({ data: { id: uuid(), type: "set", amountYen: p.data.amountYen, note: p.data.note ?? "Đặt số dư" } });
-  await logAudit({ actorId: req.user!.id, action: "fund.set", metadata: { amountYen: p.data.amountYen } });
-  res.json({ balance: Number(fund.balance) });
+  const fund = await getFund();
+  const t = await prisma.fundTxn.create({ data: { id: uuid(), type: "set", amountYen: p.data.amountYen, prevBalance: fund.balance, note: p.data.note ?? "Đặt số dư", recordedBy: req.user!.id } });
+  await logAudit({ actorId: req.user!.id, action: "fund.set_recorded", metadata: { amountYen: p.data.amountYen } });
+  res.status(201).json(t);
 });
 
 const allocSchema = z.object({ walletId: z.string().uuid(), amountYen: z.number().positive(), note: z.string().optional() });
@@ -572,13 +617,9 @@ accountingRouter.post("/fund/allocate", authorize("wallets.manage"), async (req,
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
   if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
-  await getFund();
-  const fund = await prisma.fund.update({ where: { id: "main" }, data: { balance: { decrement: p.data.amountYen } } });
-  await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: p.data.amountYen } } });
-  await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: p.data.amountYen, type: "fund_allocate" } });
-  await prisma.fundTxn.create({ data: { id: uuid(), type: "allocate", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null } });
-  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "fund.allocate", metadata: { amountYen: p.data.amountYen } });
-  res.json({ balance: Number(fund.balance) });
+  const t = await prisma.fundTxn.create({ data: { id: uuid(), type: "allocate", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null, recordedBy: req.user!.id } });
+  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "fund.allocate_recorded", metadata: { amountYen: p.data.amountYen } });
+  res.status(201).json(t);
 });
 
 // Cashback (tiền mua hàng được hoàn, JPY) -> cộng vào 1 thẻ, tách riêng để báo cáo
@@ -588,11 +629,59 @@ accountingRouter.post("/cashback", authorize("wallets.manage"), async (req, res)
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const wallet = await prisma.wallet.findUnique({ where: { id: p.data.walletId } });
   if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
-  const updated = await prisma.wallet.update({ where: { id: p.data.walletId }, data: { balance: { increment: p.data.amountYen } } });
-  await prisma.walletTxn.create({ data: { id: uuid(), walletId: p.data.walletId, amount: p.data.amountYen, type: "cashback", statementRef: p.data.note || null } });
-  await prisma.fundTxn.create({ data: { id: uuid(), type: "cashback", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null } });
-  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "wallet.cashback", metadata: { amountYen: p.data.amountYen } });
-  res.json({ balance: Number(updated.balance) });
+  const t = await prisma.fundTxn.create({ data: { id: uuid(), type: "cashback", amountYen: p.data.amountYen, walletId: p.data.walletId, note: p.data.note ?? null, recordedBy: req.user!.id } });
+  await logAudit({ actorId: req.user!.id, targetId: p.data.walletId, action: "wallet.cashback_recorded", metadata: { amountYen: p.data.amountYen } });
+  res.status(201).json(t);
+});
+
+// Kế toán bấm Xác nhận: tiền thật đổi (quỹ/thẻ) đúng theo loại giao dịch
+accountingRouter.post("/fund/:id/confirm", authorize("accounting.reconcile"), async (req, res) => {
+  const t = await prisma.fundTxn.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  if (t.confirmed) return res.json(t);
+  await applyFundTxn(t);
+  const updated = await prisma.fundTxn.update({ where: { id: t.id }, data: { confirmed: true, confirmedBy: req.user!.id, confirmedAt: new Date() } });
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "fund.confirmed", metadata: { type: t.type, amountYen: Number(t.amountYen) } });
+  res.json(updated);
+});
+
+// Hủy xác nhận (bấm nhầm): hoàn tác đúng chiều ngược lại
+accountingRouter.post("/fund/:id/unconfirm", authorize("accounting.reconcile"), async (req, res) => {
+  const t = await prisma.fundTxn.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!t.confirmed) return res.json(t);
+  await reverseFundTxn(t);
+  const updated = await prisma.fundTxn.update({ where: { id: t.id }, data: { confirmed: false, confirmedBy: null, confirmedAt: null } });
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "fund.unconfirmed" });
+  res.json(updated);
+});
+
+const fundFixSchema = z.object({ note: z.string().min(1) });
+accountingRouter.post("/fund/:id/request-fix", authorize("accounting.reconcile"), async (req, res) => {
+  const p = fundFixSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST", message: "Nhập nội dung yêu cầu sửa" });
+  const t = await prisma.fundTxn.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.fundTxn.update({ where: { id: t.id }, data: { fixRequest: p.data.note, fixRequestedAt: new Date() } });
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "fund.fix_requested", metadata: { note: p.data.note } });
+  res.json({ ok: true });
+});
+
+accountingRouter.post("/fund/:id/resolve-fix", authorize("wallets.manage"), async (req, res) => {
+  const t = await prisma.fundTxn.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.fundTxn.update({ where: { id: t.id }, data: { fixRequest: null, fixRequestedAt: null } });
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "fund.fix_resolved" });
+  res.json({ ok: true });
+});
+
+accountingRouter.delete("/fund/:id", authorize("wallets.manage"), async (req, res) => {
+  const t = await prisma.fundTxn.findUnique({ where: { id: req.params.id } });
+  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  if (t.confirmed) await reverseFundTxn(t);
+  await prisma.fundTxn.delete({ where: { id: t.id } });
+  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "fund.deleted" });
+  res.json({ ok: true });
 });
 
 const walletSchema = z.object({ name: z.string().min(1), currency: z.string().default("VND"), balance: z.number().optional() });

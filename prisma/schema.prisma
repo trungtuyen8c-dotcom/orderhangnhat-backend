@@ -217,6 +217,8 @@ model Tracking {
   review            String?
   url               String?
   packedAt          DateTime?     @map("packed_at")
+  // Số dòng vật lý trong tab sheet lúc quét - để sắp xếp Kho VN đúng thứ tự vật lý (chọn liên tục nhiều dòng gán 1 kiện)
+  packRow           Int?          @map("pack_row")
   // Tên khai hải quan - kho Nhật tự sửa trong sheet (cột F) để dễ thông quan; khác tên gốc thì giữ lại đây, dùng khi xuất hóa đơn
   customsName       String?       @map("customs_name")
   // Quét vào đúng ngày đã "chốt" khai hải quan (PackDayLock) -> không gộp vào invoice ngày đó nữa, cần khai bổ sung riêng
@@ -344,14 +346,23 @@ model Fund {
   @@map("fund")
 }
 
+// Giao dịch Quỹ tổng JPY: NV ghi -> CHỜ (chưa đụng số dư quỹ/thẻ), kế toán Xác nhận thì tiền mới thực sự thay đổi - giống luồng Cọc khách.
 model FundTxn {
-  id        String   @id @default(uuid()) @db.Uuid
-  type      String // topup | allocate
-  amountYen Decimal  @map("amount_yen") @db.Decimal(16, 2)
-  rate      Decimal? @db.Decimal(12, 4)
-  walletId  String?  @map("wallet_id") @db.Uuid
-  note      String?
-  createdAt DateTime @default(now()) @map("created_at")
+  id             String    @id @default(uuid()) @db.Uuid
+  type           String // topup | allocate | set | cashback
+  amountYen      Decimal   @map("amount_yen") @db.Decimal(16, 2)
+  rate           Decimal?  @db.Decimal(12, 4)
+  walletId       String?   @map("wallet_id") @db.Uuid
+  note           String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  // Số dư quỹ TRƯỚC lúc ghi - chỉ dùng cho type "set" (ghi đè tuyệt đối) để hoàn tác đúng khi hủy xác nhận
+  prevBalance    Decimal?  @map("prev_balance") @db.Decimal(16, 2)
+  confirmed      Boolean   @default(false)
+  recordedBy     String?   @map("recorded_by") @db.Uuid
+  confirmedBy    String?   @map("confirmed_by") @db.Uuid
+  confirmedAt    DateTime? @map("confirmed_at")
+  fixRequest     String?   @map("fix_request")
+  fixRequestedAt DateTime? @map("fix_requested_at")
 
   @@map("fund_txns")
 }
@@ -366,6 +377,7 @@ model WalletTxn {
   transferRef  String?  @map("transfer_ref") @db.Uuid
   refOrderId   String?  @map("ref_order_id") @db.Uuid
   refDepositId String?  @map("ref_deposit_id") @db.Uuid
+  refFundTxnId String?  @map("ref_fund_txn_id") @db.Uuid
   reconciled   Boolean  @default(false)
   statementRef String?  @map("statement_ref")
   createdAt    DateTime @default(now()) @map("created_at")

@@ -187,7 +187,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   }
   // Yahoo/Mercari (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán"
   if (!(PAY_LATER_SOURCES as readonly string[]).includes(d.source ?? "normal"))
-    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate });
+    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate, fallbackDate: order.orderDate });
   const totals = await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.created" });
@@ -331,7 +331,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   // Yahoo/Mercari chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới
   if (d.items && (!(PAY_LATER_SOURCES as readonly string[]).includes(order.source) || order.yahooPaidAt)) {
     await reverseOrderCardCharges(prisma, order.id);
-    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate });
+    await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate, fallbackDate: d.orderDate ?? order.orderDate });
   }
   const totals = await recomputeOrderTotals(order.id);
   diff("totalVnd", order.totalVnd, totals?.totalVnd ?? null);
@@ -357,9 +357,9 @@ ordersRouter.post("/:id/pay", authorize("orders.update"), async (req, res) => {
   if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
   // gán thẻ vào tất cả món rồi trừ (dùng chung logic auto-charge)
   await prisma.orderItem.updateMany({ where: { orderId: order.id }, data: { paymentMethod: wallet.name } });
-  const items = order.items.map((i) => ({ unitPriceJpy: i.unitPriceJpy, qty: i.qty, shipJpy: i.shipJpy, paymentMethod: wallet.name }));
-  await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate });
   const paidAt = p.data.paidAt ?? new Date();
+  const items = order.items.map((i) => ({ unitPriceJpy: i.unitPriceJpy, qty: i.qty, shipJpy: i.shipJpy, paymentMethod: wallet.name, purchaseDate: i.purchaseDate }));
+  await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate, fallbackDate: paidAt });
   await prisma.order.update({ where: { id: order.id }, data: { yahooPaidAt: paidAt } });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.yahoo_paid", metadata: { wallet: wallet.name } });
   await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { yahooThanhToan: wallet.name } });

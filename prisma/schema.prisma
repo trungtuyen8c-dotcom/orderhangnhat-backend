@@ -363,6 +363,7 @@ model WalletTxn {
   note         String?
   transferRef  String?  @map("transfer_ref") @db.Uuid
   refOrderId   String?  @map("ref_order_id") @db.Uuid
+  refDepositId String?  @map("ref_deposit_id") @db.Uuid
   reconciled   Boolean  @default(false)
   statementRef String?  @map("statement_ref")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -389,6 +390,8 @@ model CustomerDeposit {
   confirmedBy  String?   @map("confirmed_by") @db.Uuid
   confirmedAt  DateTime? @map("confirmed_at")
   recordedBy   String?   @map("recorded_by") @db.Uuid
+  fixRequest   String?   @map("fix_request")
+  fixRequestedAt DateTime? @map("fix_requested_at")
   createdAt    DateTime  @default(now()) @map("created_at")
 
   @@index([customerId])

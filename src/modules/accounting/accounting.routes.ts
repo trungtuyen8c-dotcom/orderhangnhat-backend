@@ -191,7 +191,7 @@ accountingRouter.post("/customer-deposits/:id/confirm", authorize("accounting.re
   const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { confirmed: true, confirmedBy: req.user!.id, confirmedAt: new Date() } });
   if (dep.walletId) {
     await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { increment: Number(dep.amountVnd) } } });
-    await prisma.walletTxn.create({ data: { id: uuid(), walletId: dep.walletId, amount: Number(dep.amountVnd), type: "customer_deposit" } });
+    await prisma.walletTxn.create({ data: { id: uuid(), walletId: dep.walletId, amount: Number(dep.amountVnd), type: "customer_deposit", category: "Cọc khách", note: dep.payerName ?? null, refDepositId: dep.id } });
   }
   await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_confirmed", metadata: { amountVnd: Number(dep.amountVnd) } });
   void syncCustomerOrders(dep.customerId);
@@ -204,25 +204,95 @@ accountingRouter.post("/customer-deposits/:id/unconfirm", authorize("accounting.
   if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
   if (!dep.confirmed) return res.json(dep);
   const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { confirmed: false, confirmedBy: null, confirmedAt: null } });
-  if (dep.walletId) await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { decrement: Number(dep.amountVnd) } } });
+  // Xóa đúng giao dịch ví đã tạo lúc xác nhận (không chỉ trừ số dư) -> tránh sổ ví còn dòng "ma" không khớp số dư.
+  const txns = await prisma.walletTxn.findMany({ where: { refDepositId: dep.id } });
+  for (const t of txns) await prisma.wallet.update({ where: { id: t.walletId }, data: { balance: { decrement: Number(t.amount) } } });
+  if (txns.length) await prisma.walletTxn.deleteMany({ where: { refDepositId: dep.id } });
   await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_unconfirmed" });
   void syncCustomerOrders(dep.customerId);
   res.json(updated);
 });
 
-// Danh sách cọc CHỜ xác nhận (kế toán check tối) - kèm tên khách
-accountingRouter.get("/deposits/pending", authorize("accounting.reconcile"), async (_req, res) => {
-  const rows = await prisma.customerDeposit.findMany({ where: { confirmed: false }, orderBy: { createdAt: "desc" }, take: 300 });
+// Danh sách cọc theo tab (chờ xác nhận / đã xác nhận / yêu cầu sửa / tất cả), lọc theo ngày - kèm tên khách + tên NV ghi/xác nhận
+accountingRouter.get("/deposits", authorize("accounting.reconcile"), async (req, res) => {
+  const status = String(req.query.status ?? "pending");
+  const from = req.query.from ? new Date(String(req.query.from)) : null;
+  const to = req.query.to ? new Date(String(req.query.to)) : null;
+  if (to) to.setHours(23, 59, 59, 999);
+  const where: any = { isOpening: false };
+  if (status === "pending") where.confirmed = false;
+  else if (status === "confirmed") where.confirmed = true;
+  else if (status === "fix_request") where.fixRequest = { not: null };
+  if (from || to) where.paidAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+
+  const rows = await prisma.customerDeposit.findMany({ where, orderBy: { paidAt: "desc" }, take: 500 });
+  const custIds = [...new Set(rows.map((r) => r.customerId))];
+  const userIds = [...new Set(rows.flatMap((r) => [r.recordedBy, r.confirmedBy]).filter(Boolean))] as string[];
+  const [customers, users] = await Promise.all([
+    prisma.customer.findMany({ where: { id: { in: custIds } }, select: { id: true, name: true, code: true } }),
+    prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true, email: true } }),
+  ]);
+  const cmap = new Map(customers.map((c) => [c.id, c]));
+  const umap = new Map(users.map((u) => [u.id, u]));
+  const uname = (id: string | null) => (id ? umap.get(id)?.fullName ?? umap.get(id)?.email ?? null : null);
+  res.json(rows.map((r) => ({
+    ...r,
+    customerName: cmap.get(r.customerId)?.name ?? "?",
+    customerCode: cmap.get(r.customerId)?.code ?? null,
+    recordedByName: uname(r.recordedBy),
+    confirmedByName: uname(r.confirmedBy),
+  })));
+});
+
+// Đếm số cọc theo từng tab, hiện badge không cần tải cả danh sách
+accountingRouter.get("/deposits/counts", authorize("accounting.reconcile"), async (_req, res) => {
+  const [pending, confirmed, fixRequest, all] = await Promise.all([
+    prisma.customerDeposit.count({ where: { confirmed: false, isOpening: false } }),
+    prisma.customerDeposit.count({ where: { confirmed: true, isOpening: false } }),
+    prisma.customerDeposit.count({ where: { fixRequest: { not: null } } }),
+    prisma.customerDeposit.count({ where: { isOpening: false } }),
+  ]);
+  res.json({ pending, confirmed, fixRequest, all });
+});
+
+// Kế toán thấy cọc ghi sai -> yêu cầu NV đã ghi sửa lại (hiện chuông cho ai có quyền ghi cọc)
+const depFixSchema = z.object({ note: z.string().min(1) });
+accountingRouter.post("/customer-deposits/:id/request-fix", authorize("accounting.reconcile"), async (req, res) => {
+  const p = depFixSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST", message: "Nhập nội dung yêu cầu sửa" });
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.customerDeposit.update({ where: { id: dep.id }, data: { fixRequest: p.data.note, fixRequestedAt: new Date() } });
+  await logAudit({ actorId: req.user!.id, targetId: dep.id, action: "customer_deposit.fix_requested", metadata: { note: p.data.note } });
+  res.json({ ok: true });
+});
+
+// NV đã ghi cọc đó sửa xong -> gỡ yêu cầu
+accountingRouter.post("/customer-deposits/:id/resolve-fix", authorize("accounting.note_deposit"), async (req, res) => {
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  await prisma.customerDeposit.update({ where: { id: dep.id }, data: { fixRequest: null, fixRequestedAt: null } });
+  await logAudit({ actorId: req.user!.id, targetId: dep.id, action: "customer_deposit.fix_resolved" });
+  res.json({ ok: true });
+});
+
+// Cọc đang bị yêu cầu sửa, chưa xử lý xong -> hiện chuông cho NV ghi cọc
+accountingRouter.get("/deposits/fix-requests", authorize("accounting.note_deposit"), async (_req, res) => {
+  const rows = await prisma.customerDeposit.findMany({
+    where: { fixRequest: { not: null } }, orderBy: { fixRequestedAt: "desc" }, take: 50,
+  });
   const ids = [...new Set(rows.map((r) => r.customerId))];
-  const customers = await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, code: true } });
-  const map = new Map(customers.map((c) => [c.id, c]));
-  res.json(rows.map((r) => ({ ...r, customerName: map.get(r.customerId)?.name ?? "?", customerCode: map.get(r.customerId)?.code ?? null })));
+  const customers = await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  const cmap = new Map(customers.map((c) => [c.id, c]));
+  res.json(rows.map((r) => ({ id: r.id, fixRequest: r.fixRequest, customer: cmap.get(r.customerId)?.name ?? "?" })));
 });
 
 accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_payment"), async (req, res) => {
   const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
   if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
-  if (dep.confirmed && dep.walletId) await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { decrement: Number(dep.amountVnd) } } });
+  const txns = await prisma.walletTxn.findMany({ where: { refDepositId: dep.id } });
+  for (const t of txns) await prisma.wallet.update({ where: { id: t.walletId }, data: { balance: { decrement: Number(t.amount) } } });
+  if (txns.length) await prisma.walletTxn.deleteMany({ where: { refDepositId: dep.id } });
   await prisma.customerDeposit.delete({ where: { id: req.params.id } });
   await logAudit({ actorId: req.user!.id, targetId: dep.customerId, action: "customer.deposit_deleted" });
   void syncCustomerOrders(dep.customerId);
@@ -649,18 +719,31 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
   const txns = await prisma.walletTxn.findMany({ where: { walletId }, orderBy: { createdAt: "asc" } });
 
   const orderIds = [...new Set(txns.map((t) => t.refOrderId).filter(Boolean))] as string[];
-  const orders = orderIds.length
-    ? await prisma.order.findMany({
-        where: { id: { in: orderIds } },
-        select: { id: true, code: true, fixRequest: true, customer: { select: { name: true, phone: true } }, trackings: { select: { code: true, vnTrackingCode: true } } },
-      })
+  const depositIds = [...new Set(txns.map((t) => t.refDepositId).filter(Boolean))] as string[];
+  const [orders, deposits] = await Promise.all([
+    orderIds.length
+      ? prisma.order.findMany({
+          where: { id: { in: orderIds } },
+          select: { id: true, code: true, fixRequest: true, customer: { select: { name: true, phone: true } }, trackings: { select: { code: true, vnTrackingCode: true } } },
+        })
+      : Promise.resolve([]),
+    depositIds.length
+      ? prisma.customerDeposit.findMany({ where: { id: { in: depositIds } }, select: { id: true, customerId: true, fixRequest: true } })
+      : Promise.resolve([]),
+  ]);
+  const depCustIds = [...new Set(deposits.map((d) => d.customerId))];
+  const depCustomers = depCustIds.length
+    ? await prisma.customer.findMany({ where: { id: { in: depCustIds } }, select: { id: true, name: true, phone: true } })
     : [];
+  const depCustMap = new Map(depCustomers.map((c) => [c.id, c]));
   const omap = new Map(orders.map((o) => [o.id, o]));
+  const dmap = new Map(deposits.map((d) => [d.id, { ...d, customer: depCustMap.get(d.customerId) }]));
 
   let bal = 0;
   const enriched = txns.map((t) => {
     bal += Number(t.amount);
     const o = t.refOrderId ? omap.get(t.refOrderId) : undefined;
+    const d = t.refDepositId ? dmap.get(t.refDepositId) : undefined;
     const trackings = (o?.trackings.flatMap((tr) => [tr.code, tr.vnTrackingCode]) ?? []).filter((x): x is string => !!x);
     return {
       id: t.id,
@@ -673,9 +756,10 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
       statementRef: t.statementRef,
       orderId: t.refOrderId ?? null,
       orderCode: o?.code ?? null,
-      fixRequest: o?.fixRequest ?? null,
-      customer: o?.customer?.name ?? null,
-      phone: o?.customer?.phone ?? null,
+      depositId: t.refDepositId ?? null,
+      fixRequest: o?.fixRequest ?? d?.fixRequest ?? null,
+      customer: o?.customer?.name ?? d?.customer?.name ?? null,
+      phone: o?.customer?.phone ?? d?.customer?.phone ?? null,
       trackings,
       balance: bal,
     };

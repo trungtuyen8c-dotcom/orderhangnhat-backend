@@ -148,7 +148,9 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
     prisma.tracking.count({ where: { orderId: null } }),
-    prisma.order.count({ where: { status: { not: "cancelled" }, totalVnd: null } }),
+    // totalVnd=null cũng xảy ra khi khách trả thẳng ¥ (chưa có tỉ giá, cố ý) -> không tính là thiếu giá.
+    // Chỉ đếm đơn thật sự chưa điền đơn giá món hàng (unitPriceJpy=0).
+    prisma.order.count({ where: { status: { not: "cancelled" }, items: { some: { unitPriceJpy: 0 } } } }),
     prisma.carton.findMany({ where: { declaredWeightKg: { not: null } }, include: { trackings: { select: { jpWeightKg: true, vnWeightKg: true } } } }),
     overdueDebts(),
     storageOverdueCount(),

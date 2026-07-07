@@ -425,6 +425,8 @@ ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
       await tx.walletTxn.deleteMany({ where: { refOrderId: order.id } });
       await tx.payment.deleteMany({ where: { orderId: order.id } });
       await tx.debt.deleteMany({ where: { orderId: order.id } });
+      // Tracking chưa gõ mã (code rỗng, chỉ là placeholder chờ điền) -> xóa luôn, không để mồ côi vô nghĩa
+      await tx.tracking.deleteMany({ where: { orderId: order.id, code: "" } });
       await tx.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
       await tx.order.delete({ where: { id: order.id } });
     });
@@ -434,6 +436,8 @@ ordersRouter.delete("/:id", authorize("orders.delete"), async (req, res) => {
   }
   // hoàn số dư thẻ (Mua hàng auto) + gỡ liên kết tracking trước khi xóa đơn
   await reverseOrderCardCharges(prisma, order.id);
+  // Tracking chưa gõ mã (code rỗng, chỉ là placeholder chờ điền) -> xóa luôn, không để mồ côi vô nghĩa
+  await prisma.tracking.deleteMany({ where: { orderId: order.id, code: "" } });
   await prisma.tracking.updateMany({ where: { orderId: order.id }, data: { orderId: null, status: "new" } });
   await prisma.order.delete({ where: { id: order.id } });
   void syncCustomerOrders(order.customerId);

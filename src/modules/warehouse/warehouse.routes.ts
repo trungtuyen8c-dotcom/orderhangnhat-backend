@@ -69,7 +69,7 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
 
 // Cân VN + Tracking VN (nội địa) — việc của Kho VN, tách khỏi quyền sửa tracking (trackings.update, dành cho sale/buyer)
 // để đúng ý: kho chỉ cân + gán tracking nội địa, không tự thêm/sửa mã tracking Nhật hay gán đơn.
-const vnWeighSchema = z.object({ vnWeightKg: z.number().nonnegative().optional(), vnTrackingCode: z.string().optional() });
+const vnWeighSchema = z.object({ vnWeightKg: z.number().nonnegative().optional(), vnTrackingCode: z.string().optional(), jpWeightKg: z.number().nonnegative().optional() });
 warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), async (req, res) => {
   const p = vnWeighSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });

@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { v4 as uuid } from "uuid";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals } from "./orderTotals.js";
 
@@ -125,7 +126,7 @@ export async function removeTrackingRow(id: string): Promise<void> {
 // ===== Xuất đơn theo từng khách: mỗi khách 1 tab, layout giống file khách =====
 const ORDER_HEADER = [
   "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB",
-  "% Công", "Tổng tiền (¥)", "Tỷ giá (Yên)", "Tổng tiền KH quy đổi", "Phụ thu- VND", "Cân-Kg", "Đơn giá vận chuyển",
+  "% Công", "Tổng tiền bao gồm tiền công", "Cân-Kg", "Phụ thu", "TRACKING", "Đánh giá", "Ngày giao cho khách hàng",
 ];
 
 // Format theo giờ VN (UTC+7) bất kể timezone của server -> tránh lệch -1 ngày.
@@ -156,10 +157,11 @@ function loadCustomerOrders(customerId: string) {
 }
 
 // Dòng data theo TỪNG MÓN, gom theo THÁNG NGÀY MUA của chính món đó (không theo ngày tạo đơn).
-// Trả map: tháng -> { an: A→N, qr: Q,R } cùng thứ tự dòng.
-function buildRowsByMonth(orders: OrderFull[]): Map<number, { an: (string | number)[][]; qr: string[][] }> {
-  const byMonth = new Map<number, { an: (string | number)[][]; qr: string[][] }>();
-  const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = { an: [], qr: [] }; byMonth.set(m, b); } return b; };
+// Cột A→N khớp đúng template khách: ...H=%Công, I=Tổng tiền(¥), J=Cân-Kg, K=Phụ thu, L=TRACKING, M=Đánh giá, N=Ngày giao.
+// Trả map: tháng -> { rows: A→N, jpyTotal: tổng ¥ (mirror cột I), vndTotal: tổng quy đổi ₫ của các món có tỉ giá }, đã sắp xếp theo ngày mua.
+function buildRowsByMonth(orders: OrderFull[]): Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }> {
+  const byMonth = new Map<number, { date: Date; an: (string | number)[]; jpy: number; vnd: number }[]>();
+  const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
@@ -167,22 +169,34 @@ function buildRowsByMonth(orders: OrderFull[]): Map<number, { an: (string | numb
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
       const trk = o.trackings[idx];
-      const m = vnDate(it.purchaseDate ?? o.createdAt).getUTCMonth() + 1;
-      const b = bucket(m);
-      b.an.push([
-        o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
-        fmtDate(it.purchaseDate ?? o.createdAt),
-        "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
-        giaWeb || "", ship || "", "", giaWeb + ship, rate || "",
-        rate ? Math.round((giaWeb + ship) * rate) : "",
-        idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
-        trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
-        trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : "",
-      ]);
-      b.qr.push([String(trk?.code ?? ""), String(trk?.review ?? "")]);
+      const purchaseDate = it.purchaseDate ?? o.createdAt;
+      const m = vnDate(purchaseDate).getUTCMonth() + 1;
+      bucket(m).push({
+        date: purchaseDate,
+        an: [
+          o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
+          fmtDate(purchaseDate),
+          "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
+          giaWeb || "", ship || "", "", giaWeb + ship,
+          trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
+          idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
+          String(trk?.code ?? ""), String(trk?.review ?? ""), "",
+        ],
+        jpy: giaWeb + ship,
+        vnd: rate ? Math.round((giaWeb + ship) * rate) : 0,
+      });
     });
   }
-  return byMonth;
+  const result = new Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }>();
+  for (const [m, entries] of byMonth) {
+    entries.sort((a, b) => a.date.getTime() - b.date.getTime());
+    result.set(m, {
+      rows: entries.map((e) => e.an),
+      jpyTotal: entries.reduce((s, e) => s + e.jpy, 0),
+      vndTotal: entries.reduce((s, e) => s + e.vnd, 0),
+    });
+  }
+  return result;
 }
 
 // Liệt kê mọi tab dạng tháng -> map {số tháng: tên tab}
@@ -231,9 +245,9 @@ function isTrackingCode(v: string): boolean {
   return c.length >= 8 && /^[A-Za-z0-9._-]+$/.test(c);
 }
 
-// Đọc mọi tab-ngày của file kho: cột E = mã tracking, ngày đóng = ngày của tab.
+// Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
@@ -242,22 +256,23 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
   if (!dateTabs.length) return [];
 
-  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number }[] = [];
+  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
     const ranges = batch
-      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!E1:E100000`)}`)
+      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:E100000`)}`)
       .join("&");
     const data = (await apiSheet(sid, `/values:batchGet?${ranges}&majorDimension=COLUMNS`, "GET")) as { valueRanges?: { values?: string[][] }[] };
     (data.valueRanges ?? []).forEach((vr, idx) => {
       const tab = batch[idx]?.title ?? "";
       const date = batch[idx]?.date ?? null;
-      const col = vr.values?.[0] ?? []; // majorDimension=COLUMNS -> values[0] là cột E
       const sheetId = batch[idx]?.sheetId ?? 0;
-      col.forEach((cell, j) => {
+      const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking)
+      const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [];
+      codeCol.forEach((cell, j) => {
         const code = (cell ?? "").trim();
-        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId });
+        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim() });
       });
     });
   }
@@ -276,7 +291,19 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const codes = [...dateByCode.keys()];
   if (!codes.length) return { matched: 0, updated: 0 };
   const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true } } } });
-  const trkByCode = new Map(trks.map((t) => [t.code, t]));
+
+  // Mã quét được nhưng chưa có tracking nào trong hệ thống (tracking sai/chưa nhập) -> tạo mồ côi
+  // để không mất dấu hàng: sẽ hiện ở /control/unmatched + board Kho VN "chưa gắn", chờ sale/buyer resolve.
+  const knownCodes = new Set(trks.map((t) => t.code));
+  for (const c of codes) {
+    if (knownCodes.has(c)) continue;
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt: dateByCode.get(c) ?? new Date(), status: "new" } });
+    trks.push({ ...created, order: null } as (typeof trks)[number]);
+  }
+
+  // 1 mã có thể gắn nhiều đơn khác nhau (nhầm/gộp chuyến) -> gom theo mảng, không lấy đại diện 1 đơn
+  const trksByCode = new Map<string, typeof trks>();
+  for (const t of trks) { const arr = trksByCode.get(t.code) ?? []; arr.push(t); trksByCode.set(t.code, arr); }
   let updated = 0;
   const customers = new Set<string>();
   for (const t of trks) {
@@ -289,9 +316,49 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   }
   for (const c of customers) await syncCustomerOrders(c);
 
+  // Tự tạo/gán Carton (kiện) theo BILL + Số thùng của từng dòng vật lý trong sheet — thay cho gán tay.
+  // Chỉ set cartonId khi tracking chưa có kiện, để không đè lên thao tác "Bỏ khỏi kiện" thủ công.
+  const cartonCache = new Map<string, string>(); // key `${code}|${dayKey}` -> cartonId
+  async function getCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
+    const code = `${bill} ${thung}`.trim();
+    if (!code) return null;
+    const dayKey = date ? date.toISOString().slice(0, 10) : "none";
+    const cacheKey = `${code}|${dayKey}`;
+    const cached = cartonCache.get(cacheKey);
+    if (cached) return cached;
+    let carton = await prisma.carton.findFirst({ where: { code, packedDate: date } });
+    if (!carton) carton = await prisma.carton.create({ data: { id: uuid(), code, packedDate: date } });
+    cartonCache.set(cacheKey, carton.id);
+    return carton.id;
+  }
+
+  // Ghép mỗi dòng vật lý trong sheet với đúng 1 tracking (khi số dòng khớp số tracking cùng mã) —
+  // để ghi tên/giá/kiện đúng từng đơn thay vì gộp; nếu số lượng không khớp, giữ hành vi cũ (gộp) để an toàn.
+  const rowsByCode = new Map<string, typeof rows>();
+  for (const r of rows) { const arr = rowsByCode.get(r.code) ?? []; arr.push(r); rowsByCode.set(r.code, arr); }
+  const rowMatch = new Map<string, (typeof trks)[number]>(); // key `${tab}|${row}` -> tracking riêng của dòng đó
+
+  for (const [code, group] of trksByCode) {
+    const physicalRows = rowsByCode.get(code) ?? [];
+    if (physicalRows.length === group.length && group.length > 0) {
+      const sortedTrks = [...group].sort((a, b) => (a.order?.code ?? "￿").localeCompare(b.order?.code ?? "￿"));
+      physicalRows.forEach((r, i) => rowMatch.set(`${r.tab}|${r.row}`, sortedTrks[i]));
+    }
+  }
+
+  for (const r of rows) {
+    if (!r.bill && !r.thung) continue;
+    const cartonId = await getCartonId(r.bill, r.thung, r.date);
+    if (!cartonId) continue;
+    const single = rowMatch.get(`${r.tab}|${r.row}`);
+    const targets = single ? [single] : (trksByCode.get(r.code) ?? []);
+    for (const t of targets) if (!t.cartonId) await prisma.tracking.update({ where: { id: t.id }, data: { cartonId } });
+  }
+
   // Ghi ngược vào file kho (cần SA quyền Editor):
-  // Tên hàng (F) + Giá ¥ (G); Chú ý (U) = note gia cố/mở hàng; Link đối chiếu (V); Số trùng (W) = số món.
-  // Tô màu dòng: đỏ nếu số trùng > 1 (nhắc khai đủ name+giá), xanh nếu có chú ý.
+  // Tên hàng (F) + Giá ¥ (G) — ghi ĐÚNG đơn của dòng đó nếu ghép được 1-1, ngược lại gộp tất cả (an toàn, tô đỏ nhắc kiểm tra).
+  // Chú ý (U) = note gia cố/mở hàng; Link đối chiếu (V); Số trùng (W) = số món.
+  // Tô màu dòng: đỏ nếu số trùng > 1 VÀ không ghép được 1-1 (nhắc kiểm tra đơn có bị gộp nhầm), xanh nếu có chú ý.
   try {
     const data: { range: string; values: (string | number)[][] }[] = [];
     const colorReqs: any[] = [];
@@ -299,20 +366,27 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
     const WHITE = { red: 1, green: 1, blue: 1 };
     for (const r of rows) {
-      const t = trkByCode.get(r.code);
-      if (!t?.order) continue;
-      const items = t.order.items ?? [];
+      const single = rowMatch.get(`${r.tab}|${r.row}`);
+      const group = single ? [single] : (trksByCode.get(r.code) ?? []);
+      const seenOrderIds = new Set<string>();
+      const orders = group.map((t) => t.order).filter((o): o is NonNullable<typeof o> => {
+        if (!o || seenOrderIds.has(o.id)) return false;
+        seenOrderIds.add(o.id);
+        return true;
+      });
+      if (!orders.length) continue;
+      const items = orders.flatMap((o) => o.items ?? []);
       const esc = r.tab.replace(/'/g, "''");
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
         data.push({ range: `'${esc}'!F${r.row}:G${r.row}`, values: [[name, price]] });
       }
-      const note = t.order.needsCheck ? (t.order.checkNote?.trim() || "Mở hàng / gia cố") : "";
+      const note = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
-      const bg = count > 1 ? RED : note ? GREEN : WHITE;
+      const bg = (count > 1 && !single) ? RED : note ? GREEN : WHITE;
       colorReqs.push({ repeatCell: {
         range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 23 },
         cell: { userEnteredFormat: { backgroundColor: bg } },
@@ -347,8 +421,14 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: false };
-  const t = await prisma.tracking.findFirst({ where: { code: c }, include: { order: { include: { items: true } } } });
-  if (!t) return { matched: false };
+  const found = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } }, take: 1 });
+  let t = found[0];
+  if (!t) {
+    // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
+    // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); cron 2 phút sau sẽ gán kiện theo BILL/thùng.
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt: (tab ? tabDate(tab) : null) ?? new Date(), status: "new" } });
+    t = { ...created, order: null } as typeof found[number];
+  }
   const packedAt = (tab ? tabDate(tab) : null) ?? t.packedAt ?? new Date();
   if (!t.packedAt) await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
 
@@ -408,8 +488,8 @@ async function runCustomerSync(customerId: string): Promise<void> {
       if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
 
-      // ----- Đơn hàng: A→N + Q,R (giữ O,P công thức) -----
-      const { an, qr } = rowsByMonth.get(m) ?? { an: [], qr: [] };
+      // ----- Đơn hàng: A→N (TRACKING/Đánh giá nằm trong L,M - không đụng Q,R vì đó là "Tiền cọc" của khách) -----
+      const { rows: an, jpyTotal, vndTotal } = rowsByMonth.get(m) ?? { rows: [], jpyTotal: 0, vndTotal: 0 };
       let header = await findHeaderRow(sid, tab);
       if (!header) {
         await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [ORDER_HEADER] });
@@ -418,13 +498,31 @@ async function runCustomerSync(customerId: string): Promise<void> {
       const start = header + 1;
       await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
       if (an.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: an });
-      await apiSheet(sid, `/values/${t}!Q${start}:R100000:clear`, "POST", {});
-      if (qr.length) await apiSheet(sid, `/values/${t}!Q${start}?valueInputOption=USER_ENTERED`, "PUT", { values: qr });
 
       // ----- Sổ thu tiền (cọc): W:Z, để trống cột V (Mã) -----
-      const depRows = buildDepositRows(depsByMonth.get(m) ?? []);
+      const monthDeposits = depsByMonth.get(m) ?? [];
+      const depRows = buildDepositRows(monthDeposits);
       await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}:Z100000:clear`, "POST", {});
       if (depRows.length) await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}?valueInputOption=USER_ENTERED`, "PUT", { values: depRows });
+
+      // ----- Khối TỔNG TT/CỌC/NỢ (H1/H2/H3): có tỉ giá -> thay hẳn sang ₫; không có -> giữ nguyên ¥ -----
+      const jpyDepositTotal = monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);
+      const vndDepositTotal = monthDeposits.filter((d) => d.currency === "VND").reduce((s, d) => s + Number(d.amountVnd), 0);
+      const useVnd = vndTotal > 0;
+      const h1 = useVnd ? vndTotal : jpyTotal;
+      const h2 = useVnd ? vndDepositTotal : jpyDepositTotal;
+      const h3 = h1 - h2;
+      await apiSheet(sid, `/values/${t}!H1:H3?valueInputOption=USER_ENTERED`, "PUT", { majorDimension: "COLUMNS", values: [[h1 || "", h2 || "", h3 || ""]] });
+      // Dọn ô "Tổng/Nợ quy đổi ₫" cũ (bản trước ghi ở I:J, giờ gộp thẳng vào H nên không cần nữa)
+      await apiSheet(sid, `/values/${t}!I1:J3:clear`, "POST", {});
+      const gsid = await getSheetIdByTitle(sid, tab);
+      if (gsid != null) {
+        const pattern = useVnd ? "#,##0 \"₫\"" : "\"¥\"#,##0";
+        const cell = { userEnteredFormat: { numberFormat: { type: "NUMBER" as const, pattern } } };
+        await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
+          { repeatCell: { range: { sheetId: gsid, startRowIndex: 0, endRowIndex: 3, startColumnIndex: 7, endColumnIndex: 8 }, cell, fields: "userEnteredFormat.numberFormat" } },
+        ] });
+      }
     }
   } catch (e) {
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);

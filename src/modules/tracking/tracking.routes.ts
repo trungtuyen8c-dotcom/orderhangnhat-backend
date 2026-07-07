@@ -31,6 +31,8 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (req.query.shipmentId) where.shipmentId = String(req.query.shipmentId);
   // Tồn kho = đã về kho (packedAt) nhưng chưa có tracking VN (chưa đóng đi VN)
   if (req.query.stock === "1") { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
+  const customerQ = String(req.query.customer ?? "").trim();
+  if (customerQ) where.order = { customer: { name: { contains: customerQ, mode: "insensitive" } } };
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 500,
     include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },

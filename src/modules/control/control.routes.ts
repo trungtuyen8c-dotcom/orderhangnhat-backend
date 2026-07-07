@@ -98,7 +98,7 @@ controlRouter.put("/debt-config", authorize("system.manage_settings"), async (re
 async function overdueDebts() {
   const cfg = await getDebtConfig();
   const [debtAgg, orders, customers] = await Promise.all([
-    prisma.debt.groupBy({ by: ["customerId"], _sum: { balance: true } }),
+    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true } }),
     prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, createdAt: true } }),
     prisma.customer.findMany({ select: { id: true, name: true, code: true, phone: true } }),
   ]);
@@ -119,10 +119,31 @@ controlRouter.get("/overdue-debts", authorize("orders.read"), async (_req, res) 
   res.json(await overdueDebts());
 });
 
+// ===== Hàng "Lưu kho" nằm quá lâu chưa ship =====
+async function getStorageConfig() {
+  const row = await prisma.appConfig.findUnique({ where: { key: "storage_overdue_days" } });
+  return { overdueDays: Number(row?.value ?? 7) };
+}
+controlRouter.get("/storage-config", authorize("warehouse.weigh_vn"), async (_req, res) => {
+  res.json(await getStorageConfig());
+});
+const storageCfgSchema = z.object({ overdueDays: z.number().int().positive() });
+controlRouter.put("/storage-config", authorize("system.manage_settings"), async (req, res) => {
+  const p = storageCfgSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await prisma.appConfig.upsert({ where: { key: "storage_overdue_days" }, update: { value: String(p.data.overdueDays) }, create: { key: "storage_overdue_days", value: String(p.data.overdueDays) } });
+  res.json(p.data);
+});
+async function storageOverdueCount(): Promise<number> {
+  const cfg = await getStorageConfig();
+  const cut = new Date(Date.now() - cfg.overdueDays * 86400000);
+  return prisma.tracking.count({ where: { status: "stored", packedAt: { lt: cut }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }] } });
+}
+
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
   const weekAgo = new Date(Date.now() - 7 * 86400000);
-  const [lateOrders, notReviewed, pendingDeposits, docNotCaptured, unmatched, missingPrice, cartons, overdue] = await Promise.all([
+  const [lateOrders, notReviewed, pendingDeposits, docNotCaptured, unmatched, missingPrice, cartons, overdue, storageOverdue] = await Promise.all([
     prisma.order.count({ where: { status: { not: "cancelled" }, trackings: { none: {} }, createdAt: { lt: weekAgo } } }),
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
@@ -131,6 +152,7 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     prisma.order.count({ where: { status: { not: "cancelled" }, totalVnd: null } }),
     prisma.carton.findMany({ where: { declaredWeightKg: { not: null } }, include: { trackings: { select: { jpWeightKg: true, vnWeightKg: true } } } }),
     overdueDebts(),
+    storageOverdueCount(),
   ]);
   const cartonMismatch = cartons.filter((c) => {
     const actual = c.trackings.reduce((s, t) => s + effKg(t), 0);
@@ -138,6 +160,6 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
   }).length;
   res.json({
     lateOrders, notReviewed, pendingDeposits, docNotCaptured, unmatched, missingPrice, cartonMismatch,
-    overdueDebts: overdue.list.length,
+    overdueDebts: overdue.list.length, storageOverdue,
   });
 });

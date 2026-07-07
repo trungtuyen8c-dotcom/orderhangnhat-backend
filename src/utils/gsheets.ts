@@ -247,7 +247,7 @@ function isTrackingCode(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
@@ -256,23 +256,26 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
   if (!dateTabs.length) return [];
 
-  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string }[] = [];
+  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
     const ranges = batch
-      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:F100000`)}`)
+      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:X100000`)}`)
       .join("&");
     const data = (await apiSheet(sid, `/values:batchGet?${ranges}&majorDimension=COLUMNS`, "GET")) as { valueRanges?: { values?: string[][] }[] };
     (data.valueRanges ?? []).forEach((vr, idx) => {
       const tab = batch[idx]?.title ?? "";
       const date = batch[idx]?.date ?? null;
       const sheetId = batch[idx]?.sheetId ?? 0;
-      const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking) cols[5]=F(tên)
-      const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [], nameCol = cols[5] ?? [];
+      const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking) cols[5]=F(tên) cols[23]=X(đã xử lý)
+      const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [], nameCol = cols[5] ?? [], doneCol = cols[23] ?? [];
       codeCol.forEach((cell, j) => {
         const code = (cell ?? "").trim();
-        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim() });
+        if (isTrackingCode(code)) {
+          const done = (doneCol[j] ?? "").trim().toUpperCase();
+          out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: done === "TRUE" });
+        }
       });
     });
   }
@@ -356,15 +359,17 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   }
 
   // Ghi ngược vào file kho (cần SA quyền Editor):
-  // Tên hàng (F) + Giá ¥ (G) — ghi ĐÚNG đơn của dòng đó nếu ghép được 1-1, ngược lại gộp tất cả (an toàn, tô đỏ nhắc kiểm tra).
+  // Tên hàng (F) + Giá ¥ (G) — ghi ĐÚNG đơn của dòng đó nếu ghép được 1-1, ngược lại gộp tất cả (an toàn).
   // Nếu kho đã tự sửa tên (F khác tên hệ thống tính ra) -> không ghi đè, lưu lại customsName để dùng khi xuất hóa đơn.
   // Chú ý (U) = note gia cố/mở hàng + số dòng cần quét khi 1 mã dùng chung nhiều đơn; Link đối chiếu (V); Số trùng (W) = số món.
-  // Tô màu dòng: đỏ nếu số trùng > 1 VÀ không ghép được 1-1 (nhắc kiểm tra đơn có bị gộp nhầm/quét chưa đủ dòng), xanh nếu có chú ý.
+  // Cột X = checkbox "Đã xử lý" - kho tự tick khi đã xử lý xong (đổi tên/mở hàng/quét đủ dòng) -> tắt màu, không cần đợi hệ thống.
+  // Màu dòng theo ưu tiên: đã tick X -> trắng; đổi tên -> cam; trùng tracking (nhiều đơn 1 mã) -> xanh lá; mở hàng/gia cố -> vàng.
   try {
     const data: { range: string; values: (string | number)[][] }[] = [];
     const colorReqs: any[] = [];
-    const RED = { red: 0.96, green: 0.80, blue: 0.80 };
+    const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
     const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
+    const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
     const WHITE = { red: 1, green: 1, blue: 1 };
     for (const r of rows) {
       const single = rowMatch.get(`${r.tab}|${r.row}`);
@@ -399,11 +404,16 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
-      const bg = (count > 1 && !single) ? RED : (note || editedByKho) ? GREEN : WHITE;
+      const bg = r.resolved ? WHITE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE;
       colorReqs.push({ repeatCell: {
-        range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 23 },
+        range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 24 },
         cell: { userEnteredFormat: { backgroundColor: bg } },
         fields: "userEnteredFormat.backgroundColor",
+      } });
+      // Đảm bảo ô X là checkbox để kho tick, không phải gõ tay TRUE/FALSE
+      colorReqs.push({ setDataValidation: {
+        range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 23, endColumnIndex: 24 },
+        rule: { condition: { type: "BOOLEAN" }, strict: true },
       } });
     }
     const CW = 100;
@@ -434,13 +444,14 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: false };
-  const found = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } }, take: 1 });
-  let t = found[0];
+  const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } } });
+  let t = group[0];
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); cron 2 phút sau sẽ gán kiện theo BILL/thùng.
     const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt: (tab ? tabDate(tab) : null) ?? new Date(), status: "new" } });
-    t = { ...created, order: null } as typeof found[number];
+    t = { ...created, order: null } as typeof group[number];
+    group.push(t);
   }
   const packedAt = (tab ? tabDate(tab) : null) ?? t.packedAt ?? new Date();
   if (!t.packedAt) await prisma.tracking.update({ where: { id: t.id }, data: { packedAt } });
@@ -448,22 +459,49 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   if (tab && row) {
     try {
       const esc = tab.replace(/'/g, "''");
-      const items = t.order?.items ?? [];
+      const seenOrderIds = new Set<string>();
+      const orders = group.map((x) => x.order).filter((o): o is NonNullable<typeof o> => {
+        if (!o || seenOrderIds.has(o.id)) return false;
+        seenOrderIds.add(o.id);
+        return true;
+      });
+      const items = orders.flatMap((o) => o.items ?? []);
       const data: { range: string; values: (string | number)[][] }[] = [];
+      // Đọc lại F (tên) + X (đã xử lý) hiện tại của dòng để không đè tên kho đã tự sửa
+      const cur = (await apiSheet(sid, `/values:batchGet?ranges=${encodeURIComponent(`'${esc}'!F${row}`)}&ranges=${encodeURIComponent(`'${esc}'!X${row}`)}`, "GET")) as { valueRanges?: { values?: string[][] }[] };
+      const curName = (cur.valueRanges?.[0]?.values?.[0]?.[0] ?? "").trim();
+      const resolved = (cur.valueRanges?.[1]?.values?.[0]?.[0] ?? "").trim().toUpperCase() === "TRUE";
+      let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-        data.push({ range: `'${esc}'!F${row}:G${row}`, values: [[name, price]] });
+        if (curName && curName !== name) {
+          editedByKho = true;
+          if (t.customsName !== curName) await prisma.tracking.update({ where: { id: t.id }, data: { customsName: curName } });
+        } else {
+          if (t.customsName) await prisma.tracking.update({ where: { id: t.id }, data: { customsName: null } });
+          data.push({ range: `'${esc}'!F${row}:G${row}`, values: [[name, price]] });
+        }
       }
-      const note = t.order?.needsCheck ? (t.order.checkNote?.trim() || "Mở hàng / gia cố") : "";
+      const dbCount = group.length;
+      const scanNote = dbCount > 1 ? `Mã dùng chung ${dbCount} đơn - đã quét 1/${dbCount} dòng` : "";
+      const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
+      const note = [scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${row}:W${row}`, values: [[note, link, count]] });
       await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data });
       const sheetId = await getSheetIdByTitle(sid, tab);
       if (sheetId != null) {
-        const bg = count > 1 ? { red: 0.96, green: 0.80, blue: 0.80 } : note ? { red: 0.80, green: 0.93, blue: 0.80 } : { red: 1, green: 1, blue: 1 };
-        await apiSheet(sid, `:batchUpdate`, "POST", { requests: [{ repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 23 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } }] });
+        const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
+        const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
+        const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
+        const WHITE = { red: 1, green: 1, blue: 1 };
+        const bg = resolved ? WHITE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE;
+        await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
+          { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } },
+          { setDataValidation: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 }, rule: { condition: { type: "BOOLEAN" }, strict: true } } },
+        ] });
       }
     } catch (e) { console.error("[gsheets] syncPackedOne", (e as Error).message); }
   }

@@ -377,7 +377,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   // Cột X = checkbox "Đã xử lý" - kho tự tick khi đã xử lý xong (đổi tên/mở hàng/quét đủ dòng) -> tắt màu, không cần đợi hệ thống.
   // Màu dòng theo ưu tiên: đã tick X -> trắng; quét sau khi chốt ngày -> tím (cần khai bổ sung); đổi tên -> cam; trùng tracking -> xanh lá; mở hàng/gia cố -> vàng.
   try {
-    const data: { range: string; values: (string | number)[][] }[] = [];
+    const data: { range: string; values: (string | number | boolean)[][] }[] = [];
     const colorReqs: any[] = [];
     const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
     const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
@@ -435,6 +435,17 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         if (r.resolved) data.push({ range: `'${esc}'!X${r.row}`, values: [[""]] });
       }
     }
+    // Ô Z1 mỗi tab: checkbox "Đã nộp hải quan" - kho tự tick để khóa ngày đó (đồng bộ 2 chiều với nút "Chốt ngày" trong app).
+    const tabInfo = new Map<string, { sheetId: number; date: Date | null }>();
+    for (const r of rows) if (!tabInfo.has(r.tab)) tabInfo.set(r.tab, { sheetId: r.sheetId, date: r.date });
+    for (const [tab, info] of tabInfo) {
+      const esc = tab.replace(/'/g, "''");
+      const dayKey = info.date ? info.date.toISOString().slice(0, 10) : null;
+      const lockedTab = dayKey ? lockedDates.has(dayKey) : false;
+      data.push({ range: `'${esc}'!Y1`, values: [["Đã nộp hải quan (tick khi xong)"]] });
+      data.push({ range: `'${esc}'!Z1`, values: [[lockedTab]] });
+      colorReqs.push({ setDataValidation: { range: { sheetId: info.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 25, endColumnIndex: 26 }, rule: { condition: { type: "BOOLEAN" }, strict: true } } });
+    }
     const CW = 100;
     for (let i = 0; i < data.length; i += CW) {
       await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data: data.slice(i, i + CW) });
@@ -447,6 +458,15 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   }
 
   return { matched: trks.length, updated };
+}
+
+// Kho tick checkbox Z1 của tab ngày đó ("Đã nộp hải quan") -> khóa/mở khóa ngày, dùng chung với nút "Chốt ngày" trong app.
+export async function setDayLockFromTab(tab: string, locked: boolean): Promise<void> {
+  const date = tabDate(tab);
+  if (!date) return;
+  const d = new Date(date.toISOString().slice(0, 10) + "T00:00:00");
+  if (locked) await prisma.packDayLock.upsert({ where: { date: d }, update: {}, create: { date: d } });
+  else await prisma.packDayLock.deleteMany({ where: { date: d } });
 }
 
 async function getSheetIdByTitle(sid: string, title: string): Promise<number | null> {

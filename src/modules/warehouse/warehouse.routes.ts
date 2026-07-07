@@ -5,7 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders } from "../../utils/gsheets.js";
+import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab } from "../../utils/gsheets.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 
 export const warehouseRouter = Router();
@@ -15,6 +15,11 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
   const key = String(req.query.key ?? req.headers["x-hook-key"] ?? "");
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
   if (!cfg?.value || key !== cfg.value) return res.status(401).json({ error: "BAD_KEY" });
+  // Kho tick Z1 (checkbox "Đã nộp hải quan") của tab -> khóa/mở khóa ngày đó ngay, không cần vào app bấm "Chốt ngày".
+  if (typeof req.body?.dayLock === "boolean" && req.body?.tab) {
+    await setDayLockFromTab(String(req.body.tab), req.body.dayLock);
+    return res.json({ ok: true });
+  }
   // TỨC THÌ: webhook gửi mã + ô vừa gõ -> khớp đúng 1 dòng. Không có mã -> quét tab gần đây (fallback).
   const code = req.body?.code;
   if (code) {

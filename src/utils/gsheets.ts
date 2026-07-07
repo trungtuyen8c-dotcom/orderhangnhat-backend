@@ -335,7 +335,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   // Chỉ set cartonId khi tracking chưa có kiện, để không đè lên thao tác "Bỏ khỏi kiện" thủ công.
   const cartonCache = new Map<string, string>(); // key `${code}|${dayKey}` -> cartonId
   async function getCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
-    const code = `${bill} ${thung}`.trim();
+    // Chuẩn hóa hoa/thường (kho gõ lúc "GA" lúc "ga") -> tránh tách thành 2 kiện khác nhau cho cùng 1 kiện thực.
+    const code = `${bill} ${thung}`.trim().toUpperCase();
     if (!code) return null;
     const dayKey = date ? date.toISOString().slice(0, 10) : "none";
     const cacheKey = `${code}|${dayKey}`;
@@ -367,7 +368,14 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     if (!cartonId) continue;
     const single = rowMatch.get(`${r.tab}|${r.row}`);
     const targets = single ? [single] : (trksByCode.get(r.code) ?? []);
-    for (const t of targets) if (!t.cartonId) await prisma.tracking.update({ where: { id: t.id }, data: { cartonId } });
+    for (const t of targets) {
+      const data: { cartonId?: string; packedAt?: Date } = {};
+      if (!t.cartonId) data.cartonId = cartonId;
+      // Ghép được đúng 1-1 với dòng vật lý -> ngày dòng đó là chuẩn; mã dùng chung nhiều ngày có thể
+      // đã bị khoá packedAt theo ngày quét đầu tiên (sai), sửa lại khớp đúng kiện/ngày thật.
+      if (single && r.date && t.packedAt && r.date.toISOString().slice(0, 10) !== new Date(t.packedAt).toISOString().slice(0, 10)) data.packedAt = r.date;
+      if (Object.keys(data).length) { await prisma.tracking.update({ where: { id: t.id }, data }); Object.assign(t, data); }
+    }
   }
 
   // Ghi ngược vào file kho (cần SA quyền Editor):

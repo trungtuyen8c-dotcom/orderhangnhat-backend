@@ -106,7 +106,18 @@ trackingRouter.post("/invoice", authorize("trackings.list"), async (req, res) =>
   for (const t of trks) if (t.order) orders.set(t.order.id, t.order);
   const items: { no: number; name: string; origin: string; unitPriceJpy: number; unit: string; qty: number; amount: number }[] = [];
   let no = 1, total = 0;
+  // Tracking đã có customsName (kho tự sửa tên trong sheet để dễ thông quan) -> gộp 1 dòng dùng tên đó thay vì liệt kê từng món gốc
+  const usedOrderIds = new Set<string>();
+  for (const t of trks) {
+    if (!t.order || !t.customsName) continue;
+    const amount = t.order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+    const qty = t.order.items.reduce((s, i) => s + i.qty, 0) || 1;
+    items.push({ no: no++, name: t.customsName, origin: "", unitPriceJpy: amount / qty, unit: "pcs", qty, amount });
+    total += amount;
+    usedOrderIds.add(t.order.id);
+  }
   for (const o of orders.values()) {
+    if (usedOrderIds.has(o!.id)) continue;
     for (const it of o!.items) {
       const amount = it.qty * Number(it.unitPriceJpy);
       items.push({ no: no++, name: it.name, origin: "", unitPriceJpy: Number(it.unitPriceJpy), unit: "pcs", qty: it.qty, amount });

@@ -247,7 +247,7 @@ function isTrackingCode(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string }[]> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
@@ -256,23 +256,23 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
   if (!dateTabs.length) return [];
 
-  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string }[] = [];
+  const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
     const ranges = batch
-      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:E100000`)}`)
+      .map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:F100000`)}`)
       .join("&");
     const data = (await apiSheet(sid, `/values:batchGet?${ranges}&majorDimension=COLUMNS`, "GET")) as { valueRanges?: { values?: string[][] }[] };
     (data.valueRanges ?? []).forEach((vr, idx) => {
       const tab = batch[idx]?.title ?? "";
       const date = batch[idx]?.date ?? null;
       const sheetId = batch[idx]?.sheetId ?? 0;
-      const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking)
-      const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [];
+      const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking) cols[5]=F(tên)
+      const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [], nameCol = cols[5] ?? [];
       codeCol.forEach((cell, j) => {
         const code = (cell ?? "").trim();
-        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim() });
+        if (isTrackingCode(code)) out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim() });
       });
     });
   }
@@ -357,8 +357,9 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
 
   // Ghi ngược vào file kho (cần SA quyền Editor):
   // Tên hàng (F) + Giá ¥ (G) — ghi ĐÚNG đơn của dòng đó nếu ghép được 1-1, ngược lại gộp tất cả (an toàn, tô đỏ nhắc kiểm tra).
-  // Chú ý (U) = note gia cố/mở hàng; Link đối chiếu (V); Số trùng (W) = số món.
-  // Tô màu dòng: đỏ nếu số trùng > 1 VÀ không ghép được 1-1 (nhắc kiểm tra đơn có bị gộp nhầm), xanh nếu có chú ý.
+  // Nếu kho đã tự sửa tên (F khác tên hệ thống tính ra) -> không ghi đè, lưu lại customsName để dùng khi xuất hóa đơn.
+  // Chú ý (U) = note gia cố/mở hàng + số dòng cần quét khi 1 mã dùng chung nhiều đơn; Link đối chiếu (V); Số trùng (W) = số món.
+  // Tô màu dòng: đỏ nếu số trùng > 1 VÀ không ghép được 1-1 (nhắc kiểm tra đơn có bị gộp nhầm/quét chưa đủ dòng), xanh nếu có chú ý.
   try {
     const data: { range: string; values: (string | number)[][] }[] = [];
     const colorReqs: any[] = [];
@@ -377,16 +378,28 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       if (!orders.length) continue;
       const items = orders.flatMap((o) => o.items ?? []);
       const esc = r.tab.replace(/'/g, "''");
+      let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-        data.push({ range: `'${esc}'!F${r.row}:G${r.row}`, values: [[name, price]] });
+        if (single && r.sheetName && r.sheetName !== name) {
+          // Kho đã tự sửa tên trong sheet (vd để dễ thông quan) -> giữ nguyên, không ghi đè
+          editedByKho = true;
+          if (single.customsName !== r.sheetName) await prisma.tracking.update({ where: { id: single.id }, data: { customsName: r.sheetName } });
+        } else {
+          if (single && single.customsName) await prisma.tracking.update({ where: { id: single.id }, data: { customsName: null } });
+          data.push({ range: `'${esc}'!F${r.row}:G${r.row}`, values: [[name, price]] });
+        }
       }
-      const note = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
+      const dbCount = (trksByCode.get(r.code) ?? []).length;
+      const scannedCount = (rowsByCode.get(r.code) ?? []).length;
+      const scanNote = dbCount > 1 ? `Mã dùng chung ${dbCount} đơn - đã quét ${scannedCount}/${dbCount} dòng` : "";
+      const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
+      const note = [scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       const count = items.length;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
-      const bg = (count > 1 && !single) ? RED : note ? GREEN : WHITE;
+      const bg = (count > 1 && !single) ? RED : (note || editedByKho) ? GREEN : WHITE;
       colorReqs.push({ repeatCell: {
         range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 23 },
         cell: { userEnteredFormat: { backgroundColor: bg } },

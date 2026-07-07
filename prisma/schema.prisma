@@ -215,6 +215,8 @@ model Tracking {
   review            String?
   url               String?
   packedAt          DateTime?     @map("packed_at")
+  // Tên khai hải quan - kho Nhật tự sửa trong sheet (cột F) để dễ thông quan; khác tên gốc thì giữ lại đây, dùng khi xuất hóa đơn
+  customsName       String?       @map("customs_name")
   status            String        @default("new")
   createdAt         DateTime      @default(now()) @map("created_at")
   order             Order?        @relation(fields: [orderId], references: [id])

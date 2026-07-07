@@ -34,7 +34,7 @@ const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
 
 warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) => {
   const trkSelect = {
-    id: true, code: true, cartonId: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true,
+    id: true, code: true, cartonId: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, customsName: true,
     order: { select: { code: true, customer: { select: { name: true } } } },
   } as const;
   // Đã "Chuyển lưu kho" thì ra khỏi board chính (xem ở /warehouse/stored), trừ khi đã ship (có Tracking VN) thì luôn loại khỏi board.

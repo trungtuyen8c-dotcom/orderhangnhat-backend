@@ -287,6 +287,18 @@ accountingRouter.get("/deposits/fix-requests", authorize("accounting.note_deposi
   res.json(rows.map((r) => ({ id: r.id, fixRequest: r.fixRequest, customer: cmap.get(r.customerId)?.name ?? "?" })));
 });
 
+// Sửa tên người chuyển khoản (gõ nhầm/thiếu lúc ghi cọc) - không đụng số tiền/trạng thái xác nhận
+const depEditSchema = z.object({ payerName: z.string().optional() });
+accountingRouter.patch("/customer-deposits/:id", authorize("accounting.note_deposit"), async (req, res) => {
+  const p = depEditSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
+  if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
+  const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { payerName: p.data.payerName || null } });
+  await logAudit({ actorId: req.user!.id, targetId: dep.id, action: "customer_deposit.updated", metadata: { payerName: p.data.payerName } });
+  res.json(updated);
+});
+
 accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_payment"), async (req, res) => {
   const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
   if (!dep) return res.status(404).json({ error: "NOT_FOUND" });

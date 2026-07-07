@@ -124,6 +124,7 @@ const createSchema = z.object({
   trackings: trackingsField,
   needsCheck: z.boolean().optional(),
   checkNote: z.string().optional(),
+  externalWarehouse: z.boolean().optional(),
   ...pricingSchema,
 });
 
@@ -163,6 +164,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     intlShipCurrency: d.intlShipCurrency ?? "VND",
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
+    externalWarehouse: d.externalWarehouse ?? false,
     publicToken: uuid(),
     items: { create: d.items },
   };
@@ -273,6 +275,7 @@ const editSchema = z.object({
   trackings: trackingsField,
   needsCheck: z.boolean().optional(),
   checkNote: z.string().optional(),
+  externalWarehouse: z.boolean().optional(),
   ...pricingSchema,
 });
 
@@ -298,6 +301,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   if (d.orderDate !== undefined) { diff("orderDate", order.orderDate, d.orderDate); data.orderDate = d.orderDate; }
   if (d.needsCheck !== undefined) { diff("needsCheck", order.needsCheck, d.needsCheck); data.needsCheck = d.needsCheck; }
   if (d.checkNote !== undefined) { diff("checkNote", order.checkNote, d.checkNote); data.checkNote = d.checkNote; }
+  if (d.externalWarehouse !== undefined) { diff("externalWarehouse", order.externalWarehouse, d.externalWarehouse); data.externalWarehouse = d.externalWarehouse; }
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
   if (d.nick !== undefined) { diff("nick", order.nick, d.nick); data.nick = d.nick; }
   for (const f of PRICING_FIELDS) {

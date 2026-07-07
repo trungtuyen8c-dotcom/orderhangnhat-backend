@@ -152,6 +152,8 @@ model Order {
   paidAt                 DateTime?   @map("paid_at")
   needsCheck             Boolean     @default(false) @map("needs_check")
   checkNote              String?     @map("check_note")
+  // Chỉ order hộ - hàng đóng về kho khác (không phải kho VN của mình) -> tracking loại khỏi board Kho VN
+  externalWarehouse      Boolean     @default(false) @map("external_warehouse")
   publicToken            String      @unique @map("public_token")
   orderDate              DateTime    @default(now()) @map("order_date")
   source                 String      @default("normal")

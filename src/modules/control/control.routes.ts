@@ -137,7 +137,7 @@ controlRouter.put("/storage-config", authorize("system.manage_settings"), async 
 async function storageOverdueCount(): Promise<number> {
   const cfg = await getStorageConfig();
   const cut = new Date(Date.now() - cfg.overdueDays * 86400000);
-  return prisma.tracking.count({ where: { status: "stored", packedAt: { lt: cut }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }] } });
+  return prisma.tracking.count({ where: { status: "stored", packedAt: { lt: cut }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], NOT: { order: { externalWarehouse: true } } } });
 }
 
 // ===== Trung tâm kiểm soát: gom số đếm =====

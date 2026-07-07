@@ -253,16 +253,20 @@ function isChecked(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{
+  rows: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[];
+  blankRows: { tab: string; row: number; sheetId: number }[];
+}> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
     .filter((t): t is { title: string; sheetId: number; date: Date } => t.date != null);
   // Chỉ quét tab gần đây cho nhanh (webhook/cron). Tab cũ không có mã mới về.
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
-  if (!dateTabs.length) return [];
+  if (!dateTabs.length) return { rows: [], blankRows: [] };
 
   const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[] = [];
+  const blankRows: { tab: string; row: number; sheetId: number }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
@@ -276,15 +280,19 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
       const sheetId = batch[idx]?.sheetId ?? 0;
       const cols = vr.values ?? []; // majorDimension=COLUMNS -> cols[0]=A(BILL) cols[1]=B(thùng) cols[4]=E(mã tracking) cols[5]=F(tên) cols[23]=X(đã xử lý)
       const billCol = cols[0] ?? [], thungCol = cols[1] ?? [], codeCol = cols[4] ?? [], nameCol = cols[5] ?? [], doneCol = cols[23] ?? [];
-      codeCol.forEach((cell, j) => {
-        const code = (cell ?? "").trim();
+      const maxLen = Math.max(billCol.length, thungCol.length, codeCol.length);
+      for (let j = 0; j < maxLen; j++) {
+        const code = (codeCol[j] ?? "").trim();
         if (isTrackingCode(code)) {
           out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: isChecked(doneCol[j] ?? "") });
+        } else if (billCol[j]?.trim() || thungCol[j]?.trim()) {
+          // Có BILL/thùng nhưng mã tracking trống (bị xóa/chưa gõ) -> báo để dọn màu cũ nếu còn sót.
+          blankRows.push({ tab, row: j + 1, sheetId });
         }
-      });
+      }
     });
   }
-  return out;
+  return { rows: out, blankRows };
 }
 
 // Quét file kho -> tracking nào trùng & chưa đóng thì set packedAt (cam). Trả số khớp / số cập nhật.
@@ -293,7 +301,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: 0, updated: 0 };
-  const rows = await readWarehousePackRows(sid, opts?.recentDays);
+  const { rows, blankRows } = await readWarehousePackRows(sid, opts?.recentDays);
   const dateByCode = new Map<string, Date | null>();
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
@@ -443,6 +451,15 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         if (r.resolved) data.push({ range: `'${esc}'!X${r.row}`, values: [[""]] });
       }
     }
+    // Dòng có BILL/thùng nhưng mã tracking đã bị xóa/để trống -> dọn sạch màu + checkbox cũ nếu còn sót (không bị kẹt màu mãi).
+    for (const br of blankRows) {
+      colorReqs.push({ repeatCell: {
+        range: { sheetId: br.sheetId, startRowIndex: br.row - 1, endRowIndex: br.row, startColumnIndex: 0, endColumnIndex: 24 },
+        cell: { userEnteredFormat: { backgroundColor: WHITE } },
+        fields: "userEnteredFormat.backgroundColor",
+      } });
+      colorReqs.push({ setDataValidation: { range: { sheetId: br.sheetId, startRowIndex: br.row - 1, endRowIndex: br.row, startColumnIndex: 23, endColumnIndex: 24 } } });
+    }
     // Ô Z1 mỗi tab: checkbox "Đã nộp hải quan" - kho tự tick để khóa ngày đó (đồng bộ 2 chiều với nút "Chốt ngày" trong app).
     const tabInfo = new Map<string, { sheetId: number; date: Date | null }>();
     for (const r of rows) if (!tabInfo.has(r.tab)) tabInfo.set(r.tab, { sheetId: r.sheetId, date: r.date });
@@ -487,9 +504,24 @@ async function getSheetIdByTitle(sid: string, title: string): Promise<number | n
 export async function syncPackedOne(code: string, tab?: string, row?: number): Promise<{ matched: boolean }> {
   if (!saEnabled()) return { matched: false };
   const c = (code ?? "").trim();
-  if (!isTrackingCode(c)) return { matched: false };
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
+  if (!isTrackingCode(c)) {
+    // Mã bị xóa/để trống -> dọn màu + checkbox cũ của đúng dòng đó nếu có (không để kẹt màu mãi).
+    if (sid && tab && row) {
+      try {
+        const sheetId = await getSheetIdByTitle(sid, tab);
+        if (sheetId != null) {
+          const WHITE = { red: 1, green: 1, blue: 1 };
+          await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
+            { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } },
+            { setDataValidation: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 } } },
+          ] });
+        }
+      } catch (e) { console.error("[gsheets] syncPackedOne clear", (e as Error).message); }
+    }
+    return { matched: false };
+  }
   if (!sid) return { matched: false };
   const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } } });
   const packedAt = (tab ? tabDate(tab) : null) ?? group[0]?.packedAt ?? new Date();

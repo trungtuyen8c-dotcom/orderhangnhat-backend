@@ -386,7 +386,9 @@ ordersRouter.post("/:id/pay", authorize("orders.update"), async (req, res) => {
   await prisma.orderItem.updateMany({ where: { orderId: order.id }, data: { paymentMethod: wallet.name } });
   const paidAt = p.data.paidAt ?? new Date();
   const items = order.items.map((i) => ({ unitPriceJpy: i.unitPriceJpy, qty: i.qty, shipJpy: i.shipJpy, paymentMethod: wallet.name, purchaseDate: i.purchaseDate }));
-  await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate, fallbackDate: paidAt });
+  // Ngày ghi sổ ưu tiên: ngày mua món (nếu có) -> ngày đặt đơn -> KHÔNG dùng ngày bấm "Đã thanh toán"
+  // (kế toán có thể xác nhận trễ nhiều ngày, dồn hết giao dịch vào 1 ngày là sai thực tế).
+  await applyOrderCardCharges(prisma, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate, fallbackDate: order.orderDate });
   await prisma.order.update({ where: { id: order.id }, data: { yahooPaidAt: paidAt } });
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.yahoo_paid", metadata: { wallet: wallet.name } });
   await logOrder({ orderId: order.id, actorId: req.user!.id, action: "updated", changes: { yahooThanhToan: wallet.name } });

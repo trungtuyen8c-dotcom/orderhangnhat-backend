@@ -566,19 +566,19 @@ async function reverseFundTxn(t: { id: string; type: string; amountYen: unknown;
 }
 
 // Sửa 1 lần: đơn Yahoo/Mercari thanh toán sau trước đây ghi sổ "Mua hàng" theo ngày bấm Đã thanh toán
-// (bug đã fix ở route /pay) -> dồn sai ngày cho các đơn cũ. Chỉ backfill đơn KHÔNG có "Ngày mua" riêng theo món
-// (để không đè lên ngày đã cố ý nhập khác ngày đặt đơn).
+// (bug đã fix ở route /pay) -> dồn sai ngày cho các đơn cũ, dù món hàng đã có đúng "Ngày mua" riêng.
+// Chỉ tự sửa khi khớp đúng 1 món - 1 giao dịch (rõ ràng, không đoán); đơn nhiều món/nhiều giao dịch bỏ qua để tự kiểm tra tay.
 accountingRouter.post("/backfill-yahoo-dates", authorize("wallets.manage"), async (_req, res) => {
   const orders = await prisma.order.findMany({ where: { source: { in: ["yahoo", "mercari"] }, yahooPaidAt: { not: null } }, include: { items: true } });
   let updated = 0, skipped = 0;
   for (const o of orders) {
-    if (o.items.some((i) => i.purchaseDate)) { skipped++; continue; }
     const txns = await prisma.walletTxn.findMany({ where: { refOrderId: o.id, category: "Mua hàng" } });
-    for (const t of txns) {
-      if (t.createdAt.toISOString().slice(0, 10) !== o.orderDate.toISOString().slice(0, 10)) {
-        await prisma.walletTxn.update({ where: { id: t.id }, data: { createdAt: o.orderDate } });
-        updated++;
-      }
+    if (txns.length !== 1 || o.items.length !== 1) { skipped++; continue; }
+    const target = o.items[0].purchaseDate ?? o.orderDate;
+    const t = txns[0];
+    if (t.createdAt.toISOString().slice(0, 10) !== target.toISOString().slice(0, 10)) {
+      await prisma.walletTxn.update({ where: { id: t.id }, data: { createdAt: target } });
+      updated++;
     }
   }
   await logAudit({ actorId: _req.user!.id, action: "accounting.backfill_yahoo_dates", metadata: { updated, skipped } });

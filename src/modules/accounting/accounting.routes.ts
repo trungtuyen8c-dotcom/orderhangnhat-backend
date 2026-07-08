@@ -565,6 +565,26 @@ async function reverseFundTxn(t: { id: string; type: string; amountYen: unknown;
   }
 }
 
+// Sửa 1 lần: đơn Yahoo/Mercari thanh toán sau trước đây ghi sổ "Mua hàng" theo ngày bấm Đã thanh toán
+// (bug đã fix ở route /pay) -> dồn sai ngày cho các đơn cũ. Chỉ backfill đơn KHÔNG có "Ngày mua" riêng theo món
+// (để không đè lên ngày đã cố ý nhập khác ngày đặt đơn).
+accountingRouter.post("/backfill-yahoo-dates", authorize("wallets.manage"), async (_req, res) => {
+  const orders = await prisma.order.findMany({ where: { source: { in: ["yahoo", "mercari"] }, yahooPaidAt: { not: null } }, include: { items: true } });
+  let updated = 0, skipped = 0;
+  for (const o of orders) {
+    if (o.items.some((i) => i.purchaseDate)) { skipped++; continue; }
+    const txns = await prisma.walletTxn.findMany({ where: { refOrderId: o.id, category: "Mua hàng" } });
+    for (const t of txns) {
+      if (t.createdAt.toISOString().slice(0, 10) !== o.orderDate.toISOString().slice(0, 10)) {
+        await prisma.walletTxn.update({ where: { id: t.id }, data: { createdAt: o.orderDate } });
+        updated++;
+      }
+    }
+  }
+  await logAudit({ actorId: _req.user!.id, action: "accounting.backfill_yahoo_dates", metadata: { updated, skipped } });
+  res.json({ updated, skipped, totalPaidOrders: orders.length });
+});
+
 accountingRouter.get("/fund", authorize("accounting.reconcile"), async (req, res) => {
   const fund = await getFund();
   const status = String(req.query.status ?? "all");

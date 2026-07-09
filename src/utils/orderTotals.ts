@@ -46,6 +46,17 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   const custRate = order.customer?.shipRatePerKg != null ? Number(order.customer.shipRatePerKg) : null;
   const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd({ ...t, unitPriceVndPerKg: t.unitPriceVndPerKg ?? custRate }, rate), 0);
 
+  // 着払い/COD do kho Nhật báo theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng thẳng vào công nợ khách
+  // của đúng đơn gắn mã đó. Lấy sống từ CompanyCost (không cache) -> xóa khoản là tự trừ lại ngay lần recompute sau.
+  const codRows = order.trackings.length
+    ? await prisma.companyCost.groupBy({
+        by: ["refId"],
+        where: { kind: "chakubarai", refId: { in: order.trackings.map((t) => t.id) } },
+        _sum: { amountVnd: true },
+      })
+    : [];
+  const codVnd = codRows.reduce((s, r) => s + Number(r._sum.amountVnd ?? 0), 0);
+
   const jpyFee = (amt: unknown, cur: string) => cur === "JPY" && Number(amt) > 0;
   const trackingNeedsRate = order.trackings.some((t) => t.shipRateCurrency === "JPY" && Number(t.unitPriceVndPerKg ?? 0) > 0);
   const hasUnconverted =
@@ -68,7 +79,8 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
       + toVnd(Number(order.jpDomesticShipAmount), order.jpDomesticShipCurrency)
       + toVnd(Number(order.intlShipAmount), order.intlShipCurrency)
       - toVnd(Number(order.discountAmount), order.discountCurrency)
-      + trackingShip;
+      + trackingShip
+      + codVnd;
 
   await prisma.order.update({ where: { id: orderId }, data: { totalQuote: subtotalJpy, totalVnd } });
 

@@ -159,7 +159,7 @@ function loadCustomerOrders(customerId: string) {
 // Dòng data theo TỪNG MÓN, gom theo THÁNG NGÀY MUA của chính món đó (không theo ngày tạo đơn).
 // Cột A→N khớp đúng template khách: ...H=%Công, I=Tổng tiền(¥), J=Cân-Kg, K=Phụ thu, L=TRACKING, M=Đánh giá, N=Ngày giao.
 // Trả map: tháng -> { rows: A→N, jpyTotal: tổng ¥ (mirror cột I), vndTotal: tổng quy đổi ₫ của các món có tỉ giá }, đã sắp xếp theo ngày mua.
-function buildRowsByMonth(orders: OrderFull[]): Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }> {
+function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>): Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }> {
   const byMonth = new Map<number, { date: Date; an: (string | number)[]; jpy: number; vnd: number }[]>();
   const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
   for (const o of orders) {
@@ -171,6 +171,9 @@ function buildRowsByMonth(orders: OrderFull[]): Map<number, { rows: (string | nu
       const trk = o.trackings[idx];
       const purchaseDate = it.purchaseDate ?? o.createdAt;
       const m = vnDate(purchaseDate).getUTCMonth() + 1;
+      // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
+      const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
+      const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
       bucket(m).push({
         date: purchaseDate,
         an: [
@@ -178,8 +181,10 @@ function buildRowsByMonth(orders: OrderFull[]): Map<number, { rows: (string | nu
           fmtDate(purchaseDate),
           "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
           giaWeb || "", ship || "", "", giaWeb + ship,
-          trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : "",
-          idx === 0 && surchargeVnd ? Math.round(surchargeVnd) : "",
+          // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
+          // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
+          trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : ""),
+          surchargeCell ? Math.round(surchargeCell) : "",
           String(trk?.code ?? ""), String(trk?.review ?? ""), "",
         ],
         jpy: giaWeb + ship,
@@ -668,8 +673,16 @@ async function runCustomerSync(customerId: string): Promise<void> {
     // Đẩy ngay khi NV ghi (kế toán xác nhận là việc nội bộ, không chờ mới lên sheet khách)
     const deposits = await prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "asc" } });
 
+    // 着払い/COD kho báo riêng theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng vào cột Phụ thu đúng dòng đó
+    const trackingIds = orders.flatMap((o) => o.trackings.map((t) => t.id));
+    const codByTracking = new Map<string, number>();
+    if (trackingIds.length) {
+      const codRows = await prisma.companyCost.groupBy({ by: ["refId"], where: { kind: "chakubarai", refId: { in: trackingIds } }, _sum: { amountVnd: true } });
+      for (const r of codRows) if (r.refId) codByTracking.set(r.refId, Number(r._sum.amountVnd ?? 0));
+    }
+
     // Mỗi MÓN nhảy vào tháng theo ngày mua của chính nó
-    const rowsByMonth = buildRowsByMonth(orders);
+    const rowsByMonth = buildRowsByMonth(orders, codByTracking);
     const depsByMonth = new Map<number, typeof deposits>();
     for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
 

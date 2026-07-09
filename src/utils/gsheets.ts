@@ -298,7 +298,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
   if (!codes.length) return { matched: 0, updated: 0 };
-  const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true } } } });
+  const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true, trackings: true } } } });
 
   // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
   const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
@@ -399,6 +399,14 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
     const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
     const WHITE = { red: 1, green: 1, blue: 1 };
+    // 1 đơn có thể nhiều món -> nhiều tracking; ghép món đúng theo VỊ TRÍ tracking đó trong đơn
+    // (cùng quy ước với buildRowsByMonth: item[idx] <-> trackings[idx]), tránh lấy nhầm SANG món khác cùng đơn.
+    const itemForTracking = (t: (typeof trks)[number]) => {
+      const ord = t.order;
+      if (!ord) return undefined;
+      const idx = ord.trackings.findIndex((x) => x.id === t.id);
+      return idx >= 0 ? ord.items[idx] : undefined;
+    };
     for (const r of rows) {
       const single = rowMatch.get(`${r.tab}|${r.row}`);
       const group = single ? [single] : (trksByCode.get(r.code) ?? []);
@@ -409,7 +417,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         return true;
       });
       if (!orders.length) continue;
-      const items = orders.flatMap((o) => o.items ?? []);
+      const singleItem = single ? itemForTracking(single) : undefined;
+      const items = single ? (singleItem ? [singleItem] : (single.order?.items ?? [])) : orders.flatMap((o) => o.items ?? []);
       const esc = r.tab.replace(/'/g, "''");
       const isLate = group.some((t) => t.lateAfterLock);
       if (r.resolved && isLate) for (const t of group) if (t.lateAfterLock) await prisma.tracking.update({ where: { id: t.id }, data: { lateAfterLock: false } });
@@ -433,7 +442,9 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
       const note = [lateNote, scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
-      const count = items.length;
+      // Số trùng = tổng số đơn đang dùng chung mã này (không phải số món của riêng đơn ở dòng này)
+      // -> kho nhìn cột này biết cần quét/đối chiếu đủ bấy nhiêu dòng cho 1 mã.
+      const count = dbCount;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
       const bg = r.resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
       colorReqs.push({ repeatCell: {
@@ -498,30 +509,43 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: false };
-  const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true } } } });
+  const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true, trackings: true } } } });
   const packedAt = (tab ? tabDate(tab) : null) ?? group[0]?.packedAt ?? new Date();
   const locked = Boolean(await prisma.packDayLock.findUnique({ where: { date: new Date(packedAt.toISOString().slice(0, 10) + "T00:00:00") } }));
-  let t = group[0];
+  // Mã dùng chung nhiều đơn: nếu biết đúng dòng vật lý (packRow do lần quét cron trước gán) khớp tracking nào
+  // thì lấy đúng cái đó, không gộp nhầm tên/giá của đơn khác cùng mã - chỉ 1 tracking thì khỏi cần phân biệt.
+  let single = group.length === 1 ? group[0] : (row ? group.find((x) => x.packRow === row) : undefined);
+  let t = single ?? group[0];
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); cron 2 phút sau sẽ gán kiện theo BILL/thùng.
     const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked } });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
+    single = t;
   }
   if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
-  if (row && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
+  if (row && group.length === 1 && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
+
+  const itemForTracking = (x: (typeof group)[number]) => {
+    const ord = x.order;
+    if (!ord) return undefined;
+    const idx = ord.trackings.findIndex((y) => y.id === x.id);
+    return idx >= 0 ? ord.items[idx] : undefined;
+  };
 
   if (tab && row) {
     try {
       const esc = tab.replace(/'/g, "''");
       const seenOrderIds = new Set<string>();
-      const orders = group.map((x) => x.order).filter((o): o is NonNullable<typeof o> => {
+      const orders = (single ? [single] : group).map((x) => x.order).filter((o): o is NonNullable<typeof o> => {
         if (!o || seenOrderIds.has(o.id)) return false;
         seenOrderIds.add(o.id);
         return true;
       });
-      const items = orders.flatMap((o) => o.items ?? []);
+      const singleItem = single ? itemForTracking(single) : undefined;
+      const items = single ? (singleItem ? [singleItem] : (single.order?.items ?? [])) : orders.flatMap((o) => o.items ?? []);
+      const target = single ?? t;
       const data: { range: string; values: (string | number)[][] }[] = [];
       // Đọc lại F (tên) + X (đã xử lý) hiện tại của dòng để không đè tên kho đã tự sửa
       const cur = (await apiSheet(sid, `/values:batchGet?ranges=${encodeURIComponent(`'${esc}'!F${row}`)}&ranges=${encodeURIComponent(`'${esc}'!X${row}`)}`, "GET")) as { valueRanges?: { values?: string[][] }[] };
@@ -533,9 +557,9 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
         if (curName && curName !== name) {
           editedByKho = true;
-          if (t.customsName !== curName) await prisma.tracking.update({ where: { id: t.id }, data: { customsName: curName } });
+          if (target.customsName !== curName) await prisma.tracking.update({ where: { id: target.id }, data: { customsName: curName } });
         } else {
-          if (t.customsName) await prisma.tracking.update({ where: { id: t.id }, data: { customsName: null } });
+          if (target.customsName) await prisma.tracking.update({ where: { id: target.id }, data: { customsName: null } });
           data.push({ range: `'${esc}'!F${row}:G${row}`, values: [[name, price]] });
         }
       }
@@ -547,7 +571,8 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
       const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
       const note = [lateNote, scanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
-      const count = items.length;
+      // Số trùng = tổng số đơn dùng chung mã này (không phải số món của riêng đơn ở dòng này)
+      const count = dbCount;
       data.push({ range: `'${esc}'!U${row}:W${row}`, values: [[note, link, count]] });
       const PURPLE = { red: 0.88, green: 0.80, blue: 0.95 };
       const ORANGE = { red: 1, green: 0.85, blue: 0.6 };

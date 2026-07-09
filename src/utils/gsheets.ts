@@ -299,12 +299,14 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
   const isLocked = (d: Date | null) => (d ? lockedDates.has(new Date(d).toISOString().slice(0, 10)) : false);
 
-  // Kho sửa/xóa mã ở đúng dòng vật lý cũ (gõ nhầm rồi sửa lại mã khác) trước khi chốt ngày -> tracking mã CŨ
-  // không còn khớp dòng đó nữa, coi như "gỡ khỏi Kho VN" (mồ côi thì xóa hẳn, đã gắn đơn thì chỉ gỡ đóng gói)
-  // để khỏi hiện thông tin cũ không còn đúng thực tế. Ngày ĐÃ chốt thì KHÔNG tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
-  const scanRows = [...new Set(rows.map((r) => r.row))];
-  if (scanRows.length) {
-    const packRowCandidates = await prisma.tracking.findMany({ where: { packRow: { in: scanRows } } });
+  // Kho sửa mã khác HOẶC XÓA HẲN mã ở đúng dòng vật lý cũ trước khi chốt ngày -> tracking mã CŨ không còn khớp
+  // dòng đó nữa, coi như "gỡ khỏi Kho VN" (mồ côi thì xóa hẳn, đã gắn đơn thì chỉ gỡ đóng gói) để khỏi hiện thông
+  // tin cũ không còn đúng thực tế. Dòng bị xóa trắng thì không còn nằm trong `rows` (isTrackingCode lọc bỏ) nên
+  // phải so trên MỌI tracking từng có packRow trong đúng khung ngày đang quét, không chỉ những dòng còn mã hợp lệ.
+  // Ngày ĐÃ chốt thì KHÔNG tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
+  {
+    const cutoff = opts?.recentDays ? new Date(Date.now() - opts.recentDays * 86400000) : null;
+    const packRowCandidates = await prisma.tracking.findMany({ where: { packRow: { not: null }, ...(cutoff ? { packedAt: { gte: cutoff } } : {}) } });
     const claimByRowDay = new Map<string, typeof packRowCandidates>();
     for (const cand of packRowCandidates) {
       if (cand.packRow == null || !cand.packedAt) continue;
@@ -313,10 +315,13 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       arr.push(cand);
       claimByRowDay.set(key, arr);
     }
-    for (const r of rows) {
-      if (!r.date || isLocked(r.date)) continue;
-      const key = `${r.date.toISOString().slice(0, 10)}|${r.row}`;
-      const stale = (claimByRowDay.get(key) ?? []).filter((s) => s.code !== r.code);
+    const currentCodeByKey = new Map<string, string>();
+    for (const r of rows) { if (r.date) currentCodeByKey.set(`${r.date.toISOString().slice(0, 10)}|${r.row}`, r.code); }
+    for (const [key, cands] of claimByRowDay) {
+      const dayKey = key.split("|")[0];
+      if (lockedDates.has(dayKey)) continue;
+      const currentCode = currentCodeByKey.get(key);
+      const stale = cands.filter((s) => s.code !== currentCode);
       for (const s of stale) {
         if (s.orderId) {
           await prisma.tracking.update({ where: { id: s.id }, data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, packRow: null } });

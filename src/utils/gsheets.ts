@@ -294,15 +294,45 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: 0, updated: 0 };
   const rows = await readWarehousePackRows(sid, opts?.recentDays);
+
+  // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
+  const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
+  const isLocked = (d: Date | null) => (d ? lockedDates.has(new Date(d).toISOString().slice(0, 10)) : false);
+
+  // Kho sửa/xóa mã ở đúng dòng vật lý cũ (gõ nhầm rồi sửa lại mã khác) trước khi chốt ngày -> tracking mã CŨ
+  // không còn khớp dòng đó nữa, coi như "gỡ khỏi Kho VN" (mồ côi thì xóa hẳn, đã gắn đơn thì chỉ gỡ đóng gói)
+  // để khỏi hiện thông tin cũ không còn đúng thực tế. Ngày ĐÃ chốt thì KHÔNG tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
+  const scanRows = [...new Set(rows.map((r) => r.row))];
+  if (scanRows.length) {
+    const packRowCandidates = await prisma.tracking.findMany({ where: { packRow: { in: scanRows } } });
+    const claimByRowDay = new Map<string, typeof packRowCandidates>();
+    for (const cand of packRowCandidates) {
+      if (cand.packRow == null || !cand.packedAt) continue;
+      const key = `${new Date(cand.packedAt).toISOString().slice(0, 10)}|${cand.packRow}`;
+      const arr = claimByRowDay.get(key) ?? [];
+      arr.push(cand);
+      claimByRowDay.set(key, arr);
+    }
+    for (const r of rows) {
+      if (!r.date || isLocked(r.date)) continue;
+      const key = `${r.date.toISOString().slice(0, 10)}|${r.row}`;
+      const stale = (claimByRowDay.get(key) ?? []).filter((s) => s.code !== r.code);
+      for (const s of stale) {
+        if (s.orderId) {
+          await prisma.tracking.update({ where: { id: s.id }, data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, packRow: null } });
+        } else {
+          await prisma.trackingLog.deleteMany({ where: { trackingId: s.id } });
+          await prisma.tracking.delete({ where: { id: s.id } });
+        }
+      }
+    }
+  }
+
   const dateByCode = new Map<string, Date | null>();
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
   if (!codes.length) return { matched: 0, updated: 0 };
   const trks = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: { order: { include: { items: true, trackings: true } } } });
-
-  // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
-  const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
-  const isLocked = (d: Date | null) => (d ? lockedDates.has(new Date(d).toISOString().slice(0, 10)) : false);
 
   // Mã quét được nhưng chưa có tracking nào trong hệ thống (tracking sai/chưa nhập) -> tạo mồ côi
   // để không mất dấu hàng: sẽ hiện ở /control/unmatched + board Kho VN "chưa gắn", chờ sale/buyer resolve.
@@ -512,6 +542,23 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   const group = await prisma.tracking.findMany({ where: { code: c }, include: { order: { include: { items: true, trackings: true } } } });
   const packedAt = (tab ? tabDate(tab) : null) ?? group[0]?.packedAt ?? new Date();
   const locked = Boolean(await prisma.packDayLock.findUnique({ where: { date: new Date(packedAt.toISOString().slice(0, 10) + "T00:00:00") } }));
+
+  // Kho sửa lại mã ở đúng dòng vật lý này (gõ nhầm rồi sửa mã khác) trước khi chốt ngày -> tracking mã CŨ từng
+  // chiếm đúng dòng này không còn khớp nữa, gỡ khỏi Kho VN (mồ côi thì xóa hẳn) để khỏi hiện thông tin cũ sai lệch.
+  // Ngày ĐÃ chốt thì không tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
+  if (row && !locked) {
+    const dayKey = packedAt.toISOString().slice(0, 10);
+    const stale = await prisma.tracking.findMany({ where: { packRow: row, code: { not: c } } });
+    for (const s of stale) {
+      if (!s.packedAt || new Date(s.packedAt).toISOString().slice(0, 10) !== dayKey) continue;
+      if (s.orderId) {
+        await prisma.tracking.update({ where: { id: s.id }, data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, packRow: null } });
+      } else {
+        await prisma.trackingLog.deleteMany({ where: { trackingId: s.id } });
+        await prisma.tracking.delete({ where: { id: s.id } });
+      }
+    }
+  }
   // Mã dùng chung nhiều đơn: nếu biết đúng dòng vật lý (packRow do lần quét cron trước gán) khớp tracking nào
   // thì lấy đúng cái đó, không gộp nhầm tên/giá của đơn khác cùng mã - chỉ 1 tracking thì khỏi cần phân biệt.
   let single = group.length === 1 ? group[0] : (row ? group.find((x) => x.packRow === row) : undefined);

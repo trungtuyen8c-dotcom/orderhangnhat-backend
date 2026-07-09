@@ -214,6 +214,8 @@ model Tracking {
   shipRateCurrency  String        @default("VND") @map("ship_rate_currency")
   vnTrackingCode    String?       @map("vn_tracking_code")
   cartonId          String?       @map("carton_id") @db.Uuid
+  // true nếu người dùng tự gán/gỡ kiện tay trong app - sync sẽ KHÔNG tự đổi cartonId nữa (tránh đè thao tác thủ công)
+  cartonManual      Boolean       @default(false) @map("carton_manual")
   review            String?
   url               String?
   packedAt          DateTime?     @map("packed_at")

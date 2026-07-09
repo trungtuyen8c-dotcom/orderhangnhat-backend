@@ -49,7 +49,8 @@ controlRouter.patch("/cartons/:id", authorize("trackings.update"), async (req, r
 });
 
 controlRouter.delete("/cartons/:id", authorize("trackings.update"), async (req, res) => {
-  await prisma.tracking.updateMany({ where: { cartonId: req.params.id }, data: { cartonId: null } });
+  // Đánh dấu manual để không bị sync kho tự gán lại (tạo lại) kiện vừa xóa ngay sau đó.
+  await prisma.tracking.updateMany({ where: { cartonId: req.params.id }, data: { cartonId: null, cartonManual: true } });
   await prisma.carton.delete({ where: { id: req.params.id } });
   await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "carton.deleted" });
   res.json({ ok: true });
@@ -63,7 +64,7 @@ controlRouter.post("/cartons/:id/assign", authorize("trackings.update"), async (
   const carton = await prisma.carton.findUnique({ where: { id: req.params.id } });
   if (!carton) return res.status(404).json({ error: "NOT_FOUND" });
   const codes = p.data.codes.map((c) => c.trim()).filter(Boolean);
-  const r = await prisma.tracking.updateMany({ where: { code: { in: codes } }, data: { cartonId: carton.id } });
+  const r = await prisma.tracking.updateMany({ where: { code: { in: codes } }, data: { cartonId: carton.id, cartonManual: true } });
   res.json({ assigned: r.count });
 });
 

@@ -39,6 +39,14 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   res.json(rows);
 });
 
+// Tra cứu nhanh: mã tracking này đã gắn đơn nào chưa - để tự điền Mã đơn khi sửa mã quét sai (đỡ gõ tay)
+trackingRouter.get("/lookup-code", authorize("trackings.create"), async (req, res) => {
+  const code = String(req.query.code ?? "").trim();
+  if (!code) return res.json({ orderCode: null });
+  const t = await prisma.tracking.findFirst({ where: { code, orderId: { not: null } }, include: { order: { select: { code: true } } } });
+  res.json({ orderCode: t?.order?.code ?? null });
+});
+
 // Gộp: gán 1 mã tracking VN cho nhiều kiện hàng (rời khỏi tồn kho)
 const assignVnSchema = z.object({ ids: z.array(z.string().uuid()).min(1), vnTrackingCode: z.string().min(1) });
 trackingRouter.post("/assign-vn", authorize("trackings.update"), async (req, res) => {
@@ -133,7 +141,7 @@ trackingRouter.post("/invoice", authorize("trackings.list"), async (req, res) =>
 trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const p = createSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.create({ data: { id: uuid(), ...p.data, status: p.data.orderId ? "linked" : "new" } });
+  const t = await prisma.tracking.create({ data: { id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" } });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
   void syncTracking(t);
@@ -160,7 +168,10 @@ const updateSchema = z.object({
 trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {
   const p = updateSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.update({ where: { id: req.params.id }, data: p.data });
+  // Tự tay đổi/gỡ kiện qua API này -> đánh dấu manual để sync kho không tự đè lại theo BILL/Thùng nữa.
+  const data: typeof p.data & { cartonManual?: boolean } = { ...p.data };
+  if (p.data.cartonId !== undefined) data.cartonManual = true;
+  const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void syncTracking(t);
   res.json(t);

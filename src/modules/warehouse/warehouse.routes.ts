@@ -120,7 +120,7 @@ warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res
   const t = await prisma.tracking.create({
     data: {
       id: uuid(), orderId: order.id, code: p.data.code.trim(), jpWeightKg: p.data.jpWeightKg,
-      cartonId: p.data.cartonId, packedAt: new Date(), status: "linked",
+      cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(), status: "linked",
     },
   });
   await recomputeOrderTotals(order.id);
@@ -143,7 +143,7 @@ warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (re
   } else {
     await prisma.tracking.update({
       where: { id: t.id },
-      data: { packedAt: null, cartonId: null, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false },
+      data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false },
     });
     await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
   }

@@ -11,6 +11,11 @@ import { computeDebtBalance } from "../../utils/orderTotals.js";
 export const accountingRouter = Router();
 accountingRouter.use(authenticate);
 
+// FE gửi "YYYY-MM-DD" luôn hiểu là ngày lịch VN (UTC+7) - phải parse mốc theo giờ VN,
+// không dùng new Date(string) mặc định (parse theo UTC) rồi setHours (theo giờ server) -> lệch múi giờ, lọc sai ngày.
+const vnDayStart = (d: string) => new Date(`${d}T00:00:00+07:00`);
+const vnDayEnd = (d: string) => new Date(`${d}T23:59:59.999+07:00`);
+
 async function recomputeDebt(orderId: string) {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { payments: true } });
   if (!order) return;
@@ -216,9 +221,8 @@ accountingRouter.post("/customer-deposits/:id/unconfirm", authorize("accounting.
 // Danh sách cọc theo tab (chờ xác nhận / đã xác nhận / yêu cầu sửa / tất cả), lọc theo ngày - kèm tên khách + tên NV ghi/xác nhận
 accountingRouter.get("/deposits", authorize("accounting.reconcile"), async (req, res) => {
   const status = String(req.query.status ?? "pending");
-  const from = req.query.from ? new Date(String(req.query.from)) : null;
-  const to = req.query.to ? new Date(String(req.query.to)) : null;
-  if (to) to.setHours(23, 59, 59, 999);
+  const from = req.query.from ? vnDayStart(String(req.query.from)) : null;
+  const to = req.query.to ? vnDayEnd(String(req.query.to)) : null;
   const where: any = { isOpening: false };
   if (status === "pending") where.confirmed = false;
   else if (status === "confirmed") where.confirmed = true;
@@ -287,15 +291,44 @@ accountingRouter.get("/deposits/fix-requests", authorize("accounting.note_deposi
   res.json(rows.map((r) => ({ id: r.id, fixRequest: r.fixRequest, customer: cmap.get(r.customerId)?.name ?? "?" })));
 });
 
-// Sửa tên người chuyển khoản (gõ nhầm/thiếu lúc ghi cọc) - không đụng số tiền/trạng thái xác nhận
-const depEditSchema = z.object({ payerName: z.string().optional() });
+// Sửa cọc đã ghi (gõ nhầm tên/số tiền/tỉ giá...) - cùng quyền với người ghi cọc (accounting.note_deposit) để
+// NV order/sale tự sửa khi kế toán "Yêu cầu sửa", không cần quyền xóa/kế toán. Nếu cọc đã xác nhận (tiền đã
+// vào ví) mà đổi số tiền -> tự chỉnh lại đúng chênh lệch trên ví + giao dịch ví liên kết.
+const depEditSchema = z.object({
+  payerName: z.string().optional(),
+  amount: z.number().positive().optional(),
+  currency: z.enum(["VND", "JPY"]).optional(),
+  exchangeRate: z.number().positive().optional(),
+  method: z.string().optional(),
+  note: z.string().optional(),
+  paidAt: z.coerce.date().optional(),
+});
 accountingRouter.patch("/customer-deposits/:id", authorize("accounting.note_deposit"), async (req, res) => {
   const p = depEditSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const dep = await prisma.customerDeposit.findUnique({ where: { id: req.params.id } });
   if (!dep) return res.status(404).json({ error: "NOT_FOUND" });
-  const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data: { payerName: p.data.payerName || null } });
-  await logAudit({ actorId: req.user!.id, targetId: dep.id, action: "customer_deposit.updated", metadata: { payerName: p.data.payerName } });
+  const data: Record<string, unknown> = {};
+  if (p.data.payerName !== undefined) data.payerName = p.data.payerName || null;
+  if (p.data.method !== undefined) data.method = p.data.method || null;
+  if (p.data.note !== undefined) data.note = p.data.note || null;
+  if (p.data.paidAt !== undefined) data.paidAt = p.data.paidAt;
+  let newAmountVnd = Number(dep.amountVnd);
+  if (p.data.amount !== undefined || p.data.currency !== undefined || p.data.exchangeRate !== undefined) {
+    const currency = p.data.currency ?? dep.currency ?? "VND";
+    const amount = p.data.amount ?? Number(dep.amountOrig);
+    const exchangeRate = p.data.exchangeRate ?? (dep.exchangeRate != null ? Number(dep.exchangeRate) : undefined);
+    if (currency === "JPY" && !exchangeRate) return res.status(400).json({ error: "BAD_REQUEST", message: "Cọc JPY cần nhập tỉ giá" });
+    newAmountVnd = currency === "JPY" ? Math.round(amount * exchangeRate!) : amount;
+    data.currency = currency; data.amountOrig = amount; data.exchangeRate = exchangeRate ?? null; data.amountVnd = newAmountVnd;
+  }
+  const updated = await prisma.customerDeposit.update({ where: { id: dep.id }, data });
+  if (dep.confirmed && dep.walletId && newAmountVnd !== Number(dep.amountVnd)) {
+    const diff = newAmountVnd - Number(dep.amountVnd);
+    await prisma.wallet.update({ where: { id: dep.walletId }, data: { balance: { increment: diff } } });
+    await prisma.walletTxn.updateMany({ where: { refDepositId: dep.id }, data: { amount: newAmountVnd } });
+  }
+  await logAudit({ actorId: req.user!.id, targetId: dep.id, action: "customer_deposit.updated", metadata: p.data });
   res.json(updated);
 });
 
@@ -829,9 +862,8 @@ accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req
   const walletId = typeof req.query.walletId === "string" ? req.query.walletId : null;
   if (!walletId) return res.json({ rows: [], balance: 0 });
 
-  const from = req.query.from ? new Date(String(req.query.from)) : null;
-  const to = req.query.to ? new Date(String(req.query.to)) : null;
-  if (to) to.setHours(23, 59, 59, 999);
+  const from = req.query.from ? vnDayStart(String(req.query.from)) : null;
+  const to = req.query.to ? vnDayEnd(String(req.query.to)) : null;
   const customerQ = String(req.query.customer ?? "").trim().toLowerCase();
   const trackingQ = String(req.query.tracking ?? "").trim().toLowerCase();
   const q = String(req.query.q ?? "").trim().toLowerCase();

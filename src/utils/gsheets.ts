@@ -332,7 +332,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const c of customers) await syncCustomerOrders(c);
 
   // Tự tạo/gán Carton (kiện) theo BILL + Số thùng của từng dòng vật lý trong sheet — thay cho gán tay.
-  // Chỉ set cartonId khi tracking chưa có kiện, để không đè lên thao tác "Bỏ khỏi kiện" thủ công.
+  // Tự tạo/gán lại theo đúng BILL/Thùng hiện tại trong sheet (đổi tên/số thùng thì tự theo) -
+  // trừ tracking đã cartonManual (gán/gỡ kiện thủ công trong app) thì giữ nguyên, không đè.
   const cartonCache = new Map<string, string>(); // key `${code}|${dayKey}` -> cartonId
   async function getCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
     // Chuẩn hóa hoa/thường (kho gõ lúc "GA" lúc "ga") -> tránh tách thành 2 kiện khác nhau cho cùng 1 kiện thực.
@@ -348,17 +349,20 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     return carton.id;
   }
 
-  // Ghép mỗi dòng vật lý trong sheet với đúng 1 tracking (khi số dòng khớp số tracking cùng mã) —
-  // để ghi tên/giá/kiện đúng từng đơn thay vì gộp; nếu số lượng không khớp, giữ hành vi cũ (gộp) để an toàn.
+  // Ghép mỗi dòng vật lý trong sheet với đúng 1 tracking riêng (theo thứ tự) — để ghi tên/giá/kiện đúng
+  // từng đơn thay vì gộp chung, kể cả khi kho CHƯA quét đủ hết các dòng của mã dùng chung nhiều đơn
+  // (ghép trước bấy nhiêu dòng đã có, dòng dư ra ngoài số đơn mới rơi về gộp chung để an toàn).
   const rowsByCode = new Map<string, typeof rows>();
   for (const r of rows) { const arr = rowsByCode.get(r.code) ?? []; arr.push(r); rowsByCode.set(r.code, arr); }
   const rowMatch = new Map<string, (typeof trks)[number]>(); // key `${tab}|${row}` -> tracking riêng của dòng đó
 
   for (const [code, group] of trksByCode) {
     const physicalRows = rowsByCode.get(code) ?? [];
-    if (physicalRows.length === group.length && group.length > 0) {
+    if (physicalRows.length && group.length) {
       const sortedTrks = [...group].sort((a, b) => (a.order?.code ?? "￿").localeCompare(b.order?.code ?? "￿"));
-      physicalRows.forEach((r, i) => rowMatch.set(`${r.tab}|${r.row}`, sortedTrks[i]));
+      const sortedRows = [...physicalRows].sort((a, b) => (a.tab === b.tab ? a.row - b.row : a.tab.localeCompare(b.tab)));
+      const n = Math.min(sortedRows.length, sortedTrks.length);
+      for (let i = 0; i < n; i++) rowMatch.set(`${sortedRows[i].tab}|${sortedRows[i].row}`, sortedTrks[i]);
     }
   }
 
@@ -370,7 +374,9 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     const targets = single ? [single] : (trksByCode.get(r.code) ?? []);
     for (const t of targets) {
       const data: { cartonId?: string; packedAt?: Date; packRow?: number } = {};
-      if (!t.cartonId) data.cartonId = cartonId;
+      // Tự theo đúng BILL/Thùng hiện tại trong sheet (kể cả khi kho đổi tên/số thùng sau này) -
+      // trừ khi người dùng đã tự tay gán/gỡ kiện (cartonManual) thì giữ nguyên, không đè.
+      if (!t.cartonManual && t.cartonId !== cartonId) data.cartonId = cartonId;
       // Ghép được đúng 1-1 với dòng vật lý -> ngày dòng đó là chuẩn; mã dùng chung nhiều ngày có thể
       // đã bị khoá packedAt theo ngày quét đầu tiên (sai), sửa lại khớp đúng kiện/ngày thật.
       if (single && r.date && t.packedAt && r.date.toISOString().slice(0, 10) !== new Date(t.packedAt).toISOString().slice(0, 10)) data.packedAt = r.date;

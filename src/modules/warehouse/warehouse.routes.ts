@@ -24,7 +24,13 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
   // TỨC THÌ: webhook gửi mã + ô vừa gõ -> khớp đúng 1 dòng. Không có mã -> quét tab gần đây (fallback).
   const code = req.body?.code;
   if (code) {
-    const r = await syncPackedOne(String(code), req.body?.tab ? String(req.body.tab) : undefined, req.body?.row ? Number(req.body.row) : undefined);
+    const r = await syncPackedOne(
+      String(code),
+      req.body?.tab ? String(req.body.tab) : undefined,
+      req.body?.row ? Number(req.body.row) : undefined,
+      req.body?.bill ? String(req.body.bill) : undefined,
+      req.body?.thung ? String(req.body.thung) : undefined,
+    );
     return res.json(r);
   }
   const r = await syncPackedFromWarehouse({ recentDays: 45 });

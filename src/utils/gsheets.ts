@@ -251,6 +251,16 @@ function isTrackingCode(v: string): boolean {
   return c.length >= 8 && /^[A-Za-z0-9._-]+$/.test(c);
 }
 
+// Tự tạo/tìm Carton (kiện) theo BILL + Số thùng - dùng chung cho cả quét cron lẫn webhook tức thì.
+// Chuẩn hóa hoa/thường (kho gõ lúc "GA" lúc "ga") -> tránh tách thành 2 kiện khác nhau cho cùng 1 kiện thực.
+async function resolveCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
+  const code = `${bill} ${thung}`.trim().toUpperCase();
+  if (!code) return null;
+  let carton = await prisma.carton.findFirst({ where: { code, packedDate: date } });
+  if (!carton) carton = await prisma.carton.create({ data: { id: uuid(), code, packedDate: date } });
+  return carton.id;
+}
+
 // Checkbox "Đã xử lý" đọc formatted value -> tùy locale bảng tính có thể ra "TRUE" hoặc "ĐÚNG" (đã tick), chấp nhận vài biến thể
 function isChecked(v: string): boolean {
   const s = (v ?? "").trim().toUpperCase();
@@ -418,17 +428,13 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   // trừ tracking đã cartonManual (gán/gỡ kiện thủ công trong app) thì giữ nguyên, không đè.
   const cartonCache = new Map<string, string>(); // key `${code}|${dayKey}` -> cartonId
   async function getCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
-    // Chuẩn hóa hoa/thường (kho gõ lúc "GA" lúc "ga") -> tránh tách thành 2 kiện khác nhau cho cùng 1 kiện thực.
-    const code = `${bill} ${thung}`.trim().toUpperCase();
-    if (!code) return null;
     const dayKey = date ? date.toISOString().slice(0, 10) : "none";
-    const cacheKey = `${code}|${dayKey}`;
+    const cacheKey = `${bill} ${thung}`.trim().toUpperCase() + "|" + dayKey;
     const cached = cartonCache.get(cacheKey);
     if (cached) return cached;
-    let carton = await prisma.carton.findFirst({ where: { code, packedDate: date } });
-    if (!carton) carton = await prisma.carton.create({ data: { id: uuid(), code, packedDate: date } });
-    cartonCache.set(cacheKey, carton.id);
-    return carton.id;
+    const id = await resolveCartonId(bill, thung, date);
+    if (id) cartonCache.set(cacheKey, id);
+    return id;
   }
 
   // Ghép mỗi dòng vật lý trong sheet với đúng 1 tracking riêng (theo thứ tự) — để ghi tên/giá/kiện đúng
@@ -584,7 +590,7 @@ async function getSheetIdByTitle(sid: string, title: string): Promise<number | n
 }
 
 // TỨC THÌ: khớp đúng 1 mã (từ webhook gửi mã + tab + dòng), không quét tab nào -> nhanh <1s.
-export async function syncPackedOne(code: string, tab?: string, row?: number): Promise<{ matched: boolean }> {
+export async function syncPackedOne(code: string, tab?: string, row?: number, bill?: string, thung?: string): Promise<{ matched: boolean }> {
   if (!saEnabled()) return { matched: false };
   const c = (code ?? "").trim();
   if (!isTrackingCode(c)) return { matched: false };
@@ -618,7 +624,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   let t = single ?? group[0];
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
-    // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); cron 2 phút sau sẽ gán kiện theo BILL/thùng.
+    // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); gán kiện theo BILL/thùng ngay bên dưới nếu có gửi kèm.
     const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked } });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
@@ -626,6 +632,12 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
   }
   if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
   if (row && group.length === 1 && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
+
+  // Gán kiện (BILL/Thùng) ngay tức thì, không đợi cron 2 phút - trừ khi tracking đã cartonManual (gán/gỡ tay).
+  if ((bill || thung) && !t.cartonManual) {
+    const cartonId = await resolveCartonId(bill ?? "", thung ?? "", packedAt);
+    if (cartonId && t.cartonId !== cartonId) { await prisma.tracking.update({ where: { id: t.id }, data: { cartonId } }); t.cartonId = cartonId; }
+  }
 
   const itemForTracking = (x: (typeof group)[number]) => {
     const ord = x.order;

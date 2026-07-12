@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals } from "./orderTotals.js";
+import { deleteCartonIfEmpty } from "./cartons.js";
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
 // Bật khi có đủ env: GOOGLE_SA_EMAIL, GOOGLE_SA_PRIVATE_KEY, GSHEET_ID (GSHEET_TAB mặc định "Tracking").
@@ -321,7 +322,16 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       claimByRowDay.set(key, arr);
     }
     const currentCodeByKey = new Map<string, string>();
-    for (const r of rows) { if (r.date) currentCodeByKey.set(`${r.date.toISOString().slice(0, 10)}|${r.row}`, r.code); }
+    // sheetId/tên tab của tab ngày đó - lấy từ bất kỳ dòng hợp lệ nào cùng tab (cả tab chỉ 1 sheetId) để biết
+    // đường dẫn ghi lại màu/giá trị cho đúng dòng đã xóa trắng (dòng đó không còn trong `rows` để tự có sẵn).
+    const sheetInfoByDay = new Map<string, { sheetId: number; tab: string }>();
+    for (const r of rows) {
+      if (!r.date) continue;
+      const dk = r.date.toISOString().slice(0, 10);
+      currentCodeByKey.set(`${dk}|${r.row}`, r.code);
+      if (!sheetInfoByDay.has(dk)) sheetInfoByDay.set(dk, { sheetId: r.sheetId, tab: r.tab });
+    }
+    const blankedRows: { sheetId: number; tab: string; row: number }[] = [];
     for (const [key, cands] of claimByRowDay) {
       const dayKey = key.split("|")[0];
       if (lockedDates.has(dayKey)) continue;
@@ -334,6 +344,38 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
           await prisma.trackingLog.deleteMany({ where: { trackingId: s.id } });
           await prisma.tracking.delete({ where: { id: s.id } });
         }
+        // Kiện hết sạch tracking sau khi gỡ -> tự xóa luôn, khỏi để kiện trống gây rối bảng Kho VN.
+        await deleteCartonIfEmpty(s.cartonId);
+      }
+      // Dòng bị xóa trắng hẳn (không đổi sang mã khác) -> không còn trong `rows` nên vòng ghi màu/giá trị bên dưới
+      // sẽ không đụng tới nó -> phải tự dọn màu + nội dung cũ ở đây, nếu không sẽ hiện màu/thông tin sai vĩnh viễn.
+      if (currentCode === undefined && stale.length) {
+        const info = sheetInfoByDay.get(dayKey);
+        const row = Number(key.split("|")[1]);
+        if (info) blankedRows.push({ sheetId: info.sheetId, tab: info.tab, row });
+      }
+    }
+    if (blankedRows.length) {
+      try {
+        const WHITE = { red: 1, green: 1, blue: 1 };
+        // CHỈ xóa đúng các cột hệ thống tự ghi (F/G tên+giá, U/V/W ghi chú/link/số trùng, X checkbox) - tuyệt đối
+        // không đụng H→T vì đó là cột kho tự nhập tay riêng (Số lượng, JANCODE...), không liên quan sync.
+        const clearData = blankedRows.flatMap((b) => {
+          const esc = b.tab.replace(/'/g, "''");
+          return [
+            { range: `'${esc}'!F${b.row}:G${b.row}`, values: [["", ""]] },
+            { range: `'${esc}'!U${b.row}:X${b.row}`, values: [["", "", "", ""]] },
+          ];
+        });
+        const CW = 100;
+        for (let i = 0; i < clearData.length; i += CW) await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data: clearData.slice(i, i + CW) });
+        const colorReqs = blankedRows.flatMap((b) => [
+          { repeatCell: { range: { sheetId: b.sheetId, startRowIndex: b.row - 1, endRowIndex: b.row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } },
+          { setDataValidation: { range: { sheetId: b.sheetId, startRowIndex: b.row - 1, endRowIndex: b.row, startColumnIndex: 23, endColumnIndex: 24 } } },
+        ]);
+        for (let i = 0; i < colorReqs.length; i += CW) await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
+      } catch (e) {
+        console.error("[gsheets] clearBlankedRows", (e as Error).message);
       }
     }
   }
@@ -567,6 +609,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number): P
         await prisma.trackingLog.deleteMany({ where: { trackingId: s.id } });
         await prisma.tracking.delete({ where: { id: s.id } });
       }
+      await deleteCartonIfEmpty(s.cartonId);
     }
   }
   // Mã dùng chung nhiều đơn: nếu biết đúng dòng vật lý (packRow do lần quét cron trước gán) khớp tracking nào

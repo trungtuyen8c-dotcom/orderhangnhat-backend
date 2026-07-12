@@ -8,6 +8,7 @@ import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
 import { syncTracking, removeTrackingRow, syncCustomerOrders } from "../../utils/gsheets.js";
+import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 
 export const trackingRouter = Router();
 trackingRouter.use(authenticate);
@@ -168,12 +169,14 @@ const updateSchema = z.object({
 trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {
   const p = updateSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const before = await prisma.tracking.findUnique({ where: { id: req.params.id }, select: { cartonId: true } });
   // Tự tay đổi/gỡ kiện qua API này -> đánh dấu manual để sync kho không tự đè lại theo BILL/Thùng nữa.
   const data: typeof p.data & { cartonManual?: boolean } = { ...p.data };
   if (p.data.cartonId !== undefined) data.cartonManual = true;
   const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void syncTracking(t);
+  if (before && before.cartonId !== t.cartonId) await deleteCartonIfEmpty(before.cartonId);
   res.json(t);
 });
 
@@ -224,6 +227,7 @@ trackingRouter.delete("/:id", authorize("trackings.delete"), async (req, res) =>
   await prisma.tracking.delete({ where: { id: req.params.id } });
   if (t?.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void removeTrackingRow(req.params.id);
+  await deleteCartonIfEmpty(t?.cartonId);
   await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "tracking.deleted" });
   res.json({ ok: true });
 });

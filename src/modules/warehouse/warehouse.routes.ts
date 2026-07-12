@@ -7,6 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab } from "../../utils/gsheets.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
+import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 
 export const warehouseRouter = Router();
 
@@ -147,6 +148,7 @@ warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (re
     });
     await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
   }
+  await deleteCartonIfEmpty(t.cartonId);
   res.json({ ok: true });
 });
 

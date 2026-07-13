@@ -134,14 +134,16 @@ const ORDER_HEADER = [
 ];
 
 // Các trường hệ thống TỰ QUẢN LÝ - chỉ ghi vào đúng cột có tiêu đề khớp tên bên dưới, tuyệt đối không đụng
-// cột khác (vd "ACC", "tỉ giá", "% Công") vì đó là khách/kế toán tự nhập tay, không phải hệ thống ghi.
+// cột khác (vd "% Công") vì đó là kế toán tự nhập tay, không phải hệ thống ghi.
 // 3 dòng cuối (shipRate/shipTotal/grandTotal) là cột MỚI 1 số khách tự thêm - chỉ ghi nếu khách CÓ cột đó.
 const FIELD_HEADER = {
-  code: "Mã Link", date: "Ngày đặt", url: "LINK đặt", method: "Phương thức thanh toán",
+  code: "Mã Link", date: "Ngày đặt", acc: "ACC", url: "LINK đặt", method: "Phương thức thanh toán",
   giaWeb: "GIÁ WEB", ship: "SHIP WEB", total: "Tổng tiền bao gồm tiền công",
+  rate: "tỉ giá", vndConverted: "Tổng tiền KH quy đổi VND",
   weight: "Cân-Kg", surcharge: "Phụ thu", tracking: "TRACKING", review: "Đánh giá",
   deliveredAt: "Ngày giao cho khách hàng",
   shipRate: "Đơn giá vận chuyển", shipTotal: "Tổng tiền vận chuyển", grandTotal: "Tổng tiền VND+ Vận chuyển",
+  stored: "lưu kho", vnTrack: "tracking việt nam",
 } as const;
 type FieldKey = keyof typeof FIELD_HEADER;
 
@@ -207,8 +209,10 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       const row: FieldRow = {
         code: o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         date: fmtDate(purchaseDate),
+        acc: String(o.nick ?? ""),
         url: String(it.url ?? ""), method: String(it.paymentMethod ?? ""),
         giaWeb: giaWeb || "", ship: ship || "", total: jpy,
+        rate: rate || "", vndConverted: vnd || "",
         weight: weight ?? "",
         surcharge: surchargeCell ? Math.round(surchargeCell) : "",
         shipRate: shipVndPerKg ? Math.round(shipVndPerKg) : "",
@@ -216,6 +220,10 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
         tracking: String(trk?.code ?? ""), review: String(trk?.review ?? ""),
         deliveredAt: trk?.deliveredAt ? fmtDate(trk.deliveredAt) : "",
         grandTotal: grandTotal ? grandTotal : "",
+        // Chỉ tính "đang lưu kho" khi CHƯA ship (chưa có Tracking VN) - có Tracking VN rồi thì coi như đã ship,
+        // tự bỏ chữ/màu "lưu kho" dù status DB vẫn còn "stored" (không reset lại khi nhập Tracking VN).
+        stored: (trk?.status === "stored" && !trk?.vnTrackingCode) ? "lưu kho" : "",
+        vnTrack: String(trk?.vnTrackingCode ?? ""),
       };
       bucket(m).push({ date: purchaseDate, row, jpy, vnd });
     });
@@ -755,11 +763,24 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   return { matched: true };
 }
 
-// Sổ thu tiền (cọc) cố định cột W:Z, header dòng 5, data từ dòng 6. Cột V (Mã) để khách tự điền.
-// W=Ngày, X=Tên khoản mục, Y=Nội dung, Z=Tiền. 3 ô TỔNG TT/CỌC/NỢ là công thức -> tự nhảy.
-const DEPOSIT_START_ROW = 6;
+// Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế "Mã/Ngày/Tên khoản mục/Nội dung/Tiền" (khách chèn
+// thêm cột ở phần đơn hàng phía trước làm cả khối này bị đẩy lệch chỗ) - không dùng vị trí cố định W:Z nữa.
+// Cột "Mã" để khách tự điền. 3 ô TỔNG TT/CỌC/NỢ (H1:H3) là công thức riêng -> tự nhảy, không đụng ở đây.
 function buildDepositRows(deps: { paidAt: Date; note: string | null; amountVnd: unknown }[]): (string | number)[][] {
   return deps.map((d) => [fmtDate(d.paidAt), "Thu tiền hàng", String(d.note ?? ""), Number(d.amountVnd)]);
+}
+
+async function findDepositHeader(sid: string, tab: string): Promise<{ row: number; dateCol: number; amtCol: number } | null> {
+  const data = (await apiSheet(sid, `/values/${encodeURIComponent(tab)}!A1:AZ40`, "GET")) as { values?: string[][] };
+  const rows = data.values ?? [];
+  for (let r = 0; r < rows.length; r++) {
+    const cells = rows[r] ?? [];
+    const idx = cells.findIndex((v) => (v ?? "").trim() === "Tên khoản mục");
+    if (idx >= 1 && (cells[idx - 1] ?? "").trim() === "Ngày") {
+      return { row: r + 1, dateCol: idx - 1, amtCol: idx + 2 };
+    }
+  }
+  return null;
 }
 
 async function runCustomerSync(customerId: string): Promise<void> {
@@ -812,11 +833,38 @@ async function runCustomerSync(customerId: string): Promise<void> {
         }
       }
 
-      // ----- Sổ thu tiền (cọc): W:Z, để trống cột V (Mã) -----
+      // ----- Cột "lưu kho": tô cam khi tracking đang ở trạng thái lưu kho, ship xong (có Tracking VN) thì tự về trắng -----
+      if (headerCols.has("stored")) {
+        const storedCol = headerCols.get("stored")!;
+        const gsidStored = await getSheetIdByTitle(sid, tab);
+        if (gsidStored != null) {
+          const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
+          const WHITE = { red: 1, green: 1, blue: 1 };
+          const reqs: unknown[] = [
+            { repeatCell: { range: { sheetId: gsidStored, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: storedCol, endColumnIndex: storedCol + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } },
+          ];
+          fieldRows.forEach((r, i) => {
+            if (r.stored === "lưu kho") {
+              reqs.push({ repeatCell: { range: { sheetId: gsidStored, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: storedCol, endColumnIndex: storedCol + 1 }, cell: { userEnteredFormat: { backgroundColor: ORANGE } }, fields: "userEnteredFormat.backgroundColor" } });
+            }
+          });
+          await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
+        }
+      }
+
+      // ----- Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế, để trống cột Mã -----
       const monthDeposits = depsByMonth.get(m) ?? [];
-      const depRows = buildDepositRows(monthDeposits);
-      await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}:Z100000:clear`, "POST", {});
-      if (depRows.length) await apiSheet(sid, `/values/${t}!W${DEPOSIT_START_ROW}?valueInputOption=USER_ENTERED`, "PUT", { values: depRows });
+      const depHeader = await findDepositHeader(sid, tab);
+      if (depHeader) {
+        const depStart = depHeader.row + 1;
+        const c0 = colLetter(depHeader.dateCol);
+        const c1 = colLetter(depHeader.amtCol);
+        await apiSheet(sid, `/values/${t}!${c0}${depStart}:${c1}100000:clear`, "POST", {});
+        if (monthDeposits.length) {
+          const depRows = buildDepositRows(monthDeposits);
+          await apiSheet(sid, `/values/${t}!${c0}${depStart}?valueInputOption=USER_ENTERED`, "PUT", { values: depRows });
+        }
+      }
 
       // ----- Khối TỔNG TT/CỌC/NỢ (H1/H2/H3): có tỉ giá -> thay hẳn sang ₫; không có -> giữ nguyên ¥ -----
       const jpyDepositTotal = monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);

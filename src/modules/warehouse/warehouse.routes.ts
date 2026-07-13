@@ -109,6 +109,10 @@ warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), async (req, res)
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const r = await prisma.tracking.updateMany({ where: { id: { in: p.data.ids } }, data: { status: "stored" } });
   await logAudit({ actorId: req.user!.id, action: "warehouse.store", metadata: { count: r.count } });
+  // Đổ chữ/màu "lưu kho" ngay lên sheet khách, không đợi lần sync khác.
+  const stored = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { order: { select: { customerId: true } } } });
+  const customerIds = new Set(stored.map((s) => s.order?.customerId).filter((c): c is string => !!c));
+  for (const cid of customerIds) void syncCustomerOrders(cid);
   res.json({ stored: r.count });
 });
 
@@ -160,9 +164,13 @@ warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (re
   } else {
     await prisma.tracking.update({
       where: { id: t.id },
-      data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false },
+      data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, deliveredAt: null },
     });
     await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
+    // Gỡ khỏi Kho VN thì sheet khách cũng phải tự mất theo (cân/lưu kho/tracking VN/ngày giao) - không đợi sync khác.
+    await recomputeOrderTotals(t.orderId);
+    const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } });
+    if (o) void syncCustomerOrders(o.customerId);
   }
   await deleteCartonIfEmpty(t.cartonId);
   res.json({ ok: true });

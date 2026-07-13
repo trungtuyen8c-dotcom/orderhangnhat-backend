@@ -142,7 +142,12 @@ trackingRouter.post("/invoice", authorize("trackings.list"), async (req, res) =>
 trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const p = createSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.create({ data: { id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" } });
+  // Mã này có thể đã bị kho quét trước đó (tạo mồ côi chờ gắn đơn) -> claim lại đúng dòng đó thay vì tạo trùng
+  // (giữ nguyên cân/kiện/ngày đóng đã có), tránh 1 mã tồn tại 2 Tracking (đếm dùng-chung sai, giá/tên gộp nhầm).
+  const existing = await prisma.tracking.findFirst({ where: { code: p.data.code, orderId: null } });
+  const t = existing
+    ? await prisma.tracking.update({ where: { id: existing.id }, data: { ...p.data, cartonManual: p.data.cartonId !== undefined ? true : existing.cartonManual, status: p.data.orderId ? "linked" : existing.status } })
+    : await prisma.tracking.create({ data: { id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" } });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
   void syncTracking(t);

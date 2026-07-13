@@ -86,7 +86,17 @@ const vnWeighSchema = z.object({ vnWeightKg: z.number().nonnegative().optional()
 warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), async (req, res) => {
   const p = vnWeighSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.update({ where: { id: req.params.id }, data: p.data });
+  const data: typeof p.data & { deliveredAt?: Date | null } = { ...p.data };
+  // Điền Tracking VN lần đầu -> ghi nhận đúng ngày này là "Ngày giao cho khách hàng" trên sheet khách.
+  // Xóa trắng lại thì tự bỏ ngày đi (không giữ ngày cũ), không phải ngày lúc sync/quét lại.
+  if (p.data.vnTrackingCode !== undefined) {
+    const before = await prisma.tracking.findUnique({ where: { id: req.params.id }, select: { vnTrackingCode: true } });
+    const hadBefore = !!before?.vnTrackingCode;
+    const hasNow = !!p.data.vnTrackingCode;
+    if (hasNow && !hadBefore) data.deliveredAt = new Date();
+    else if (!hasNow) data.deliveredAt = null;
+  }
+  const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void syncTracking(t);
   res.json(t);

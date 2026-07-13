@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db.js";
-import { recomputeOrderTotals } from "./orderTotals.js";
+import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
@@ -125,10 +125,25 @@ export async function removeTrackingRow(id: string): Promise<void> {
 }
 
 // ===== Xuất đơn theo từng khách: mỗi khách 1 tab, layout giống file khách =====
+// Template MẶC ĐỊNH khi tạo tab mới (A→N). Nhiều khách tự chèn thêm cột riêng (vd "Đơn giá vận chuyển") vào
+// giữa các cột này -> KHÔNG ghi theo vị trí cố định nữa, mà dò đúng cột theo TÊN tiêu đề thực tế của từng khách
+// (xem readHeaderColumns/FIELD_HEADER bên dưới), để không bao giờ ghi lệch cột dù khách chèn/xóa cột tùy ý.
 const ORDER_HEADER = [
   "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB",
   "% Công", "Tổng tiền bao gồm tiền công", "Cân-Kg", "Phụ thu", "TRACKING", "Đánh giá", "Ngày giao cho khách hàng",
 ];
+
+// Các trường hệ thống TỰ QUẢN LÝ - chỉ ghi vào đúng cột có tiêu đề khớp tên bên dưới, tuyệt đối không đụng
+// cột khác (vd "ACC", "tỉ giá", "% Công") vì đó là khách/kế toán tự nhập tay, không phải hệ thống ghi.
+// 3 dòng cuối (shipRate/shipTotal/grandTotal) là cột MỚI 1 số khách tự thêm - chỉ ghi nếu khách CÓ cột đó.
+const FIELD_HEADER = {
+  code: "Mã Link", date: "Ngày đặt", url: "LINK đặt", method: "Phương thức thanh toán",
+  giaWeb: "GIÁ WEB", ship: "SHIP WEB", total: "Tổng tiền bao gồm tiền công",
+  weight: "Cân-Kg", surcharge: "Phụ thu", tracking: "TRACKING", review: "Đánh giá",
+  deliveredAt: "Ngày giao cho khách hàng",
+  shipRate: "Đơn giá vận chuyển", shipTotal: "Tổng tiền vận chuyển", grandTotal: "Tổng tiền VND+ Vận chuyển",
+} as const;
+type FieldKey = keyof typeof FIELD_HEADER;
 
 // Format theo giờ VN (UTC+7) bất kể timezone của server -> tránh lệch -1 ngày.
 const VN_OFFSET_MS = 7 * 3600 * 1000;
@@ -157,11 +172,14 @@ function loadCustomerOrders(customerId: string) {
   });
 }
 
+type FieldRow = Partial<Record<FieldKey, string | number>>;
+
 // Dòng data theo TỪNG MÓN, gom theo THÁNG NGÀY MUA của chính món đó (không theo ngày tạo đơn).
-// Cột A→N khớp đúng template khách: ...H=%Công, I=Tổng tiền(¥), J=Cân-Kg, K=Phụ thu, L=TRACKING, M=Đánh giá, N=Ngày giao.
-// Trả map: tháng -> { rows: A→N, jpyTotal: tổng ¥ (mirror cột I), vndTotal: tổng quy đổi ₫ của các món có tỉ giá }, đã sắp xếp theo ngày mua.
-function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>): Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }> {
-  const byMonth = new Map<number, { date: Date; an: (string | number)[]; jpy: number; vnd: number }[]>();
+// Trả field-key -> giá trị (không phải mảng theo vị trí cột) - runCustomerSync tự dò đúng cột theo tiêu đề thực
+// của từng khách để ghi, tránh lệch cột khi khách chèn thêm cột riêng.
+// Trả map: tháng -> { rows, jpyTotal: tổng ¥ (mirror "Tổng tiền"), vndTotal: tổng quy đổi ₫ các món có tỉ giá }.
+function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>, custShipRateVnd?: number | null): Map<number, { rows: FieldRow[]; jpyTotal: number; vndTotal: number }> {
+  const byMonth = new Map<number, { date: Date; row: FieldRow; jpy: number; vnd: number }[]>();
   const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
@@ -175,29 +193,38 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
       const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
       const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
-      bucket(m).push({
-        date: purchaseDate,
-        an: [
-          o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
-          fmtDate(purchaseDate),
-          "", String(it.url ?? ""), String(it.paymentMethod ?? ""),
-          giaWeb || "", ship || "", "", giaWeb + ship,
-          // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
-          // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
-          trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : ""),
-          surchargeCell ? Math.round(surchargeCell) : "",
-          String(trk?.code ?? ""), String(trk?.review ?? ""), "",
-        ],
-        jpy: giaWeb + ship,
-        vnd: rate ? Math.round((giaWeb + ship) * rate) : 0,
-      });
+      // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
+      // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
+      const weight = trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : null);
+      // Quy đổi đúng ra ₫/kg để hiện khớp với "Tổng tiền vận chuyển" (= cân x đơn giá này) - đơn giá tracking có
+      // thể để theo ¥ (shipRateCurrency) nên phải nhân tỉ giá, đơn giá mặc định của khách luôn tính sẵn theo ₫.
+      const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custShipRateVnd ?? null;
+      const shipVndPerKg = rawShipRate != null ? (trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
+      const shipTotal = trk ? trackingShipVnd({ ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null }, rate) : 0;
+      const jpy = giaWeb + ship;
+      const vnd = rate ? Math.round(jpy * rate) : 0;
+      const grandTotal = vnd + Math.round(shipTotal);
+      const row: FieldRow = {
+        code: o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
+        date: fmtDate(purchaseDate),
+        url: String(it.url ?? ""), method: String(it.paymentMethod ?? ""),
+        giaWeb: giaWeb || "", ship: ship || "", total: jpy,
+        weight: weight ?? "",
+        surcharge: surchargeCell ? Math.round(surchargeCell) : "",
+        shipRate: shipVndPerKg ? Math.round(shipVndPerKg) : "",
+        shipTotal: shipTotal ? Math.round(shipTotal) : "",
+        tracking: String(trk?.code ?? ""), review: String(trk?.review ?? ""),
+        deliveredAt: trk?.deliveredAt ? fmtDate(trk.deliveredAt) : "",
+        grandTotal: grandTotal ? grandTotal : "",
+      };
+      bucket(m).push({ date: purchaseDate, row, jpy, vnd });
     });
   }
-  const result = new Map<number, { rows: (string | number)[][]; jpyTotal: number; vndTotal: number }>();
+  const result = new Map<number, { rows: FieldRow[]; jpyTotal: number; vndTotal: number }>();
   for (const [m, entries] of byMonth) {
     entries.sort((a, b) => a.date.getTime() - b.date.getTime());
     result.set(m, {
-      rows: entries.map((e) => e.an),
+      rows: entries.map((e) => e.row),
       jpyTotal: entries.reduce((s, e) => s + e.jpy, 0),
       vndTotal: entries.reduce((s, e) => s + e.vnd, 0),
     });
@@ -222,6 +249,23 @@ async function findHeaderRow(sid: string, tab: string): Promise<number> {
   const rows = data.values ?? [];
   for (let i = 0; i < rows.length; i++) if ((rows[i]?.[0] ?? "").trim() === "Mã Link") return i + 1;
   return 0;
+}
+
+const colLetter = (i: number): string => (i < 26 ? "" : colLetter(Math.floor(i / 26) - 1)) + String.fromCharCode(65 + (i % 26));
+
+// Dò đúng cột (0-based) của từng field theo TÊN tiêu đề thực tế ở dòng header - khách chèn/xóa/đổi vị trí cột
+// tùy ý vẫn ghi đúng, vì không dựa vào vị trí cố định A→N nữa. Field nào khách không có cột thì bỏ qua, không ghi.
+async function readHeaderColumns(sid: string, tab: string, headerRow: number): Promise<Map<FieldKey, number>> {
+  const data = (await apiSheet(sid, `/values/${encodeURIComponent(tab)}!${headerRow}:${headerRow}`, "GET")) as { values?: string[][] };
+  const cells = data.values?.[0] ?? [];
+  const map = new Map<FieldKey, number>();
+  const byText = new Map<string, number>();
+  cells.forEach((v, i) => { const t = (v ?? "").trim(); if (t && !byText.has(t)) byText.set(t, i); });
+  for (const [key, label] of Object.entries(FIELD_HEADER) as [FieldKey, string][]) {
+    const i = byText.get(label);
+    if (i != null) map.set(key, i);
+  }
+  return map;
 }
 
 // Nối tiếp sync theo từng khách (tránh race khi tạo nhiều đơn liên tiếp ghi đè nhau)
@@ -737,7 +781,8 @@ async function runCustomerSync(customerId: string): Promise<void> {
     }
 
     // Mỗi MÓN nhảy vào tháng theo ngày mua của chính nó
-    const rowsByMonth = buildRowsByMonth(orders, codByTracking);
+    const custShipRateVnd = customer.shipRatePerKg != null ? Number(customer.shipRatePerKg) : null;
+    const rowsByMonth = buildRowsByMonth(orders, codByTracking, custShipRateVnd);
     const depsByMonth = new Map<number, typeof deposits>();
     for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
 
@@ -749,16 +794,23 @@ async function runCustomerSync(customerId: string): Promise<void> {
       if (!tab) { tab = `Tháng ${m}`; await ensureNamedTab(sid, tab); }
       const t = encodeURIComponent(tab);
 
-      // ----- Đơn hàng: A→N (TRACKING/Đánh giá nằm trong L,M - không đụng Q,R vì đó là "Tiền cọc" của khách) -----
-      const { rows: an, jpyTotal, vndTotal } = rowsByMonth.get(m) ?? { rows: [], jpyTotal: 0, vndTotal: 0 };
+      // ----- Đơn hàng: ghi đúng cột theo TÊN tiêu đề thực tế của khách (không theo vị trí cố định A→N) -----
+      const { rows: fieldRows, jpyTotal, vndTotal } = rowsByMonth.get(m) ?? { rows: [], jpyTotal: 0, vndTotal: 0 };
       let header = await findHeaderRow(sid, tab);
       if (!header) {
         await apiSheet(sid, `/values/${t}!A1?valueInputOption=USER_ENTERED`, "PUT", { values: [ORDER_HEADER] });
         header = 1;
       }
       const start = header + 1;
-      await apiSheet(sid, `/values/${t}!A${start}:N100000:clear`, "POST", {});
-      if (an.length) await apiSheet(sid, `/values/${t}!A${start}?valueInputOption=USER_ENTERED`, "PUT", { values: an });
+      const headerCols = await readHeaderColumns(sid, tab, header);
+      for (const [key, col] of headerCols) {
+        const letter = colLetter(col);
+        await apiSheet(sid, `/values/${t}!${letter}${start}:${letter}100000:clear`, "POST", {});
+        if (fieldRows.length) {
+          const colValues = fieldRows.map((r) => [r[key] ?? ""]);
+          await apiSheet(sid, `/values/${t}!${letter}${start}?valueInputOption=USER_ENTERED`, "PUT", { majorDimension: "ROWS", values: colValues });
+        }
+      }
 
       // ----- Sổ thu tiền (cọc): W:Z, để trống cột V (Mã) -----
       const monthDeposits = depsByMonth.get(m) ?? [];

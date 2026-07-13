@@ -580,7 +580,19 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-        if (single && r.sheetName && r.sheetName !== name) {
+        // Trước khi tách được 1-1 (packRow chưa gán xong), mã dùng chung nhiều đơn từng bị ghi GỘP tên+giá cả
+        // nhóm (fallback an toàn). Sau khi tách được rồi, ô sheet vẫn còn đúng y tên gộp CŨ đó -> so với tên
+        // MỘT món mới tính ra sẽ luôn khác -> hiểu lầm thành "kho tự sửa tên", mắc kẹt mãi không ghi đè lại được
+        // dù dữ liệu gộp đó là hệ thống tự ghi, không phải kho gõ tay. Phải so thêm với tên gộp cũ để nhận diện.
+        const fullGroup = trksByCode.get(r.code) ?? [];
+        const seenFullOrderIds = new Set<string>();
+        const fullOrders = fullGroup.map((t) => t.order).filter((o): o is NonNullable<typeof o> => {
+          if (!o || seenFullOrderIds.has(o.id)) return false;
+          seenFullOrderIds.add(o.id);
+          return true;
+        });
+        const mergedFallbackName = fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name).join(" + ");
+        if (single && r.sheetName && r.sheetName !== name && r.sheetName !== mergedFallbackName) {
           // Kho đã tự sửa tên trong sheet (vd để dễ thông quan) -> giữ nguyên, không ghi đè
           editedByKho = true;
           if (single.customsName !== r.sheetName) await prisma.tracking.update({ where: { id: single.id }, data: { customsName: r.sheetName } });
@@ -733,7 +745,17 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-        if (curName && curName !== name) {
+        // Tên gộp CŨ (lúc chưa tách được 1-1) có thể còn nguyên trên sheet - so thêm để khỏi hiểu lầm thành
+        // "kho tự sửa tên" rồi mắc kẹt mãi không ghi đè lại đúng tên/giá riêng từng đơn được nữa (xem gsheets.ts syncPackedFromWarehouse).
+        // Dùng FULL group (không phải `orders` đã bị thu hẹp về 1 đơn khi single đã resolve) để tính đúng tên gộp cũ.
+        const seenFullOrderIds = new Set<string>();
+        const fullOrders = group.map((x) => x.order).filter((o): o is NonNullable<typeof o> => {
+          if (!o || seenFullOrderIds.has(o.id)) return false;
+          seenFullOrderIds.add(o.id);
+          return true;
+        });
+        const mergedFallbackName = fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name).join(" + ");
+        if (curName && curName !== name && curName !== mergedFallbackName) {
           editedByKho = true;
           if (target.customsName !== curName) await prisma.tracking.update({ where: { id: target.id }, data: { customsName: curName } });
         } else {

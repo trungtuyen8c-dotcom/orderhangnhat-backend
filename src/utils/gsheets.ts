@@ -261,6 +261,20 @@ async function findHeaderRow(sid: string, tab: string): Promise<number> {
 
 const colLetter = (i: number): string => (i < 26 ? "" : colLetter(Math.floor(i / 26) - 1)) + String.fromCharCode(65 + (i % 26));
 
+// Bảng màu cố định để tô theo ngày ship - cùng 1 chuỗi ngày luôn ra cùng 1 màu (ổn định qua nhiều lần sync),
+// khác ngày thì (hầu hết) ra màu khác, giúp nhìn sheet là gom được lô hàng ship chung ngày mà không cần đọc chữ.
+const DATE_COLORS = [
+  { red: 0.80, green: 0.93, blue: 0.80 }, { red: 1, green: 0.85, blue: 0.6 }, { red: 0.88, green: 0.80, blue: 0.95 },
+  { red: 1, green: 0.95, blue: 0.6 }, { red: 0.70, green: 0.85, blue: 0.95 }, { red: 1, green: 0.80, blue: 0.85 },
+  { red: 0.85, green: 0.95, blue: 0.70 }, { red: 0.95, green: 0.80, blue: 0.70 }, { red: 0.75, green: 0.95, blue: 0.90 },
+  { red: 0.90, green: 0.90, blue: 0.75 },
+];
+function colorForDate(dateStr: string): { red: number; green: number; blue: number } {
+  let h = 0;
+  for (let i = 0; i < dateStr.length; i++) h = (h * 31 + dateStr.charCodeAt(i)) >>> 0;
+  return DATE_COLORS[h % DATE_COLORS.length];
+}
+
 // Dò đúng cột (0-based) của từng field theo TÊN tiêu đề thực tế ở dòng header - khách chèn/xóa/đổi vị trí cột
 // tùy ý vẫn ghi đúng, vì không dựa vào vị trí cố định A→N nữa. Field nào khách không có cột thì bỏ qua, không ghi.
 async function readHeaderColumns(sid: string, tab: string, headerRow: number): Promise<Map<FieldKey, number>> {
@@ -833,21 +847,27 @@ async function runCustomerSync(customerId: string): Promise<void> {
         }
       }
 
-      // ----- Cột "lưu kho": tô cam khi tracking đang ở trạng thái lưu kho, ship xong (có Tracking VN) thì tự về trắng -----
-      if (headerCols.has("stored")) {
-        const storedCol = headerCols.get("stored")!;
-        const gsidStored = await getSheetIdByTitle(sid, tab);
-        if (gsidStored != null) {
+      // ----- Tô nền: "lưu kho" cam khi đang lưu kho (tự trắng khi ship), "Ngày giao" tô theo màu riêng từng ngày -----
+      if (headerCols.has("stored") || headerCols.has("deliveredAt")) {
+        const gsidColor = await getSheetIdByTitle(sid, tab);
+        if (gsidColor != null) {
           const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
           const WHITE = { red: 1, green: 1, blue: 1 };
-          const reqs: unknown[] = [
-            { repeatCell: { range: { sheetId: gsidStored, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: storedCol, endColumnIndex: storedCol + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } },
-          ];
-          fieldRows.forEach((r, i) => {
-            if (r.stored === "lưu kho") {
-              reqs.push({ repeatCell: { range: { sheetId: gsidStored, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: storedCol, endColumnIndex: storedCol + 1 }, cell: { userEnteredFormat: { backgroundColor: ORANGE } }, fields: "userEnteredFormat.backgroundColor" } });
-            }
-          });
+          const reqs: unknown[] = [];
+          const clearCol = (col: number) => reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } });
+          const paintCell = (col: number, i: number, bg: { red: number; green: number; blue: number }) =>
+            reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } });
+
+          const storedCol = headerCols.get("stored");
+          if (storedCol != null) {
+            clearCol(storedCol);
+            fieldRows.forEach((r, i) => { if (r.stored === "lưu kho") paintCell(storedCol, i, ORANGE); });
+          }
+          const deliveredCol = headerCols.get("deliveredAt");
+          if (deliveredCol != null) {
+            clearCol(deliveredCol);
+            fieldRows.forEach((r, i) => { if (typeof r.deliveredAt === "string" && r.deliveredAt) paintCell(deliveredCol, i, colorForDate(r.deliveredAt)); });
+          }
           await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
         }
       }

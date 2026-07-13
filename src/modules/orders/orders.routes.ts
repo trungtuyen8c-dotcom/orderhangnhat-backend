@@ -38,7 +38,7 @@ ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
     orderBy: [{ orderDate: "desc" }, { createdAt: "desc" }],
     include: {
       customer: { select: { name: true } },
-      trackings: { select: { id: true, code: true, review: true, url: true }, orderBy: { createdAt: "asc" } },
+      trackings: { select: { id: true, code: true, review: true, url: true, vnTrackingCode: true, deliveredAt: true }, orderBy: { createdAt: "asc" } },
       items: isPayLater
         ? { select: { unitPriceJpy: true, qty: true, shipJpy: true, url: true, paymentMethod: true } }
         : { select: { url: true, paymentMethod: true } },

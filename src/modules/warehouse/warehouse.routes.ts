@@ -5,7 +5,7 @@ import { prisma } from "../../db.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab } from "../../utils/gsheets.js";
+import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab, clearWarehouseRow } from "../../utils/gsheets.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 
@@ -157,6 +157,9 @@ warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res
 warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (req, res) => {
   const t = await prisma.tracking.findUnique({ where: { id: req.params.id } });
   if (!t) return res.status(404).json({ error: "NOT_FOUND" });
+  // Gỡ qua APP (không phải kho tự xóa mã trong sheet) - cron quét file kho sẽ không còn cơ hội tự dọn màu/nội
+  // dung dòng vật lý từng chiếm nữa (nhất là sau khi packedAt/packRow reset), nên phải tự dọn ngay ở đây.
+  void clearWarehouseRow(t.packedAt, t.packRow);
   if (!t.orderId) {
     await prisma.trackingLog.deleteMany({ where: { trackingId: t.id } });
     await prisma.tracking.delete({ where: { id: t.id } });
@@ -164,7 +167,7 @@ warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (re
   } else {
     await prisma.tracking.update({
       where: { id: t.id },
-      data: { packedAt: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, deliveredAt: null },
+      data: { packedAt: null, packRow: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, deliveredAt: null },
     });
     await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
     // Gỡ khỏi Kho VN thì sheet khách cũng phải tự mất theo (cân/lưu kho/tracking VN/ngày giao) - không đợi sync khác.

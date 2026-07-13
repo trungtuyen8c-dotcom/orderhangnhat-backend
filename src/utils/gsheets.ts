@@ -583,7 +583,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         // Trước khi tách được 1-1 (packRow chưa gán xong), mã dùng chung nhiều đơn từng bị ghi GỘP tên+giá cả
         // nhóm (fallback an toàn). Sau khi tách được rồi, ô sheet vẫn còn đúng y tên gộp CŨ đó -> so với tên
         // MỘT món mới tính ra sẽ luôn khác -> hiểu lầm thành "kho tự sửa tên", mắc kẹt mãi không ghi đè lại được
-        // dù dữ liệu gộp đó là hệ thống tự ghi, không phải kho gõ tay. Phải so thêm với tên gộp cũ để nhận diện.
+        // dù dữ liệu gộp đó là hệ thống tự ghi, không phải kho gõ tay. Phải so thêm với tên gộp cũ để nhận diện -
+        // so theo TẬP HỢP tên (không theo thứ tự nối chuỗi) vì thứ tự trả về từ DB không cố định giữa các lần chạy.
         const fullGroup = trksByCode.get(r.code) ?? [];
         const seenFullOrderIds = new Set<string>();
         const fullOrders = fullGroup.map((t) => t.order).filter((o): o is NonNullable<typeof o> => {
@@ -591,8 +592,10 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
           seenFullOrderIds.add(o.id);
           return true;
         });
-        const mergedFallbackName = fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name).join(" + ");
-        if (single && r.sheetName && r.sheetName !== name && r.sheetName !== mergedFallbackName) {
+        const fullNameSet = new Set(fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name));
+        const sheetNameSet = new Set((r.sheetName ?? "").split(" + ").map((s) => s.trim()).filter(Boolean));
+        const looksLikeOldMerge = fullNameSet.size > 1 && fullNameSet.size === sheetNameSet.size && [...fullNameSet].every((n) => sheetNameSet.has(n));
+        if (single && r.sheetName && r.sheetName !== name && !looksLikeOldMerge) {
           // Kho đã tự sửa tên trong sheet (vd để dễ thông quan) -> giữ nguyên, không ghi đè
           editedByKho = true;
           if (single.customsName !== r.sheetName) await prisma.tracking.update({ where: { id: single.id }, data: { customsName: r.sheetName } });
@@ -659,6 +662,35 @@ export async function setDayLockFromTab(tab: string, locked: boolean): Promise<v
   const d = new Date(date.toISOString().slice(0, 10) + "T00:00:00");
   if (locked) await prisma.packDayLock.upsert({ where: { date: d }, update: {}, create: { date: d } });
   else await prisma.packDayLock.deleteMany({ where: { date: d } });
+}
+
+// Gỡ/xóa tracking qua APP (nút "Xóa" ở Kho VN) - không phải kho tự xóa mã trong sheet, nên cron quét file kho
+// (chỉ phát hiện qua so sánh với sheet) không có cơ hội biết dòng vật lý từng chiếm cần dọn màu/nội dung nữa,
+// nhất là khi packedAt bị reset về null cùng lúc (rớt khỏi cutoff recentDays) -> màu/tên/giá cũ kẹt lại vĩnh viễn
+// trên file kho. Gọi hàm này NGAY lúc gỡ để tự dọn, không chờ/không có cách nào cron dọn thay được nữa.
+export async function clearWarehouseRow(packedAt: Date | null, row: number | null): Promise<void> {
+  if (!saEnabled() || !packedAt || row == null) return;
+  try {
+    const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
+    const sid = cfg?.value ? parseSheetId(cfg.value) : null;
+    if (!sid) return;
+    const dayKey = packedAt.toISOString().slice(0, 10);
+    const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
+    const found = (meta.sheets ?? []).find((s) => tabDate(s.properties.title)?.toISOString().slice(0, 10) === dayKey);
+    if (!found) return;
+    const esc = found.properties.title.replace(/'/g, "''");
+    await apiSheet(sid, `/values:batchUpdate`, "POST", { valueInputOption: "USER_ENTERED", data: [
+      { range: `'${esc}'!F${row}:G${row}`, values: [["", ""]] },
+      { range: `'${esc}'!U${row}:X${row}`, values: [["", "", "", ""]] },
+    ] });
+    const WHITE = { red: 1, green: 1, blue: 1 };
+    await apiSheet(sid, `:batchUpdate`, "POST", { requests: [
+      { repeatCell: { range: { sheetId: found.properties.sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 24 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } },
+      { setDataValidation: { range: { sheetId: found.properties.sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 } } },
+    ] });
+  } catch (e) {
+    console.error("[gsheets] clearWarehouseRow", (e as Error).message);
+  }
 }
 
 async function getSheetIdByTitle(sid: string, title: string): Promise<number | null> {
@@ -747,15 +779,18 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
         const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
         // Tên gộp CŨ (lúc chưa tách được 1-1) có thể còn nguyên trên sheet - so thêm để khỏi hiểu lầm thành
         // "kho tự sửa tên" rồi mắc kẹt mãi không ghi đè lại đúng tên/giá riêng từng đơn được nữa (xem gsheets.ts syncPackedFromWarehouse).
-        // Dùng FULL group (không phải `orders` đã bị thu hẹp về 1 đơn khi single đã resolve) để tính đúng tên gộp cũ.
+        // Dùng FULL group (không phải `orders` đã bị thu hẹp về 1 đơn khi single đã resolve) để tính đúng tên gộp cũ,
+        // và so theo TẬP HỢP tên (không theo thứ tự nối chuỗi) vì thứ tự trả về từ DB không cố định giữa các lần chạy.
         const seenFullOrderIds = new Set<string>();
         const fullOrders = group.map((x) => x.order).filter((o): o is NonNullable<typeof o> => {
           if (!o || seenFullOrderIds.has(o.id)) return false;
           seenFullOrderIds.add(o.id);
           return true;
         });
-        const mergedFallbackName = fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name).join(" + ");
-        if (curName && curName !== name && curName !== mergedFallbackName) {
+        const fullNameSet = new Set(fullOrders.flatMap((o) => o.items ?? []).map((i) => i.name));
+        const sheetNameSet = new Set(curName.split(" + ").map((s) => s.trim()).filter(Boolean));
+        const looksLikeOldMerge = fullNameSet.size > 1 && fullNameSet.size === sheetNameSet.size && [...fullNameSet].every((n) => sheetNameSet.has(n));
+        if (curName && curName !== name && !looksLikeOldMerge) {
           editedByKho = true;
           if (target.customsName !== curName) await prisma.tracking.update({ where: { id: target.id }, data: { customsName: curName } });
         } else {

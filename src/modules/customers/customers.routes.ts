@@ -12,20 +12,35 @@ customersRouter.use(authenticate);
 
 customersRouter.get("/", authorize("customers.list"), async (_req, res) => {
   const rows = await prisma.customer.findMany({ orderBy: { createdAt: "desc" }, take: 500 });
-  // Gộp doanh số (tổng VND các đơn) + công nợ (tổng dư nợ) theo khách
-  // Nợ tách riêng VND/JPY - khách trả thẳng ¥ (chưa có tỉ giá) không bị ép nhầm sang ₫
-  const [revenue, debts] = await Promise.all([
+  // Gộp doanh số (tổng VND các đơn) + công nợ theo khách.
+  // Công nợ VND = tổng đơn (trừ đơn đã hủy) - (cọc CustomerDeposit đã xác nhận + Payment) - tính giống
+  // /accounting/customers/:id/ledger. KHÔNG dùng bảng Debt cho phần VND: bảng đó chỉ tạo/cập nhật khi có
+  // Payment qua flow cũ, không biết đến cọc ghi qua Ví khách (flow hiện tại) -> nếu khách chỉ ghi cọc, Debt
+  // không có dòng nào, nợ luôn hiện sai là 0.
+  // Nợ ¥ (đơn định giá thẳng JPY, khách trả thẳng chưa quy đổi) vẫn lấy từ bảng Debt vì ledger không tách khoản này.
+  const [revenue, debtOrders, debtJpyAgg, deposits, payments] = await Promise.all([
     prisma.order.groupBy({ by: ["customerId"], _sum: { totalVnd: true } }),
-    prisma.debt.groupBy({ by: ["customerId", "currency"], _sum: { balance: true } }),
+    prisma.order.groupBy({ by: ["customerId"], where: { status: { not: "cancelled" } }, _sum: { totalVnd: true } }),
+    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "JPY" }, _sum: { balance: true } }),
+    prisma.customerDeposit.groupBy({ by: ["customerId"], where: { confirmed: true }, _sum: { amountVnd: true } }),
+    prisma.payment.findMany({ select: { amountVnd: true, type: true, order: { select: { customerId: true } } } }),
   ]);
   const rev = new Map(revenue.map((r) => [r.customerId, Number(r._sum.totalVnd ?? 0)]));
-  const debtMap = new Map<string, number>();
-  const debtJpyMap = new Map<string, number>();
-  for (const d of debts) {
-    const m = d.currency === "JPY" ? debtJpyMap : debtMap;
-    m.set(d.customerId, (m.get(d.customerId) ?? 0) + Number(d._sum.balance ?? 0));
+  const orderTotalMap = new Map(debtOrders.map((r) => [r.customerId, Number(r._sum.totalVnd ?? 0)]));
+  const debtJpyMap = new Map(debtJpyAgg.map((d) => [d.customerId, Number(d._sum.balance ?? 0)]));
+  const paidMap = new Map<string, number>();
+  for (const d of deposits) paidMap.set(d.customerId, (paidMap.get(d.customerId) ?? 0) + Number(d._sum.amountVnd ?? 0));
+  for (const p of payments) {
+    const cid = p.order?.customerId;
+    if (!cid) continue;
+    const v = p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd);
+    paidMap.set(cid, (paidMap.get(cid) ?? 0) + v);
   }
-  res.json(rows.map((c) => ({ ...c, revenue: rev.get(c.id) ?? 0, debt: debtMap.get(c.id) ?? 0, debtJpy: debtJpyMap.get(c.id) ?? 0 })));
+  res.json(rows.map((c) => {
+    const orderTotal = orderTotalMap.get(c.id) ?? 0;
+    const paidTotal = paidMap.get(c.id) ?? 0;
+    return { ...c, revenue: rev.get(c.id) ?? 0, debt: orderTotal - paidTotal, debtJpy: debtJpyMap.get(c.id) ?? 0 };
+  }));
 });
 
 const schema = z.object({

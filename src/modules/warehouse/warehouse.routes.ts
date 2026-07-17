@@ -138,12 +138,21 @@ warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const order = await prisma.order.findUnique({ where: { code: p.data.orderCode.trim() }, select: { id: true, customerId: true } });
   if (!order) return res.status(404).json({ error: "ORDER_NOT_FOUND" });
-  const t = await prisma.tracking.create({
-    data: {
-      id: uuid(), orderId: order.id, code: p.data.code.trim(), jpWeightKg: p.data.jpWeightKg,
-      cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(), status: "linked",
-    },
-  });
+  const code = p.data.code.trim();
+  // Đơn đã có sẵn tracking đúng mã này (vd gõ lại mã đã nhập ở ô "Điền mã" trang đơn) -> cập nhật, không tạo bản ghi trùng
+  // (trước đây tạo thẳng bản ghi mới, khiến 1 đơn có 2 tracking cùng mã, hiện lặp "mã +mã" ngoài danh sách đơn).
+  const existing = await prisma.tracking.findFirst({ where: { orderId: order.id, code } });
+  const t = existing
+    ? await prisma.tracking.update({
+        where: { id: existing.id },
+        data: { jpWeightKg: p.data.jpWeightKg, cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: existing.packedAt ?? new Date(), status: "linked" },
+      })
+    : await prisma.tracking.create({
+        data: {
+          id: uuid(), orderId: order.id, code, jpWeightKg: p.data.jpWeightKg,
+          cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(), status: "linked",
+        },
+      });
   await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);
   void syncTracking(t);

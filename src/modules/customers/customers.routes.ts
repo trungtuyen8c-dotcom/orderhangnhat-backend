@@ -99,6 +99,10 @@ customersRouter.post("/:id/sync-sheet", authorize("customers.update"), async (re
 customersRouter.delete("/:id", authorize("customers.delete"), async (req, res) => {
   const orders = await prisma.order.count({ where: { customerId: req.params.id } });
   if (orders > 0) return res.status(409).json({ error: "HAS_ORDERS", message: "Khách còn đơn, không xóa được" });
+  // customer_deposits không có FK tới customers (chỉ lưu customerId thô) - xóa thẳng sẽ để lại
+  // cọc mồ côi, hiện "?" vĩnh viễn trong báo cáo Kế toán. Phải chặn giống như đơn.
+  const deposits = await prisma.customerDeposit.count({ where: { customerId: req.params.id } });
+  if (deposits > 0) return res.status(409).json({ error: "HAS_DEPOSITS", message: "Khách còn lịch sử cọc, không xóa được" });
   await prisma.customer.delete({ where: { id: req.params.id } });
   await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "customer.deleted" });
   res.json({ ok: true });

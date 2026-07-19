@@ -169,6 +169,7 @@ const updateSchema = z.object({
   url: z.string().nullable().optional(),
   packedAt: z.coerce.date().nullable().optional(),
   status: z.string().optional(),
+  taxCollected: z.boolean().optional(),
 });
 
 trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {

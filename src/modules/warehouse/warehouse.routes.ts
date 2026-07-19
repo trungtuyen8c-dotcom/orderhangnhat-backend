@@ -51,7 +51,8 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
   } as const;
   // Đã "Chuyển lưu kho" thì ra khỏi board chính (xem ở /warehouse/stored), trừ khi đã ship (có Tracking VN) thì luôn loại khỏi board.
   // Đơn chỉ order hộ - hàng về kho khác (externalWarehouse) không qua kho VN của mình -> loại luôn khỏi board.
-  const boardWhere = { status: { not: "stored" }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], NOT: { order: { externalWarehouse: true } } };
+  // Đơn chỉ lấy chứng từ, giao thẳng công ty (skipVnWeighing) - vẫn qua kho nhưng không cần cân -> loại khỏi board.
+  const boardWhere = { status: { not: "stored" }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], NOT: { order: { OR: [{ externalWarehouse: true }, { skipVnWeighing: true }] } } };
   const customerQ = String(req.query.customer ?? "").trim();
   const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
   const [cartons, loose] = await Promise.all([

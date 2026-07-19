@@ -369,6 +369,57 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
   return out;
 }
 
+// "Vàng" do kho tự tô tay trong sheet nháp trước khi chốt nộp hải quan - không phải màu hệ thống tự ghi
+// (khác PURPLE/ORANGE/GREEN/YELLOW cố định ở syncPackedFromWarehouse), nên chỉ nhận diện theo sắc thái vàng
+// chứ không so khớp RGB chính xác (người dùng có thể chọn bất kỳ sắc vàng nào trong bảng màu Google Sheets).
+function looksYellow(bg?: { red?: number; green?: number; blue?: number }): boolean {
+  if (!bg) return false;
+  const r = bg.red ?? 0, g = bg.green ?? 0, b = bg.blue ?? 0;
+  return r > 0.9 && g > 0.75 && b < 0.75 && r - b > 0.15;
+}
+
+// Đọc sheet nháp kho ("invoice test") -> lấy các dòng đang tô vàng (cần lấy thuế), dùng cho tính năng
+// Chứng từ hải quan. Sheet là 1 khối liên tục do kho tự đóng gói, KHÔNG lọc theo ngày - "vàng" là do kho tự
+// tô tay ngay trước khi chốt nộp hải quan, độc lập với ngày hóa đơn user nhập lúc upload chứng từ.
+export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
+  if (!saEnabled()) return [];
+  const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets.properties(title)")}`, "GET")) as { sheets?: { properties: { title: string } }[] };
+  const tabs = (meta.sheets ?? []).map((s) => s.properties.title);
+  const fields = "sheets(data(rowData(values(formattedValue,userEnteredFormat.backgroundColor))))";
+  const out: { trackingCode: string; itemName: string; price: number | null }[] = [];
+  for (const tab of tabs) {
+    const esc = tab.replace(/'/g, "''");
+    const data = (await apiSheet(sid, `?ranges=${encodeURIComponent(`'${esc}'!A1:Z3000`)}&fields=${encodeURIComponent(fields)}`, "GET")) as {
+      sheets?: { data?: { rowData?: { values?: { formattedValue?: string; userEnteredFormat?: { backgroundColor?: { red?: number; green?: number; blue?: number } } }[] }[] }[] }[];
+    };
+    const rows = data.sheets?.[0]?.data?.[0]?.rowData ?? [];
+    let trackingCol = -1, nameCol = -1, priceCol = -1, headerRow = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const cells = rows[i]?.values ?? [];
+      const idx = cells.findIndex((c) => (c.formattedValue ?? "").trim().toUpperCase().includes("TRACKING"));
+      if (idx >= 0) {
+        trackingCol = idx;
+        headerRow = i;
+        nameCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Tên hàng hóa");
+        priceCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Giá tiền");
+        break;
+      }
+    }
+    if (trackingCol < 0) continue;
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const cells = rows[i]?.values ?? [];
+      const codeCell = cells[trackingCol];
+      const code = (codeCell?.formattedValue ?? "").trim();
+      if (!isTrackingCode(code)) continue;
+      if (!looksYellow(codeCell?.userEnteredFormat?.backgroundColor)) continue;
+      const itemName = nameCol >= 0 ? (cells[nameCol]?.formattedValue ?? "").trim() : "";
+      const priceRaw = priceCol >= 0 ? (cells[priceCol]?.formattedValue ?? "").replace(/[^\d.-]/g, "") : "";
+      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
+    }
+  }
+  return out;
+}
+
 // Quét file kho -> tracking nào trùng & chưa đóng thì set packedAt (cam). Trả số khớp / số cập nhật.
 export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): Promise<{ matched: number; updated: number }> {
   if (!saEnabled()) return { matched: 0, updated: 0 };
@@ -552,6 +603,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
     const GREEN = { red: 0.80, green: 0.93, blue: 0.80 };
     const YELLOW = { red: 1, green: 0.95, blue: 0.6 };
+    const RED = { red: 1, green: 0.72, blue: 0.72 };
     const WHITE = { red: 1, green: 1, blue: 1 };
     // 1 đơn có thể nhiều món -> nhiều tracking; ghép món đúng theo VỊ TRÍ tracking đó trong đơn
     // (cùng quy ước với buildRowsByMonth: item[idx] <-> trackings[idx]), tránh lấy nhầm SANG món khác cùng đơn.
@@ -608,14 +660,16 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       const scannedCount = (rowsByCode.get(r.code) ?? []).length;
       const lateNote = isLate && !r.resolved ? "Quét SAU KHI đã chốt ngày - cần khai bổ sung hải quan riêng" : "";
       const scanNote = dbCount > 1 ? `Mã dùng chung ${dbCount} đơn - đã quét ${scannedCount}/${dbCount} dòng` : "";
+      // dbCount=1 nhưng mã xuất hiện >1 dòng vật lý trên sheet -> kho quét trùng tay hoặc shop cấp trùng tracking, khác case dùng chung nhiều đơn (GREEN).
+      const dupScanNote = dbCount === 1 && scannedCount > 1 ? `CẢNH BÁO: mã quét trùng ${scannedCount} dòng nhưng hệ thống chỉ có 1 đơn - kiểm tra tracking trùng (shop cấp trùng hoặc quét nhầm)` : "";
       const checkNote = orders.filter((o) => o.needsCheck).map((o) => o.checkNote?.trim() || "Mở hàng / gia cố").join(" | ");
-      const note = [lateNote, scanNote, checkNote].filter(Boolean).join(" | ");
+      const note = [lateNote, scanNote, dupScanNote, checkNote].filter(Boolean).join(" | ");
       const link = [...new Set(items.map((i) => i.url).filter(Boolean) as string[])].join(" ");
       // Số trùng = tổng số đơn đang dùng chung mã này (không phải số món của riêng đơn ở dòng này)
       // -> kho nhìn cột này biết cần quét/đối chiếu đủ bấy nhiêu dòng cho 1 mã.
       const count = dbCount;
       data.push({ range: `'${esc}'!U${r.row}:W${r.row}`, values: [[note, link, count]] });
-      const bg = r.resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : checkNote ? YELLOW : WHITE);
+      const bg = r.resolved ? WHITE : (isLate ? PURPLE : editedByKho ? ORANGE : dbCount > 1 ? GREEN : dupScanNote ? RED : checkNote ? YELLOW : WHITE);
       colorReqs.push({ repeatCell: {
         range: { sheetId: r.sheetId, startRowIndex: r.row - 1, endRowIndex: r.row, startColumnIndex: 0, endColumnIndex: 24 },
         cell: { userEnteredFormat: { backgroundColor: bg } },

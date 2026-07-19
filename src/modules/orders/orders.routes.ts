@@ -38,7 +38,7 @@ ordersRouter.get("/", authorize("orders.list"), async (req, res) => {
     orderBy: [{ orderDate: "desc" }, { createdAt: "desc" }],
     include: {
       customer: { select: { name: true } },
-      trackings: { select: { id: true, code: true, review: true, url: true, vnTrackingCode: true, deliveredAt: true }, orderBy: { createdAt: "asc" } },
+      trackings: { select: { id: true, code: true, review: true, url: true, vnTrackingCode: true, deliveredAt: true, needsTax: true, taxCollected: true }, orderBy: { createdAt: "asc" } },
       items: isPayLater
         ? { select: { unitPriceJpy: true, qty: true, shipJpy: true, url: true, paymentMethod: true } }
         : { select: { url: true, paymentMethod: true } },
@@ -148,6 +148,7 @@ const createSchema = z.object({
   needsCheck: z.boolean().optional(),
   checkNote: z.string().optional(),
   externalWarehouse: z.boolean().optional(),
+  skipVnWeighing: z.boolean().optional(),
   ...pricingSchema,
 });
 
@@ -188,6 +189,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
     externalWarehouse: d.externalWarehouse ?? false,
+    skipVnWeighing: d.skipVnWeighing ?? false,
     publicToken: uuid(),
     items: { create: d.items },
   };
@@ -299,6 +301,7 @@ const editSchema = z.object({
   needsCheck: z.boolean().optional(),
   checkNote: z.string().optional(),
   externalWarehouse: z.boolean().optional(),
+  skipVnWeighing: z.boolean().optional(),
   ...pricingSchema,
 });
 
@@ -325,6 +328,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
   if (d.needsCheck !== undefined) { diff("needsCheck", order.needsCheck, d.needsCheck); data.needsCheck = d.needsCheck; }
   if (d.checkNote !== undefined) { diff("checkNote", order.checkNote, d.checkNote); data.checkNote = d.checkNote; }
   if (d.externalWarehouse !== undefined) { diff("externalWarehouse", order.externalWarehouse, d.externalWarehouse); data.externalWarehouse = d.externalWarehouse; }
+  if (d.skipVnWeighing !== undefined) { diff("skipVnWeighing", order.skipVnWeighing, d.skipVnWeighing); data.skipVnWeighing = d.skipVnWeighing; }
   if (d.customerId) { diff("customerId", order.customerId, d.customerId); data.customerId = d.customerId; }
   if (d.nick !== undefined) { diff("nick", order.nick, d.nick); data.nick = d.nick; }
   for (const f of PRICING_FIELDS) {

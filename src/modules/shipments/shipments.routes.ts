@@ -7,7 +7,7 @@ import { minio, BUCKET } from "../../minio.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
-import { parseSheetId, readInvoiceTaxRows } from "../../utils/gsheets.js";
+import { parseSheetId, readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../../utils/gsheets.js";
 
 export const shipmentsRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -44,14 +44,13 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-// Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.
-shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) => {
-  const cfg = await prisma.appConfig.findUnique({ where: { key: "invoice_tax_sheet_id" } });
-  const sid = cfg?.value ? parseSheetId(cfg.value) : null;
-  if (!sid) return res.json([]);
-  const sheetRows = await readInvoiceTaxRows(sid);
+type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean };
+
+// Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
+// cho cả /tax-rows (nguồn sheet cấu hình sẵn) và /documents/scan-tax (nguồn file upload trực tiếp).
+async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null }[]): Promise<TaxRowOut[]> {
   const codes = [...new Set(sheetRows.map((r) => r.trackingCode))];
-  if (!codes.length) return res.json([]);
+  if (!codes.length) return [];
   const trks = await prisma.tracking.findMany({
     where: { code: { in: codes } },
     include: { order: { include: { customer: { select: { name: true } }, items: true } } },
@@ -61,8 +60,7 @@ shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) =
   if (toFlag.length) await prisma.tracking.updateMany({ where: { id: { in: toFlag } }, data: { needsTax: true } });
   const byCode = new Map<string, typeof trks>();
   for (const t of trks) { const arr = byCode.get(t.code) ?? []; arr.push(t); byCode.set(t.code, arr); }
-  type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean };
-  const out: TaxRowOut[] = sheetRows.flatMap((r): TaxRowOut[] => {
+  return sheetRows.flatMap((r): TaxRowOut[] => {
     const matches = byCode.get(r.trackingCode) ?? [];
     if (!matches.length) {
       return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, taxCollected: false, unmatched: true }];
@@ -73,7 +71,24 @@ shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) =
       taxCollected: t.taxCollected, unmatched: false,
     }));
   });
-  res.json(out);
+}
+
+// Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.
+shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) => {
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "invoice_tax_sheet_id" } });
+  const sid = cfg?.value ? parseSheetId(cfg.value) : null;
+  if (!sid) return res.json([]);
+  const sheetRows = await readInvoiceTaxRows(sid);
+  res.json(await matchTaxRows(sheetRows));
+});
+
+// Quét file Excel chứng từ GA (loại "tax") upload trực tiếp -> đọc dòng vàng + khớp Tracking, KHÔNG lưu file.
+shipmentsRouter.post("/documents/scan-tax", authorize("shipments.upload_doc"), upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "BAD_REQUEST" });
+  let sheetRows: { trackingCode: string; itemName: string; price: number | null }[];
+  try { sheetRows = await readInvoiceTaxRowsFromExcel(req.file.buffer); }
+  catch { return res.status(400).json({ error: "BAD_FILE", message: "Không đọc được file Excel" }); }
+  res.json(await matchTaxRows(sheetRows));
 });
 
 shipmentsRouter.get("/documents", authorize("shipments.list"), async (req, res) => {

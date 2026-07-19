@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
+import ExcelJS from "exceljs";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
@@ -417,6 +418,49 @@ export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: s
       out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
     }
   }
+  return out;
+}
+
+function argbToRgb01(argb?: string): { red: number; green: number; blue: number } | undefined {
+  if (!argb) return undefined;
+  const hex = argb.length === 8 ? argb.slice(2) : argb; // bỏ kênh alpha (AARRGGBB)
+  if (hex.length !== 6) return undefined;
+  return { red: parseInt(hex.slice(0, 2), 16) / 255, green: parseInt(hex.slice(2, 4), 16) / 255, blue: parseInt(hex.slice(4, 6), 16) / 255 };
+}
+
+// Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
+// quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
+export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as any);
+  const out: { trackingCode: string; itemName: string; price: number | null }[] = [];
+  wb.eachSheet((sheet) => {
+    let trackingCol = -1, nameCol = -1, priceCol = -1, headerRow = -1;
+    for (let r = 1; r <= sheet.rowCount && headerRow < 0; r++) {
+      const row = sheet.getRow(r);
+      for (let c = 1; c <= row.cellCount; c++) {
+        if ((row.getCell(c).text ?? "").trim().toUpperCase().includes("TRACKING")) { trackingCol = c; headerRow = r; break; }
+      }
+    }
+    if (trackingCol < 0) return;
+    const hRow = sheet.getRow(headerRow);
+    for (let c = 1; c <= hRow.cellCount; c++) {
+      const v = (hRow.getCell(c).text ?? "").trim();
+      if (v === "Tên hàng hóa") nameCol = c;
+      if (v === "Giá tiền") priceCol = c;
+    }
+    for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      const codeCell = row.getCell(trackingCol);
+      const code = (codeCell.text ?? "").trim();
+      if (!isTrackingCode(code)) continue;
+      const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
+      if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
+      const itemName = nameCol > 0 ? (row.getCell(nameCol).text ?? "").trim() : "";
+      const priceRaw = priceCol > 0 ? (row.getCell(priceCol).text ?? "").replace(/[^\d.-]/g, "") : "";
+      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
+    }
+  });
   return out;
 }
 

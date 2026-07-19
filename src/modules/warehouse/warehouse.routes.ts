@@ -8,6 +8,7 @@ import { logAudit } from "../../utils/audit.js";
 import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab, clearWarehouseRow } from "../../utils/gsheets.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
+import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const warehouseRouter = Router();
 
@@ -148,11 +149,9 @@ warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res
         where: { id: existing.id },
         data: { jpWeightKg: p.data.jpWeightKg, cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: existing.packedAt ?? new Date(), status: "linked" },
       })
-    : await prisma.tracking.create({
-        data: {
-          id: uuid(), orderId: order.id, code, jpWeightKg: p.data.jpWeightKg,
-          cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(), status: "linked",
-        },
+    // Mã có thể đã bị kho quét trước đó (mồ côi ở đơn khác/chưa gắn đơn) -> claim lại thay vì tạo trùng
+    : await claimOrCreateTracking(order.id, code, {
+        jpWeightKg: p.data.jpWeightKg, cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(),
       });
   await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);

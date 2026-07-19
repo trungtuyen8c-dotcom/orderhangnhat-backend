@@ -9,6 +9,7 @@ import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { applyOrderCardCharges, reverseOrderCardCharges } from "../../utils/orderCard.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
 import { detectMarketplace } from "../../utils/scrape.js";
+import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate);
@@ -205,9 +206,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     }
   }
   if (d.trackings?.length) {
-    await prisma.tracking.createMany({
-      data: d.trackings.map((t) => ({ id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" })),
-    });
+    for (const t of d.trackings) await claimOrCreateTracking(order.id, t.code, { jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg });
   } else {
     // Tự tạo 1 tracking trống gắn đơn -> hiện sẵn ở bảng Chuyến, điền mã tay sau
     await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: "", status: "linked" } });
@@ -249,11 +248,11 @@ ordersRouter.post("/consignment", authorize("orders.create"), async (req, res) =
       break;
     } catch (e: any) { if (e?.code === "P2002" && attempt < 5) continue; throw e; }
   }
-  await prisma.tracking.create({ data: {
-    id: uuid(), orderId: order.id, code: d.code, jpWeightKg: d.jpWeightKg ?? null, vnWeightKg: d.vnWeightKg ?? null,
+  await claimOrCreateTracking(order.id, d.code, {
+    jpWeightKg: d.jpWeightKg ?? null, vnWeightKg: d.vnWeightKg ?? null,
     unitPriceVndPerKg: d.unitPriceVndPerKg ?? null, shipRateCurrency: d.shipRateCurrency,
-    review: d.review ?? null, packedAt: d.packedAt ?? null, status: "linked",
-  } });
+    review: d.review ?? null, packedAt: d.packedAt ?? null,
+  });
   const totals = await recomputeOrderTotals(order.id);
   void syncCustomerOrders(order.customerId);
   await logAudit({ actorId: req.user!.id, targetId: order.id, action: "order.consignment_created" });
@@ -353,7 +352,7 @@ ordersRouter.patch("/:id", authorize("orders.update"), async (req, res) => {
     }
     for (const t of d.trackings) {
       if (t.id) await prisma.tracking.update({ where: { id: t.id }, data: { code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg } });
-      else await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: t.code, jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg, status: "linked" } });
+      else await claimOrCreateTracking(order.id, t.code, { jpWeightKg: t.jpWeightKg, unitPriceVndPerKg: t.unitPriceVndPerKg });
     }
     diff("trackings", order.trackings.map((t) => t.code).join(", "), d.trackings.map((t) => t.code).join(", "));
   }

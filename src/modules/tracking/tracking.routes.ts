@@ -9,6 +9,7 @@ import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
 import { syncTracking, removeTrackingRow, syncCustomerOrders } from "../../utils/gsheets.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
+import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const trackingRouter = Router();
 trackingRouter.use(authenticate);
@@ -96,7 +97,7 @@ trackingRouter.post("/bulk", authorize("trackings.update"), async (req, res) => 
     if (!order) { notFound.push(it.orderCode); continue; }
     const empty = await prisma.tracking.findFirst({ where: { orderId: order.id, code: "" } });
     if (empty) { await prisma.tracking.update({ where: { id: empty.id }, data: { code: it.code.trim() } }); updated++; }
-    else { await prisma.tracking.create({ data: { id: uuid(), orderId: order.id, code: it.code.trim(), status: "linked" } }); created++; }
+    else { await claimOrCreateTracking(order.id, it.code); created++; }
     customers.add(order.customerId);
     await recomputeOrderTotals(order.id);
   }

@@ -2,13 +2,15 @@ import type { Request, Response, NextFunction } from "express";
 import { prisma } from "../db.js";
 import { redis } from "../redis.js";
 import { logAudit } from "../utils/audit.js";
+import { cacheHits, cacheMisses } from "./metrics.js";
 
 const PERM_TTL = 300; // 5 phút
 
 async function loadPermissions(userId: string): Promise<string[]> {
   const cacheKey = `perms:${userId}`;
   const cached = await redis.get(cacheKey);
-  if (cached) return JSON.parse(cached);
+  if (cached) { cacheHits.inc({ feature: "permission" }); return JSON.parse(cached); }
+  cacheMisses.inc({ feature: "permission" });
 
   const rows = await prisma.permission.findMany({
     where: { roles: { some: { role: { users: { some: { userId } } } } } },

@@ -1,9 +1,12 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { randomUUID } from "crypto";
 import { config } from "./config.js";
 import { ensureBucket } from "./minio.js";
 import { startJobs } from "./jobs/alerts.js";
+import { logger } from "./logger.js";
+import { metricsMiddleware, metricsHandler } from "./middlewares/metrics.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { meRouter } from "./modules/me/me.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
@@ -26,8 +29,11 @@ app.set("trust proxy", true);
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
+app.use((req, _res, next) => { req.requestId = randomUUID(); next(); });
+app.use(metricsMiddleware);
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/metrics", metricsHandler); // Nginx chặn path này ra ngoài (deny all)
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
 app.use("/api/orders", ordersRouter);
@@ -46,8 +52,8 @@ app.use("/api/admin", adminRouter);
 app.use("/api/backup", backupRouter);
 
 // Error handler
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err);
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error({ request_id: req.requestId, err: { message: err?.message, stack: err?.stack } }, "request failed");
   res.status(500).json({ error: "INTERNAL" });
 });
 

@@ -224,7 +224,8 @@ warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), async (r
 
 // "Chốt ngày" khai hải quan: mã tracking quét vào SAU khi ngày đã chốt sẽ bị đánh dấu lateAfterLock,
 // không gộp vào invoice ngày đó nữa (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
-warehouseRouter.get("/day-locks", authorize("system.manage_settings"), async (_req, res) => {
+// Đọc (không sửa) - mở cho shipments.list dùng để lọc "Cần lấy thuế" theo ngày chuyến/chốt hải quan.
+warehouseRouter.get("/day-locks", authorize("shipments.list"), async (_req, res) => {
   const rows = await prisma.packDayLock.findMany({ orderBy: { date: "desc" }, take: 60 });
   res.json(rows);
 });

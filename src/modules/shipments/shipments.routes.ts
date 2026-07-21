@@ -44,7 +44,7 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean };
+type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null };
 
 // Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
 // cho cả /tax-rows (nguồn sheet cấu hình sẵn) và /documents/scan-tax (nguồn file upload trực tiếp).
@@ -63,12 +63,13 @@ async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string;
   return sheetRows.flatMap((r): TaxRowOut[] => {
     const matches = byCode.get(r.trackingCode) ?? [];
     if (!matches.length) {
-      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, taxCollected: false, unmatched: true }];
+      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null }];
     }
     return matches.map((t) => ({
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null,
       taxCollected: t.taxCollected, unmatched: false,
+      purchaseUrl: t.url ?? null, packedAt: t.packedAt ? t.packedAt.toISOString() : null,
     }));
   });
 }

@@ -144,7 +144,7 @@ async function storageOverdueCount(): Promise<number> {
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
   const weekAgo = new Date(Date.now() - 7 * 86400000);
-  const [lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock] = await Promise.all([
+  const [lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock, taxPending] = await Promise.all([
     prisma.order.count({ where: { status: { not: "cancelled" }, trackings: { none: {} }, createdAt: { lt: weekAgo } } }),
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
@@ -156,6 +156,8 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     overdueDebts(),
     storageOverdueCount(),
     prisma.tracking.count({ where: { lateAfterLock: true } }),
+    // Từng khớp dòng vàng "cần lấy thuế" (needsTax) nhưng chưa tick "Đã lấy thuế" - cảnh báo dồn nhiều chuyến chưa thu.
+    prisma.tracking.count({ where: { needsTax: true, taxCollected: false } }),
   ]);
   const cartonMismatch = cartons.filter((c) => {
     const actual = c.trackings.reduce((s, t) => s + effKg(t), 0);
@@ -163,6 +165,6 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
   }).length;
   res.json({
     lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
-    overdueDebts: overdue.list.length, storageOverdue, lateAfterLock,
+    overdueDebts: overdue.list.length, storageOverdue, lateAfterLock, taxPending,
   });
 });

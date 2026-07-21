@@ -428,6 +428,11 @@ function argbToRgb01(argb?: string): { red: number; green: number; blue: number 
   return { red: parseInt(hex.slice(0, 2), 16) / 255, green: parseInt(hex.slice(2, 4), 16) / 255, blue: parseInt(hex.slice(4, 6), 16) / 255 };
 }
 
+// Ô nằm trong vùng merge (không phải ô gốc) khiến ExcelJS ném lỗi khi đọc `.text` (MergeValue null) -> nuốt lỗi, coi như rỗng.
+function safeText(cell: ExcelJS.Cell): string {
+  try { return (cell.text ?? "").trim(); } catch { return ""; }
+}
+
 // Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
 // quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
 export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
@@ -439,25 +444,25 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
     for (let r = 1; r <= sheet.rowCount && headerRow < 0; r++) {
       const row = sheet.getRow(r);
       for (let c = 1; c <= row.cellCount; c++) {
-        if ((row.getCell(c).text ?? "").trim().toUpperCase().includes("TRACKING")) { trackingCol = c; headerRow = r; break; }
+        if (safeText(row.getCell(c)).toUpperCase().includes("TRACKING")) { trackingCol = c; headerRow = r; break; }
       }
     }
     if (trackingCol < 0) return;
     const hRow = sheet.getRow(headerRow);
     for (let c = 1; c <= hRow.cellCount; c++) {
-      const v = (hRow.getCell(c).text ?? "").trim();
+      const v = safeText(hRow.getCell(c));
       if (v === "Tên hàng hóa") nameCol = c;
       if (v === "Giá tiền") priceCol = c;
     }
     for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
       const codeCell = row.getCell(trackingCol);
-      const code = (codeCell.text ?? "").trim();
+      const code = safeText(codeCell);
       if (!isTrackingCode(code)) continue;
       const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
       if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
-      const itemName = nameCol > 0 ? (row.getCell(nameCol).text ?? "").trim() : "";
-      const priceRaw = priceCol > 0 ? (row.getCell(priceCol).text ?? "").replace(/[^\d.-]/g, "") : "";
+      const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
+      const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
       out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
     }
   });

@@ -46,6 +46,16 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
 
 type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null };
 
+// Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
+// cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
+function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName: string): string | null {
+  const norm = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+  const target = norm(itemName);
+  const matched = target && items.find((i) => i.url && target.includes(norm(i.name)));
+  if (matched) return matched.url;
+  return items.find((i) => i.url)?.url ?? null;
+}
+
 // Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
 // cho cả /tax-rows (nguồn sheet cấu hình sẵn) và /documents/scan-tax (nguồn file upload trực tiếp).
 async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null }[]): Promise<TaxRowOut[]> {
@@ -69,7 +79,7 @@ async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string;
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null,
       taxCollected: t.taxCollected, unmatched: false,
-      purchaseUrl: t.url ?? null, packedAt: t.packedAt ? t.packedAt.toISOString() : null,
+      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null,
     }));
   });
 }

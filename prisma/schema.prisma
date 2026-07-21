@@ -435,6 +435,17 @@ model AppConfig {
   @@map("app_config")
 }
 
+// Ghi chú thủ công cho dòng vàng "cần lấy thuế" theo mã tracking - dùng khi dòng chưa khớp đơn (mã seller
+// ghi sai/thiếu, phải mở hàng ra mới biết) để note lại tình trạng, không tự gán đơn.
+model TaxRowNote {
+  trackingCode String   @id @map("tracking_code")
+  note         String
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedBy    String?  @map("updated_by") @db.Uuid
+
+  @@map("tax_row_notes")
+}
+
 model BackupRun {
   id          String    @id @default(uuid()) @db.Uuid
   kind        String    @default("manual") // manual | scheduled

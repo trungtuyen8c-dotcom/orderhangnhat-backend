@@ -44,7 +44,7 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null };
+type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null };
 
 // Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
 // cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
@@ -61,28 +61,49 @@ function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName
 async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null }[]): Promise<TaxRowOut[]> {
   const codes = [...new Set(sheetRows.map((r) => r.trackingCode))];
   if (!codes.length) return [];
-  const trks = await prisma.tracking.findMany({
-    where: { code: { in: codes } },
-    include: { order: { include: { customer: { select: { name: true } }, items: true } } },
-  });
+  const [trks, notes] = await Promise.all([
+    prisma.tracking.findMany({
+      where: { code: { in: codes } },
+      include: { order: { include: { customer: { select: { name: true } }, items: true } } },
+    }),
+    prisma.taxRowNote.findMany({ where: { trackingCode: { in: codes } } }),
+  ]);
   // Đánh dấu needsTax=true cho tracking khớp được (không tự tắt lại nếu dòng hết vàng sau này - giữ lịch sử đã từng cần lấy thuế).
   const toFlag = trks.filter((t) => !t.needsTax).map((t) => t.id);
   if (toFlag.length) await prisma.tracking.updateMany({ where: { id: { in: toFlag } }, data: { needsTax: true } });
   const byCode = new Map<string, typeof trks>();
   for (const t of trks) { const arr = byCode.get(t.code) ?? []; arr.push(t); byCode.set(t.code, arr); }
+  const noteByCode = new Map(notes.map((n) => [n.trackingCode, n.note]));
   return sheetRows.flatMap((r): TaxRowOut[] => {
+    const note = noteByCode.get(r.trackingCode) ?? null;
     const matches = byCode.get(r.trackingCode) ?? [];
     if (!matches.length) {
-      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null }];
+      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note }];
     }
     return matches.map((t) => ({
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
-      orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null,
+      orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,
       taxCollected: t.taxCollected, unmatched: false,
-      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null,
+      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note,
     }));
   });
 }
+
+// Ghi chú thủ công theo mã tracking (vd mã seller ghi sai, đang chờ mở hàng xác minh) - không tự gán đơn.
+const noteSchema = z.object({ note: z.string().nullable() });
+shipmentsRouter.put("/tax-rows/:code/note", authorize("trackings.update"), async (req, res) => {
+  const p = noteSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const code = req.params.code;
+  const note = (p.data.note ?? "").trim();
+  if (!note) { await prisma.taxRowNote.deleteMany({ where: { trackingCode: code } }); return res.json({ trackingCode: code, note: null }); }
+  const row = await prisma.taxRowNote.upsert({
+    where: { trackingCode: code },
+    update: { note, updatedBy: req.user!.id },
+    create: { trackingCode: code, note, updatedBy: req.user!.id },
+  });
+  res.json({ trackingCode: row.trackingCode, note: row.note });
+});
 
 // Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.
 shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) => {

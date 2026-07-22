@@ -437,9 +437,12 @@ model AppConfig {
 
 // Ghi chú thủ công cho dòng vàng "cần lấy thuế" theo mã tracking - dùng khi dòng chưa khớp đơn (mã seller
 // ghi sai/thiếu, phải mở hàng ra mới biết) để note lại tình trạng, không tự gán đơn.
+// trackingCode là khóa tra cứu chung: mã tracking thật (dòng khớp mã) hoặc khóa tổng hợp
+// "name:bill:orderCode:itemName" (dòng khớp theo tên, không có mã tracking) - cùng công thức taxRowKey ở FE.
 model TaxRowNote {
   trackingCode String   @id @map("tracking_code")
   note         String
+  taxCollected Boolean  @default(false) @map("tax_collected")
   updatedAt    DateTime @updatedAt @map("updated_at")
   updatedBy    String?  @map("updated_by") @db.Uuid
 

@@ -57,6 +57,11 @@ function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName
   return items.find((i) => i.url)?.url ?? null;
 }
 
+// Khóa lưu Ghi chú/"Đã lấy thuế" cho dòng khớp theo tên - phải khớp đúng công thức taxRowKey ở FE.
+function nameRowKey(bill: string | null, orderCode: string | null, itemName: string): string {
+  return `name:${bill ?? ""}:${orderCode ?? ""}:${itemName}`;
+}
+
 const normName = (s: string) => s.replace(/\s+/g, "").toLowerCase();
 // Khớp theo tên khi dòng vàng không có mã tracking (vd file hải quan GB.xxx chỉ có tên hàng, không mang tracking).
 // Kém chắc chắn hơn khớp mã (nhiều đơn có thể trùng/gần giống tên) - FE đánh dấu riêng để nhân viên xác nhận lại.
@@ -108,7 +113,7 @@ async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: 
     nameRows.length
       ? prisma.orderItem.findMany({
           where: { order: { status: { not: "cancelled" }, createdAt: { gte: new Date(Date.now() - 180 * 86400000) } } },
-          select: { name: true, order: { select: { code: true, nick: true, customer: { select: { name: true } } } } },
+          select: { name: true, order: { select: { code: true, nick: true, customer: { select: { name: true } }, items: { select: { name: true, url: true } } } } },
           take: 5000,
         })
       : Promise.resolve([]),
@@ -154,27 +159,43 @@ async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: 
     nameOut.push({
       trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price,
       orderCode: hit.order.code, customerName: hit.order.customer?.name ?? null, nick: hit.order.nick ?? null,
-      taxCollected: false, unmatched: false, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: "name", suggestion: null,
+      taxCollected: false, unmatched: false, purchaseUrl: pickPurchaseUrl(hit.order.items, r.itemName), packedAt: null, note: null, bill: r.bill, matchedBy: "name", suggestion: null,
     });
+  }
+
+  // Dòng khớp theo tên không có mã tracking -> lưu Ghi chú/"Đã lấy thuế" theo khóa tổng hợp
+  // bill+đơn+tên hàng (đúng công thức taxRowKey ở FE) thay vì mã tracking.
+  const nameNoteKeys = nameOut.map((r) => nameRowKey(r.bill, r.orderCode, r.itemName));
+  const nameNotes = nameNoteKeys.length ? await prisma.taxRowNote.findMany({ where: { trackingCode: { in: nameNoteKeys } } }) : [];
+  const nameNoteByKey = new Map(nameNotes.map((n) => [n.trackingCode, n]));
+  for (const r of nameOut) {
+    const found = nameNoteByKey.get(nameRowKey(r.bill, r.orderCode, r.itemName));
+    if (found) { r.note = found.note || null; r.taxCollected = found.taxCollected; }
   }
 
   return [...codeOut, ...nameOut];
 }
 
-// Ghi chú thủ công theo mã tracking (vd mã seller ghi sai, đang chờ mở hàng xác minh) - không tự gán đơn.
-const noteSchema = z.object({ note: z.string().nullable() });
+// Ghi chú thủ công + "Đã lấy thuế" theo khóa (mã tracking thật, hoặc khóa tổng hợp cho dòng khớp theo tên
+// không có mã tracking) - không tự gán đơn. Chỉ gửi field nào cần đổi, field còn lại giữ nguyên giá trị cũ.
+const noteSchema = z.object({ note: z.string().nullable().optional(), taxCollected: z.boolean().optional() });
 shipmentsRouter.put("/tax-rows/:code/note", authorize("trackings.update"), async (req, res) => {
   const p = noteSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const code = req.params.code;
-  const note = (p.data.note ?? "").trim();
-  if (!note) { await prisma.taxRowNote.deleteMany({ where: { trackingCode: code } }); return res.json({ trackingCode: code, note: null }); }
+  const existing = await prisma.taxRowNote.findUnique({ where: { trackingCode: code } });
+  const note = p.data.note !== undefined ? (p.data.note ?? "").trim() : (existing?.note ?? "");
+  const taxCollected = p.data.taxCollected !== undefined ? p.data.taxCollected : (existing?.taxCollected ?? false);
+  if (!note && !taxCollected) {
+    if (existing) await prisma.taxRowNote.delete({ where: { trackingCode: code } });
+    return res.json({ trackingCode: code, note: null, taxCollected: false });
+  }
   const row = await prisma.taxRowNote.upsert({
     where: { trackingCode: code },
-    update: { note, updatedBy: req.user!.id },
-    create: { trackingCode: code, note, updatedBy: req.user!.id },
+    update: { note, taxCollected, updatedBy: req.user!.id },
+    create: { trackingCode: code, note, taxCollected, updatedBy: req.user!.id },
   });
-  res.json({ trackingCode: row.trackingCode, note: row.note });
+  res.json({ trackingCode: row.trackingCode, note: row.note || null, taxCollected: row.taxCollected });
 });
 
 // Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.

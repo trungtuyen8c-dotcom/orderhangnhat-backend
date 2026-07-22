@@ -217,12 +217,12 @@ shipmentsRouter.get("/tax-audit", authorize("shipments.list"), async (req, res) 
   const end = new Date(Number(m[1]), Number(m[2]), 1);
   const trks = await prisma.tracking.findMany({
     where: { packedAt: { gte: start, lt: end }, order: { status: { not: "cancelled" } } },
-    select: { id: true, code: true, packedAt: true, needsTax: true, taxCollected: true, order: { select: { code: true, nick: true, customer: { select: { name: true } } } } },
+    select: { id: true, code: true, packedAt: true, needsTax: true, taxCollected: true, taxAuditDismissed: true, order: { select: { code: true, nick: true, customer: { select: { name: true } } } } },
     orderBy: { packedAt: "asc" },
   });
   const declaredCollected = trks.filter((t) => t.needsTax && t.taxCollected).length;
   const declaredPending = trks.filter((t) => t.needsTax && !t.taxCollected).length;
-  const notDeclared = trks.filter((t) => !t.needsTax);
+  const notDeclared = trks.filter((t) => !t.needsTax && !t.taxAuditDismissed);
   res.json({
     total: trks.length, declaredCollected, declaredPending,
     notDeclared: notDeclared.map((t) => ({
@@ -231,6 +231,16 @@ shipmentsRouter.get("/tax-audit", authorize("shipments.list"), async (req, res) 
       packedAt: t.packedAt ? t.packedAt.toISOString() : null,
     })),
   });
+});
+
+// Tick "đã xử lý" (đã đi thêm tracking vào sheet nháp kho) - ẩn khỏi danh sách "chưa lên thuế" dù needsTax
+// vẫn chưa tự bật (chờ lần quét sheet sau). Bỏ tick lại được nếu tick nhầm.
+const auditDismissSchema = z.object({ dismissed: z.boolean() });
+shipmentsRouter.patch("/tax-audit/:trackingId", authorize("trackings.update"), async (req, res) => {
+  const p = auditDismissSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await prisma.tracking.update({ where: { id: req.params.trackingId }, data: { taxAuditDismissed: p.data.dismissed } });
+  res.json({ ok: true });
 });
 
 // Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.

@@ -235,6 +235,9 @@ model Tracking {
   needsTax          Boolean       @default(false) @map("needs_tax")
   // Tick khi đã lấy được thuế từ khách - đồng bộ hiển thị giữa trang Chứng từ và Orders/PayLaterOrders.
   taxCollected      Boolean       @default(false) @map("tax_collected")
+  // Tick thủ công ở "Soát theo tháng" khi đã bổ sung tracking này vào sheet nháp kho (đang chờ needsTax
+  // tự bật ở lần quét sau) - ẩn khỏi danh sách "chưa lên thuế" dù needsTax vẫn false, tránh lặp lại việc đã xử lý.
+  taxAuditDismissed Boolean       @default(false) @map("tax_audit_dismissed")
   status            String        @default("new")
   createdAt         DateTime      @default(now()) @map("created_at")
   order             Order?        @relation(fields: [orderId], references: [id])

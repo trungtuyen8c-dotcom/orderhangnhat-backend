@@ -382,19 +382,19 @@ function looksYellow(bg?: { red?: number; green?: number; blue?: number }): bool
 // Đọc sheet nháp kho ("invoice test") -> lấy các dòng đang tô vàng (cần lấy thuế), dùng cho tính năng
 // Chứng từ hải quan. Sheet là 1 khối liên tục do kho tự đóng gói, KHÔNG lọc theo ngày - "vàng" là do kho tự
 // tô tay ngay trước khi chốt nộp hải quan, độc lập với ngày hóa đơn user nhập lúc upload chứng từ.
-export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
+export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string; itemName: string; price: number | null; bill: string | null }[]> {
   if (!saEnabled()) return [];
   const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets.properties(title)")}`, "GET")) as { sheets?: { properties: { title: string } }[] };
   const tabs = (meta.sheets ?? []).map((s) => s.properties.title);
   const fields = "sheets(data(rowData(values(formattedValue,userEnteredFormat.backgroundColor))))";
-  const out: { trackingCode: string; itemName: string; price: number | null }[] = [];
+  const out: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[] = [];
   for (const tab of tabs) {
     const esc = tab.replace(/'/g, "''");
     const data = (await apiSheet(sid, `?ranges=${encodeURIComponent(`'${esc}'!A1:Z3000`)}&fields=${encodeURIComponent(fields)}`, "GET")) as {
       sheets?: { data?: { rowData?: { values?: { formattedValue?: string; userEnteredFormat?: { backgroundColor?: { red?: number; green?: number; blue?: number } } }[] }[] }[] }[];
     };
     const rows = data.sheets?.[0]?.data?.[0]?.rowData ?? [];
-    let trackingCol = -1, nameCol = -1, priceCol = -1, headerRow = -1;
+    let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
     for (let i = 0; i < rows.length; i++) {
       const cells = rows[i]?.values ?? [];
       const idx = cells.findIndex((c) => (c.formattedValue ?? "").trim().toUpperCase().includes("TRACKING"));
@@ -403,6 +403,7 @@ export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: s
         headerRow = i;
         nameCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Tên hàng hóa");
         priceCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Giá tiền");
+        billCol = cells.findIndex((c) => (c.formattedValue ?? "").trim().toUpperCase() === "BILL");
         break;
       }
     }
@@ -415,7 +416,15 @@ export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: s
       if (!looksYellow(codeCell?.userEnteredFormat?.backgroundColor)) continue;
       const itemName = nameCol >= 0 ? (cells[nameCol]?.formattedValue ?? "").trim() : "";
       const priceRaw = priceCol >= 0 ? (cells[priceCol]?.formattedValue ?? "").replace(/[^\d.-]/g, "") : "";
-      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
+      // Đọc cột BILL của đúng dòng; nếu trống (có sheet chỉ điền BILL ở đầu mỗi nhóm) thì dò ngược lên dòng gần nhất có giá trị.
+      let bill: string | null = null;
+      if (billCol >= 0) {
+        for (let j = i; j > headerRow; j--) {
+          const v = (rows[j]?.values?.[billCol]?.formattedValue ?? "").trim();
+          if (v) { bill = v; break; }
+        }
+      }
+      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
     }
   }
   return out;
@@ -435,12 +444,12 @@ function safeText(cell: ExcelJS.Cell): string {
 
 // Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
 // quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
-export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
+export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string; itemName: string; price: number | null; bill: string | null }[]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as any);
-  const out: { trackingCode: string; itemName: string; price: number | null }[] = [];
+  const out: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[] = [];
   wb.eachSheet((sheet) => {
-    let trackingCol = -1, nameCol = -1, priceCol = -1, headerRow = -1;
+    let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
     for (let r = 1; r <= sheet.rowCount && headerRow < 0; r++) {
       const row = sheet.getRow(r);
       for (let c = 1; c <= row.cellCount; c++) {
@@ -453,6 +462,7 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
       const v = safeText(hRow.getCell(c));
       if (v === "Tên hàng hóa") nameCol = c;
       if (v === "Giá tiền") priceCol = c;
+      if (v.toUpperCase() === "BILL") billCol = c;
     }
     for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
@@ -463,7 +473,15 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
       if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
       const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
       const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
-      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
+      // Đọc BILL đúng dòng; nếu trống thì dò ngược lên dòng gần nhất có giá trị (sheet chỉ điền BILL ở đầu nhóm).
+      let bill: string | null = null;
+      if (billCol > 0) {
+        for (let j = r; j > headerRow; j--) {
+          const v = safeText(sheet.getRow(j).getCell(billCol));
+          if (v) { bill = v; break; }
+        }
+      }
+      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
     }
   });
   return out;

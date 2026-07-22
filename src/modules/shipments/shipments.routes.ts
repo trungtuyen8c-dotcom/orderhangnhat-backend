@@ -44,7 +44,7 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null };
+type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null; bill: string | null };
 
 // Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
 // cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
@@ -58,7 +58,7 @@ function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName
 
 // Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
 // cho cả /tax-rows (nguồn sheet cấu hình sẵn) và /documents/scan-tax (nguồn file upload trực tiếp).
-async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null }[]): Promise<TaxRowOut[]> {
+async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[]): Promise<TaxRowOut[]> {
   const codes = [...new Set(sheetRows.map((r) => r.trackingCode))];
   if (!codes.length) return [];
   const [trks, notes] = await Promise.all([
@@ -78,13 +78,13 @@ async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string;
     const note = noteByCode.get(r.trackingCode) ?? null;
     const matches = byCode.get(r.trackingCode) ?? [];
     if (!matches.length) {
-      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note }];
+      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note, bill: r.bill }];
     }
     return matches.map((t) => ({
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,
       taxCollected: t.taxCollected, unmatched: false,
-      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note,
+      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note, bill: r.bill,
     }));
   });
 }
@@ -117,7 +117,7 @@ shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) =
 // Quét file Excel chứng từ GA (loại "tax") upload trực tiếp -> đọc dòng vàng + khớp Tracking, KHÔNG lưu file.
 shipmentsRouter.post("/documents/scan-tax", authorize("shipments.upload_doc"), upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "BAD_REQUEST" });
-  let sheetRows: { trackingCode: string; itemName: string; price: number | null }[];
+  let sheetRows: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[];
   try { sheetRows = await readInvoiceTaxRowsFromExcel(req.file.buffer); }
   catch { return res.status(400).json({ error: "BAD_FILE", message: "Không đọc được file Excel" }); }
   res.json(await matchTaxRows(sheetRows));

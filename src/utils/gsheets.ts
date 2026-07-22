@@ -483,6 +483,22 @@ function fillToRgb01(
 const NAME_HEADERS = ["Tên hàng hóa", "Item Name"];
 const PRICE_HEADERS = ["Giá tiền", "Unit Price(JPY)", "Unit Price (JPY)"];
 
+// File hải quan dạng GB.xxx không có cột BILL riêng, nhưng có ô "Invoice No: GB-xxxxxx" ở đầu trang
+// -> dùng tạm làm mã Bill hiển thị (thay vì để trống) khi fallback quét theo tên.
+function findInvoiceNo(sheet: ExcelJS.Worksheet): string | null {
+  for (let r = 1; r <= Math.min(sheet.rowCount, 15); r++) {
+    const row = sheet.getRow(r);
+    for (let c = 1; c <= row.cellCount; c++) {
+      if (!/invoice\s*no/i.test(safeText(row.getCell(c)))) continue;
+      for (let c2 = c + 1; c2 <= row.cellCount; c2++) {
+        const v2 = safeText(row.getCell(c2));
+        if (v2 && !/invoice\s*no/i.test(v2)) return v2;
+      }
+    }
+  }
+  return null;
+}
+
 // Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
 // quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
 // Sheet không có cột TRACKING (vd file hải quan GB.xxx chỉ có Tên hàng + Giá) -> fallback quét theo TÊN
@@ -540,6 +556,7 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
       }
     }
     if (nameCol < 0 || priceCol < 0) return;
+    const invoiceNo = findInvoiceNo(sheet);
     for (let r = nameHeaderRow + 1; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
       const nameCell = row.getCell(nameCol);
@@ -548,7 +565,7 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
       const fill = nameCell.fill as { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined;
       if (!looksYellow(fillToRgb01(fill, palette))) continue;
       const priceRaw = safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "");
-      out.push({ trackingCode: null, itemName, price: priceRaw ? Number(priceRaw) : null, bill: null });
+      out.push({ trackingCode: null, itemName, price: priceRaw ? Number(priceRaw) : null, bill: invoiceNo });
     }
   });
   return out;

@@ -287,13 +287,40 @@ shipmentsRouter.put("/invoice-checklist/:key", authorize("trackings.update"), as
   res.json({ ok: true });
 });
 
+// Mã tracking needsTax=true (tự set ngay lúc đóng hàng, không cần tô vàng) nhưng CHƯA từng quét thấy trên
+// sheet/file (chưa có tên hàng/giá cụ thể) - lấy tạm tên/giá từ chính đơn hàng trong hệ thống để vẫn hiện
+// ra bảng, không phải chờ ai đó tô vàng thủ công mới thấy.
+async function buildExtraNeedsTaxRows(shownTrackingIds: Set<string>): Promise<TaxRowOut[]> {
+  const trks = await prisma.tracking.findMany({
+    where: { needsTax: true, taxCollected: false, id: { notIn: [...shownTrackingIds] } },
+    include: { order: { include: { customer: { select: { name: true } }, items: true } }, carton: true },
+  });
+  if (!trks.length) return [];
+  const codes = [...new Set(trks.map((t) => t.code))];
+  const notes = await prisma.taxRowNote.findMany({ where: { trackingCode: { in: codes } } });
+  const noteByCode = new Map(notes.map((n) => [n.trackingCode, n.note]));
+  return trks.map((t): TaxRowOut => {
+    const items = t.order?.items ?? [];
+    const itemName = items.map((i) => i.name).join(" + ") || "(chưa quét chi tiết)";
+    const price = items.length ? items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0) : null;
+    return {
+      trackingId: t.id, trackingCode: t.code, itemName, priceJpy: price,
+      orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,
+      taxCollected: t.taxCollected, unmatched: !t.order, purchaseUrl: items.length ? pickPurchaseUrl(items, itemName) : null,
+      packedAt: t.packedAt ? t.packedAt.toISOString() : null, note: noteByCode.get(t.code) ?? null,
+      bill: t.carton ? (t.carton.code.split(" ")[0] || t.carton.code) : null, matchedBy: t.order ? "tracking" : null, suggestion: null,
+    };
+  });
+}
+
 // Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.
 shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) => {
   const cfg = await prisma.appConfig.findUnique({ where: { key: "invoice_tax_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
-  if (!sid) return res.json([]);
-  const sheetRows = await readInvoiceTaxRows(sid);
-  res.json(await matchTaxRows(sheetRows));
+  const sheetRows = sid ? await readInvoiceTaxRows(sid) : [];
+  const rows = await matchTaxRows(sheetRows);
+  const shownIds = new Set(rows.filter((r) => r.trackingId).map((r) => r.trackingId!));
+  res.json([...rows, ...(await buildExtraNeedsTaxRows(shownIds))]);
 });
 
 // Quét file Excel chứng từ GA (loại "tax") upload trực tiếp -> đọc dòng vàng + khớp Tracking, KHÔNG lưu file.

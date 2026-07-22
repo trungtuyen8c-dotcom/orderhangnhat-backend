@@ -44,7 +44,8 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-type TaxRowOut = { trackingId: string | null; trackingCode: string | null; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null; bill: string | null; matchedBy: "tracking" | "name" | null };
+type TaxSuggestion = { orderCode: string; customerName: string | null; nick: string | null; similarity: number };
+type TaxRowOut = { trackingId: string | null; trackingCode: string | null; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null; bill: string | null; matchedBy: "tracking" | "name" | null; suggestion: TaxSuggestion | null };
 
 // Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
 // cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
@@ -63,6 +64,32 @@ function findByName<T extends { name: string }>(candidates: T[], itemName: strin
   const target = normName(itemName);
   if (!target) return null;
   return candidates.find((i) => { const n = normName(i.name); return n === target || n.includes(target) || target.includes(n); }) ?? null;
+}
+
+// Gợi ý "gần đúng" khi không khớp chính xác/chứa nhau - Dice coefficient trên bigram ký tự, đủ rẻ để
+// so với hàng nghìn OrderItem trong 1 request. Không tự áp dụng - chỉ gợi ý, nhân viên bấm xác nhận ở FE.
+function bigrams(s: string): Set<string> {
+  const out = new Set<string>();
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+  return out;
+}
+function diceSimilarity(a: string, b: string): number {
+  const A = bigrams(a), B = bigrams(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const g of A) if (B.has(g)) inter++;
+  return (2 * inter) / (A.size + B.size);
+}
+const FUZZY_THRESHOLD = 0.5;
+function suggestByName<T extends { name: string }>(candidates: T[], itemName: string): { item: T; similarity: number } | null {
+  const target = normName(itemName);
+  if (target.length < 4) return null;
+  let best: { item: T; similarity: number } | null = null;
+  for (const c of candidates) {
+    const sim = diceSimilarity(target, normName(c.name));
+    if (sim >= FUZZY_THRESHOLD && (!best || sim > best.similarity)) best = { item: c, similarity: sim };
+  }
+  return best;
 }
 
 // Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
@@ -98,23 +125,29 @@ async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: 
     const note = noteByCode.get(code) ?? null;
     const matches = byCode.get(code) ?? [];
     if (!matches.length) {
-      return [{ trackingId: null, trackingCode: code, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note, bill: r.bill, matchedBy: null }];
+      return [{ trackingId: null, trackingCode: code, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note, bill: r.bill, matchedBy: null, suggestion: null }];
     }
     return matches.map((t) => ({
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,
       taxCollected: t.taxCollected, unmatched: false,
-      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note, bill: r.bill, matchedBy: "tracking",
+      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note, bill: r.bill, matchedBy: "tracking", suggestion: null,
     }));
   });
 
   const nameOut: TaxRowOut[] = nameRows.map((r): TaxRowOut => {
     const hit = findByName(nameCandidates, r.itemName);
-    if (!hit) return { trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: null };
+    if (!hit) {
+      const sug = suggestByName(nameCandidates, r.itemName);
+      const suggestion: TaxSuggestion | null = sug
+        ? { orderCode: sug.item.order.code, customerName: sug.item.order.customer?.name ?? null, nick: sug.item.order.nick ?? null, similarity: Math.round(sug.similarity * 100) }
+        : null;
+      return { trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: null, suggestion };
+    }
     return {
       trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price,
       orderCode: hit.order.code, customerName: hit.order.customer?.name ?? null, nick: hit.order.nick ?? null,
-      taxCollected: false, unmatched: false, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: "name",
+      taxCollected: false, unmatched: false, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: "name", suggestion: null,
     };
   });
 

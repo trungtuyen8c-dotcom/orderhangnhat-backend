@@ -382,12 +382,12 @@ function looksYellow(bg?: { red?: number; green?: number; blue?: number }): bool
 // Đọc sheet nháp kho ("invoice test") -> lấy các dòng đang tô vàng (cần lấy thuế), dùng cho tính năng
 // Chứng từ hải quan. Sheet là 1 khối liên tục do kho tự đóng gói, KHÔNG lọc theo ngày - "vàng" là do kho tự
 // tô tay ngay trước khi chốt nộp hải quan, độc lập với ngày hóa đơn user nhập lúc upload chứng từ.
-export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string; itemName: string; price: number | null; bill: string | null }[]> {
+export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]> {
   if (!saEnabled()) return [];
   const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets.properties(title)")}`, "GET")) as { sheets?: { properties: { title: string } }[] };
   const tabs = (meta.sheets ?? []).map((s) => s.properties.title);
   const fields = "sheets(data(rowData(values(formattedValue,userEnteredFormat.backgroundColor))))";
-  const out: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[] = [];
+  const out: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[] = [];
   for (const tab of tabs) {
     const esc = tab.replace(/'/g, "''");
     const data = (await apiSheet(sid, `?ranges=${encodeURIComponent(`'${esc}'!A1:Z3000`)}&fields=${encodeURIComponent(fields)}`, "GET")) as {
@@ -442,12 +442,17 @@ function safeText(cell: ExcelJS.Cell): string {
   try { return (cell.text ?? "").trim(); } catch { return ""; }
 }
 
+const NAME_HEADERS = ["Tên hàng hóa", "Item Name"];
+const PRICE_HEADERS = ["Giá tiền", "Unit Price(JPY)", "Unit Price (JPY)"];
+
 // Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
 // quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
-export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string; itemName: string; price: number | null; bill: string | null }[]> {
+// Sheet không có cột TRACKING (vd file hải quan GB.xxx chỉ có Tên hàng + Giá) -> fallback quét theo TÊN
+// (trackingCode=null), matchTaxRows sẽ thử khớp tên với OrderItem - kém chắc chắn hơn khớp mã, cần xác nhận lại.
+export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as any);
-  const out: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[] = [];
+  const out: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[] = [];
   wb.eachSheet((sheet) => {
     let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
     for (let r = 1; r <= sheet.rowCount && headerRow < 0; r++) {
@@ -456,32 +461,55 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
         if (safeText(row.getCell(c)).toUpperCase().includes("TRACKING")) { trackingCol = c; headerRow = r; break; }
       }
     }
-    if (trackingCol < 0) return;
-    const hRow = sheet.getRow(headerRow);
-    for (let c = 1; c <= hRow.cellCount; c++) {
-      const v = safeText(hRow.getCell(c));
-      if (v === "Tên hàng hóa") nameCol = c;
-      if (v === "Giá tiền") priceCol = c;
-      if (v.toUpperCase() === "BILL") billCol = c;
-    }
-    for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
-      const row = sheet.getRow(r);
-      const codeCell = row.getCell(trackingCol);
-      const code = safeText(codeCell);
-      if (!isTrackingCode(code)) continue;
-      const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
-      if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
-      const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
-      const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
-      // Đọc BILL đúng dòng; nếu trống thì dò ngược lên dòng gần nhất có giá trị (sheet chỉ điền BILL ở đầu nhóm).
-      let bill: string | null = null;
-      if (billCol > 0) {
-        for (let j = r; j > headerRow; j--) {
-          const v = safeText(sheet.getRow(j).getCell(billCol));
-          if (v) { bill = v; break; }
-        }
+    if (trackingCol >= 0) {
+      const hRow = sheet.getRow(headerRow);
+      for (let c = 1; c <= hRow.cellCount; c++) {
+        const v = safeText(hRow.getCell(c));
+        if (NAME_HEADERS.includes(v)) nameCol = c;
+        if (PRICE_HEADERS.includes(v)) priceCol = c;
+        if (v.toUpperCase() === "BILL") billCol = c;
       }
-      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
+      for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
+        const row = sheet.getRow(r);
+        const codeCell = row.getCell(trackingCol);
+        const code = safeText(codeCell);
+        if (!isTrackingCode(code)) continue;
+        const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
+        if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
+        const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
+        const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
+        // Đọc BILL đúng dòng; nếu trống thì dò ngược lên dòng gần nhất có giá trị (sheet chỉ điền BILL ở đầu nhóm).
+        let bill: string | null = null;
+        if (billCol > 0) {
+          for (let j = r; j > headerRow; j--) {
+            const v = safeText(sheet.getRow(j).getCell(billCol));
+            if (v) { bill = v; break; }
+          }
+        }
+        out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
+      }
+      return;
+    }
+    // Không có cột TRACKING -> tìm cột Tên hàng + Giá, quét dòng tô vàng trên cột Tên hàng (fallback khớp tên).
+    let nameHeaderRow = -1;
+    for (let r = 1; r <= sheet.rowCount && nameHeaderRow < 0; r++) {
+      const row = sheet.getRow(r);
+      for (let c = 1; c <= row.cellCount; c++) {
+        const v = safeText(row.getCell(c));
+        if (NAME_HEADERS.includes(v)) { nameCol = c; nameHeaderRow = r; }
+        if (PRICE_HEADERS.includes(v)) priceCol = c;
+      }
+    }
+    if (nameCol < 0 || priceCol < 0) return;
+    for (let r = nameHeaderRow + 1; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      const nameCell = row.getCell(nameCol);
+      const itemName = safeText(nameCell);
+      if (!itemName) continue;
+      const fill = nameCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
+      if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
+      const priceRaw = safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "");
+      out.push({ trackingCode: null, itemName, price: priceRaw ? Number(priceRaw) : null, bill: null });
     }
   });
   return out;

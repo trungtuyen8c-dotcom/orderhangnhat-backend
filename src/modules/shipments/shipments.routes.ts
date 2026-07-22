@@ -44,7 +44,7 @@ shipmentsRouter.put("/tax-config", authorize("system.manage_settings"), async (r
   res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
 });
 
-type TaxRowOut = { trackingId: string | null; trackingCode: string; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null; bill: string | null };
+type TaxRowOut = { trackingId: string | null; trackingCode: string | null; itemName: string; priceJpy: number | null; orderCode: string | null; customerName: string | null; nick: string | null; taxCollected: boolean; unmatched: boolean; purchaseUrl: string | null; packedAt: string | null; note: string | null; bill: string | null; matchedBy: "tracking" | "name" | null };
 
 // Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
 // cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
@@ -56,17 +56,35 @@ function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName
   return items.find((i) => i.url)?.url ?? null;
 }
 
+const normName = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+// Khớp theo tên khi dòng vàng không có mã tracking (vd file hải quan GB.xxx chỉ có tên hàng, không mang tracking).
+// Kém chắc chắn hơn khớp mã (nhiều đơn có thể trùng/gần giống tên) - FE đánh dấu riêng để nhân viên xác nhận lại.
+function findByName<T extends { name: string }>(candidates: T[], itemName: string): T | null {
+  const target = normName(itemName);
+  if (!target) return null;
+  return candidates.find((i) => { const n = normName(i.name); return n === target || n.includes(target) || target.includes(n); }) ?? null;
+}
+
 // Khớp danh sách dòng vàng (đọc từ Google Sheet hoặc từ file Excel upload) với bảng Tracking - dùng chung
 // cho cả /tax-rows (nguồn sheet cấu hình sẵn) và /documents/scan-tax (nguồn file upload trực tiếp).
-async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[]): Promise<TaxRowOut[]> {
-  const codes = [...new Set(sheetRows.map((r) => r.trackingCode))];
-  if (!codes.length) return [];
-  const [trks, notes] = await Promise.all([
+async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]): Promise<TaxRowOut[]> {
+  if (!sheetRows.length) return [];
+  const codeRows = sheetRows.filter((r) => r.trackingCode);
+  const nameRows = sheetRows.filter((r) => !r.trackingCode);
+  const codes = [...new Set(codeRows.map((r) => r.trackingCode!))];
+  const [trks, notes, nameCandidates] = await Promise.all([
     prisma.tracking.findMany({
       where: { code: { in: codes } },
       include: { order: { include: { customer: { select: { name: true } }, items: true } } },
     }),
     prisma.taxRowNote.findMany({ where: { trackingCode: { in: codes } } }),
+    nameRows.length
+      ? prisma.orderItem.findMany({
+          where: { order: { status: { not: "cancelled" }, createdAt: { gte: new Date(Date.now() - 180 * 86400000) } } },
+          select: { name: true, order: { select: { code: true, nick: true, customer: { select: { name: true } } } } },
+          take: 5000,
+        })
+      : Promise.resolve([]),
   ]);
   // Đánh dấu needsTax=true cho tracking khớp được (không tự tắt lại nếu dòng hết vàng sau này - giữ lịch sử đã từng cần lấy thuế).
   const toFlag = trks.filter((t) => !t.needsTax).map((t) => t.id);
@@ -74,19 +92,33 @@ async function matchTaxRows(sheetRows: { trackingCode: string; itemName: string;
   const byCode = new Map<string, typeof trks>();
   for (const t of trks) { const arr = byCode.get(t.code) ?? []; arr.push(t); byCode.set(t.code, arr); }
   const noteByCode = new Map(notes.map((n) => [n.trackingCode, n.note]));
-  return sheetRows.flatMap((r): TaxRowOut[] => {
-    const note = noteByCode.get(r.trackingCode) ?? null;
-    const matches = byCode.get(r.trackingCode) ?? [];
+
+  const codeOut: TaxRowOut[] = codeRows.flatMap((r): TaxRowOut[] => {
+    const code = r.trackingCode!;
+    const note = noteByCode.get(code) ?? null;
+    const matches = byCode.get(code) ?? [];
     if (!matches.length) {
-      return [{ trackingId: null, trackingCode: r.trackingCode, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note, bill: r.bill }];
+      return [{ trackingId: null, trackingCode: code, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note, bill: r.bill, matchedBy: null }];
     }
     return matches.map((t) => ({
       trackingId: t.id, trackingCode: t.code, itemName: r.itemName, priceJpy: r.price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,
       taxCollected: t.taxCollected, unmatched: false,
-      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note, bill: r.bill,
+      purchaseUrl: pickPurchaseUrl(t.order?.items ?? [], r.itemName), packedAt: t.packedAt ? t.packedAt.toISOString() : null, note, bill: r.bill, matchedBy: "tracking",
     }));
   });
+
+  const nameOut: TaxRowOut[] = nameRows.map((r): TaxRowOut => {
+    const hit = findByName(nameCandidates, r.itemName);
+    if (!hit) return { trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: null };
+    return {
+      trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price,
+      orderCode: hit.order.code, customerName: hit.order.customer?.name ?? null, nick: hit.order.nick ?? null,
+      taxCollected: false, unmatched: false, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: "name",
+    };
+  });
+
+  return [...codeOut, ...nameOut];
 }
 
 // Ghi chú thủ công theo mã tracking (vd mã seller ghi sai, đang chờ mở hàng xác minh) - không tự gán đơn.
@@ -117,7 +149,7 @@ shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) =
 // Quét file Excel chứng từ GA (loại "tax") upload trực tiếp -> đọc dòng vàng + khớp Tracking, KHÔNG lưu file.
 shipmentsRouter.post("/documents/scan-tax", authorize("shipments.upload_doc"), upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "BAD_REQUEST" });
-  let sheetRows: { trackingCode: string; itemName: string; price: number | null; bill: string | null }[];
+  let sheetRows: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[];
   try { sheetRows = await readInvoiceTaxRowsFromExcel(req.file.buffer); }
   catch { return res.status(400).json({ error: "BAD_FILE", message: "Không đọc được file Excel" }); }
   res.json(await matchTaxRows(sheetRows));

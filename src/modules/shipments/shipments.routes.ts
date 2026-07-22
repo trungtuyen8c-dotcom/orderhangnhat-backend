@@ -243,6 +243,50 @@ shipmentsRouter.patch("/tax-audit/:trackingId", authorize("trackings.update"), a
   res.json({ ok: true });
 });
 
+// Danh sách Bill theo ngày trong tháng (từ Carton, code dạng "BILL Thùng" - vd "GE 1") kèm trạng thái
+// "đã lấy hóa đơn" - hóa đơn/biên lai vẫn lưu ở Google Drive (Tháng>Ngày>Bill), đây chỉ theo dõi đã-lấy-chưa.
+shipmentsRouter.get("/invoice-checklist", authorize("shipments.list"), async (req, res) => {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(req.query.month ?? ""));
+  if (!m) return res.status(400).json({ error: "BAD_REQUEST" });
+  const start = new Date(Number(m[1]), Number(m[2]) - 1, 1);
+  const end = new Date(Number(m[1]), Number(m[2]), 1);
+  const cartons = await prisma.carton.findMany({
+    where: { packedDate: { gte: start, lt: end } },
+    select: { code: true, packedDate: true, trackings: { select: { id: true } } },
+  });
+  const groups = new Map<string, { date: string; bill: string; cartonCount: number; trackingCount: number }>();
+  for (const c of cartons) {
+    if (!c.packedDate) continue;
+    const bill = c.code.split(" ")[0] || c.code;
+    const date = c.packedDate.toISOString().slice(0, 10);
+    const key = `${date}|${bill}`;
+    const g = groups.get(key) ?? { date, bill, cartonCount: 0, trackingCount: 0 };
+    g.cartonCount += 1;
+    g.trackingCount += c.trackings.length;
+    groups.set(key, g);
+  }
+  const keys = [...groups.keys()];
+  const statuses = keys.length ? await prisma.billInvoiceStatus.findMany({ where: { key: { in: keys } } }) : [];
+  const doneSet = new Set(statuses.filter((s) => s.done).map((s) => s.key));
+  const rows = [...groups.entries()]
+    .map(([key, g]) => ({ key, ...g, done: doneSet.has(key) }))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.bill.localeCompare(b.bill));
+  res.json(rows);
+});
+
+const invoiceDoneSchema = z.object({ done: z.boolean() });
+shipmentsRouter.put("/invoice-checklist/:key", authorize("trackings.update"), async (req, res) => {
+  const p = invoiceDoneSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const key = decodeURIComponent(req.params.key);
+  await prisma.billInvoiceStatus.upsert({
+    where: { key },
+    update: { done: p.data.done, updatedBy: req.user!.id },
+    create: { key, done: p.data.done, updatedBy: req.user!.id },
+  });
+  res.json({ ok: true });
+});
+
 // Các dòng đang tô vàng trên sheet nháp kho ("cần lấy thuế") - khớp theo Mã TRACKING với hệ thống.
 shipmentsRouter.get("/tax-rows", authorize("shipments.list"), async (req, res) => {
   const cfg = await prisma.appConfig.findUnique({ where: { key: "invoice_tax_sheet_id" } });

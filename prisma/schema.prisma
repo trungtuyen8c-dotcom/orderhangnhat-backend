@@ -452,6 +452,17 @@ model TaxRowNote {
   @@map("tax_row_notes")
 }
 
+// Tick "đã lấy hóa đơn" (biên lai mua hàng, lưu ngoài Google Drive theo Tháng>Ngày>Bill) theo từng Bill
+// trong 1 ngày đóng hàng - key = "YYYY-MM-DD|BILL". Chỉ lưu trạng thái, không lưu file (file vẫn ở Drive).
+model BillInvoiceStatus {
+  key       String   @id
+  done      Boolean  @default(false)
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@map("bill_invoice_status")
+}
+
 model BackupRun {
   id          String    @id @default(uuid()) @db.Uuid
   kind        String    @default("manual") // manual | scheduled

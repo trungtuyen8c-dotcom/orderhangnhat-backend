@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
@@ -442,6 +443,43 @@ function safeText(cell: ExcelJS.Cell): string {
   try { return (cell.text ?? "").trim(); } catch { return ""; }
 }
 
+// Bảng màu "indexed" mặc định của OOXML (64 màu). File Numbers xuất ra thường ghi đè bảng này bằng
+// <indexedColors> riêng trong xl/styles.xml (vd index 14 = vàng thay vì tím) - ExcelJS không tự tra bảng
+// ghi đè này, chỉ trả về số index thô, nên phải tự đọc styles.xml để map đúng màu thật của từng file.
+const DEFAULT_INDEXED_COLORS = [
+  "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
+  "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
+  "800000", "008000", "000080", "808000", "800080", "008080", "C0C0C0", "808080",
+  "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
+  "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF",
+  "00CCFF", "CCFFFF", "CCFFCC", "FFFF99", "99CCFF", "FF99CC", "CC99FF", "FFCC99",
+  "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
+  "003366", "339966", "003300", "333300", "993300", "993366", "333399", "333333",
+];
+
+async function loadIndexedPalette(buffer: Buffer): Promise<string[]> {
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const block = stylesXml?.match(/<indexedColors>([\s\S]*?)<\/indexedColors>/)?.[1];
+    if (!block) return DEFAULT_INDEXED_COLORS;
+    const colors = [...block.matchAll(/rgb="([0-9a-fA-F]{6,8})"/g)].map((m) => m[1].slice(-6));
+    return colors.length ? colors : DEFAULT_INDEXED_COLORS;
+  } catch {
+    return DEFAULT_INDEXED_COLORS;
+  }
+}
+
+function fillToRgb01(
+  fill: { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined,
+  palette: string[],
+): { red: number; green: number; blue: number } | undefined {
+  if (fill?.type !== "pattern") return undefined;
+  if (fill.fgColor?.argb) return argbToRgb01(fill.fgColor.argb);
+  if (fill.fgColor?.indexed !== undefined) return argbToRgb01(palette[fill.fgColor.indexed]);
+  return undefined;
+}
+
 const NAME_HEADERS = ["Tên hàng hóa", "Item Name"];
 const PRICE_HEADERS = ["Giá tiền", "Unit Price(JPY)", "Unit Price (JPY)"];
 
@@ -452,6 +490,7 @@ const PRICE_HEADERS = ["Giá tiền", "Unit Price(JPY)", "Unit Price (JPY)"];
 export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as any);
+  const palette = await loadIndexedPalette(buffer);
   const out: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[] = [];
   wb.eachSheet((sheet) => {
     let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
@@ -474,8 +513,8 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
         const codeCell = row.getCell(trackingCol);
         const code = safeText(codeCell);
         if (!isTrackingCode(code)) continue;
-        const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
-        if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
+        const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined;
+        if (!looksYellow(fillToRgb01(fill, palette))) continue;
         const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
         const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
         // Đọc BILL đúng dòng; nếu trống thì dò ngược lên dòng gần nhất có giá trị (sheet chỉ điền BILL ở đầu nhóm).
@@ -506,8 +545,8 @@ export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ tra
       const nameCell = row.getCell(nameCol);
       const itemName = safeText(nameCell);
       if (!itemName) continue;
-      const fill = nameCell.fill as { type?: string; fgColor?: { argb?: string } } | undefined;
-      if (!looksYellow(argbToRgb01(fill?.type === "pattern" ? fill.fgColor?.argb : undefined))) continue;
+      const fill = nameCell.fill as { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined;
+      if (!looksYellow(fillToRgb01(fill, palette))) continue;
       const priceRaw = safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "");
       out.push({ trackingCode: null, itemName, price: priceRaw ? Number(priceRaw) : null, bill: null });
     }

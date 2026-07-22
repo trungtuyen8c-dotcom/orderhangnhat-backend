@@ -172,6 +172,16 @@ async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: 
     const found = nameNoteByKey.get(nameRowKey(r.bill, r.orderCode, r.itemName));
     if (found) { r.note = found.note || null; r.taxCollected = found.taxCollected; }
   }
+  // Đăng ký sẵn (taxCollected=false) cho dòng khớp theo tên vừa thấy lần đầu - để tồn tại lâu dài, không
+  // phụ thuộc quét lại đúng file đó. Cho phép xử lý rải rác nhiều ngày (vd lọc theo Nick, gom 1 tuần 1 lần)
+  // mà vẫn được /control/overview đếm nhắc, không rơi mất khi quét file khác.
+  const missingKeys = [...new Set(
+    nameOut.filter((r) => !r.unmatched && !nameNoteByKey.has(nameRowKey(r.bill, r.orderCode, r.itemName)))
+      .map((r) => nameRowKey(r.bill, r.orderCode, r.itemName)),
+  )];
+  if (missingKeys.length) {
+    await prisma.taxRowNote.createMany({ data: missingKeys.map((k) => ({ trackingCode: k, note: "", taxCollected: false })), skipDuplicates: true });
+  }
 
   return [...codeOut, ...nameOut];
 }

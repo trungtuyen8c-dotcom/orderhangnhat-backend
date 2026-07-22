@@ -670,7 +670,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const c of codes) {
     if (knownCodes.has(c)) continue;
     const packedAt = dateByCode.get(c) ?? new Date();
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt) } });
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt), needsTax: true } });
     trks.push({ ...created, order: null } as (typeof trks)[number]);
   }
 
@@ -683,7 +683,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     if (t.packedAt) continue;
     const packedAt = dateByCode.get(t.code) ?? new Date();
     const lateAfterLock = isLocked(packedAt);
-    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock } });
+    // Mọi mã đóng hàng đều cần lấy thuế 100% - tự set needsTax ngay lúc quét kho, không cần tô vàng thủ công nữa.
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock, needsTax: true } });
     t.lateAfterLock = lateAfterLock;
     void syncTracking({ ...t, packedAt } as TrackingRow);
     updated++;
@@ -940,12 +941,17 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); gán kiện theo BILL/thùng ngay bên dưới nếu có gửi kèm.
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked } });
+    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked, needsTax: true } });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
     single = t;
   }
-  if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
+  // Mọi mã đóng hàng đều cần lấy thuế 100% - tự set needsTax ngay lúc kho gõ mã, không cần tô vàng thủ công nữa.
+  if (!t.packedAt || !t.needsTax) {
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked, needsTax: true } });
+    t.lateAfterLock = locked;
+    t.needsTax = true;
+  }
   if (row && group.length === 1 && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
 
   // Gán kiện (BILL/Thùng) ngay tức thì, không đợi cron 2 phút - trừ khi tracking đã cartonManual (gán/gỡ tay).

@@ -3,6 +3,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { randomUUID } from "crypto";
 import { config } from "./config.js";
+import { prisma } from "./db.js";
 import { ensureBucket } from "./minio.js";
 import { startJobs } from "./jobs/alerts.js";
 import { logger } from "./logger.js";
@@ -59,6 +60,10 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
 
 app.listen(config.port, async () => {
   await ensureBucket();
+  // Mọi mã tracking đã đóng hàng đều cần lấy thuế 100% (không phân biệt) - backfill 1 lần cho dữ liệu cũ
+  // đóng hàng trước khi cờ needsTax được set tự động ngay lúc quét kho (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
+  try { await prisma.tracking.updateMany({ where: { packedAt: { not: null }, needsTax: false }, data: { needsTax: true } }); }
+  catch (e) { console.error("[startup] backfill needsTax", (e as Error).message); }
   startJobs();
   console.log(`API listening on :${config.port}`);
 });

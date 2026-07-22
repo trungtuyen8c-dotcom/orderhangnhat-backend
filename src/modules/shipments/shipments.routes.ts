@@ -135,21 +135,28 @@ async function matchTaxRows(sheetRows: { trackingCode: string | null; itemName: 
     }));
   });
 
-  const nameOut: TaxRowOut[] = nameRows.map((r): TaxRowOut => {
-    const hit = findByName(nameCandidates, r.itemName);
+  // Đơn nào đã có dòng khớp rồi (qua mã tracking, hoặc vừa khớp tên ở dòng trước trong cùng lượt quét) thì
+  // loại khỏi danh sách ứng viên - tránh gợi ý/khớp trùng 1 đơn cho nhiều dòng tô vàng khác nhau.
+  const claimedOrderCodes = new Set(codeOut.filter((o) => !o.unmatched && o.orderCode).map((o) => o.orderCode!));
+  const nameOut: TaxRowOut[] = [];
+  for (const r of nameRows) {
+    const available = nameCandidates.filter((c) => !claimedOrderCodes.has(c.order.code));
+    const hit = findByName(available, r.itemName);
     if (!hit) {
-      const sug = suggestByName(nameCandidates, r.itemName);
+      const sug = suggestByName(available, r.itemName);
       const suggestion: TaxSuggestion | null = sug
         ? { orderCode: sug.item.order.code, customerName: sug.item.order.customer?.name ?? null, nick: sug.item.order.nick ?? null, similarity: Math.round(sug.similarity * 100) }
         : null;
-      return { trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: null, suggestion };
+      nameOut.push({ trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price, orderCode: null, customerName: null, nick: null, taxCollected: false, unmatched: true, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: null, suggestion });
+      continue;
     }
-    return {
+    claimedOrderCodes.add(hit.order.code);
+    nameOut.push({
       trackingId: null, trackingCode: null, itemName: r.itemName, priceJpy: r.price,
       orderCode: hit.order.code, customerName: hit.order.customer?.name ?? null, nick: hit.order.nick ?? null,
       taxCollected: false, unmatched: false, purchaseUrl: null, packedAt: null, note: null, bill: r.bill, matchedBy: "name", suggestion: null,
-    };
-  });
+    });
+  }
 
   return [...codeOut, ...nameOut];
 }

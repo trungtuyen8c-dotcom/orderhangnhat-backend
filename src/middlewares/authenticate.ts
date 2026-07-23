@@ -59,5 +59,6 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     exp: payload.exp,
     roles: user.roles.map((ur) => ur.role.key),
   };
+  void redis.set(`online:${user.id}`, "1", "EX", 90);
   next();
 }

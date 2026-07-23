@@ -94,12 +94,14 @@ ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
     },
   });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
-  const [debt, documents] = await Promise.all([
+  const [debt, documents, trackingLogs] = await Promise.all([
     prisma.debt.findFirst({ where: { orderId: order.id } }),
     prisma.document.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "desc" } }),
+    // Lịch sử sửa mã tracking (kể cả sửa nhanh ở Orders, không chỉ "Xử lý lạ") - để biết đã từng đổi từ mã nào.
+    prisma.trackingLog.findMany({ where: { trackingId: { in: order.trackings.map((t) => t.id) } }, orderBy: { createdAt: "desc" } }),
   ]);
   const logs = order.logs.map((l) => ({ ...l, id: l.id.toString() }));
-  res.json({ ...order, logs, debt, documents });
+  res.json({ ...order, logs, trackingLogs: trackingLogs.map((l) => ({ ...l, id: l.id.toString() })), debt, documents });
 });
 
 const curEnum = z.enum(["JPY", "VND"]);

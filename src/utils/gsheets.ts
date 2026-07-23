@@ -1065,6 +1065,39 @@ async function findDepositHeader(sid: string, tab: string): Promise<{ row: numbe
   return null;
 }
 
+// Khóa các cột hệ thống tự ghi (Mã Link/Ngày đặt/.../TRACKING, khối TỔNG H1:H3, cột Ngày+Số tiền của sổ cọc)
+// bằng Protected Range - chỉ service account được sửa, khách/staff được share file KHÔNG sửa/xóa được các ô
+// này (cột khách tự thêm như "% Công" không đụng tới, vẫn tự do). Idempotent: chỉ add range nào chưa có
+// (so theo `description`) - tránh add trùng mỗi lần sync (mỗi lần lưu đơn/cọc/tracking đều gọi lại).
+async function protectManagedRanges(
+  sid: string,
+  gsid: number,
+  headerRow: number,
+  headerCols: Map<FieldKey, number>,
+  depHeader: { row: number; dateCol: number; amtCol: number } | null,
+): Promise<void> {
+  if (!SA_EMAIL) return;
+  const desired = new Map<string, { startRowIndex: number; endRowIndex: number; startColumnIndex: number; endColumnIndex: number }>();
+  for (const [key, col] of headerCols) desired.set(`sys:${key}`, { startRowIndex: headerRow - 1, endRowIndex: 100000, startColumnIndex: col, endColumnIndex: col + 1 });
+  desired.set("sys:total", { startRowIndex: 0, endRowIndex: 3, startColumnIndex: 7, endColumnIndex: 8 });
+  if (depHeader) {
+    desired.set("sys:dep-date", { startRowIndex: depHeader.row - 1, endRowIndex: 100000, startColumnIndex: depHeader.dateCol, endColumnIndex: depHeader.dateCol + 1 });
+    desired.set("sys:dep-amt", { startRowIndex: depHeader.row - 1, endRowIndex: 100000, startColumnIndex: depHeader.amtCol, endColumnIndex: depHeader.amtCol + 2 });
+  }
+  try {
+    const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets(properties(sheetId),protectedRanges(description))")}`, "GET")) as {
+      sheets?: { properties: { sheetId: number }; protectedRanges?: { description?: string }[] }[];
+    };
+    const existing = new Set((meta.sheets ?? []).find((s) => s.properties.sheetId === gsid)?.protectedRanges?.map((p) => p.description ?? "") ?? []);
+    const reqs = [...desired].filter(([tag]) => !existing.has(tag)).map(([tag, range]) => ({
+      addProtectedRange: { protectedRange: { range: { sheetId: gsid, ...range }, description: tag, warningOnly: false, editors: { users: [SA_EMAIL] } } },
+    }));
+    if (reqs.length) await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
+  } catch (e) {
+    console.error("[gsheets] protectManagedRanges", (e as Error).message);
+  }
+}
+
 async function runCustomerSync(customerId: string): Promise<void> {
   if (!saEnabled()) return;
   try {
@@ -1106,6 +1139,7 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
       const start = header + 1;
       const headerCols = await readHeaderColumns(sid, tab, header);
+      const gsid = await getSheetIdByTitle(sid, tab);
       for (const [key, col] of headerCols) {
         const letter = colLetter(col);
         await apiSheet(sid, `/values/${t}!${letter}${start}:${letter}100000:clear`, "POST", {});
@@ -1116,28 +1150,25 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
 
       // ----- Tô nền: "lưu kho" cam khi đang lưu kho (tự trắng khi ship), "Ngày giao" tô theo màu riêng từng ngày -----
-      if (headerCols.has("stored") || headerCols.has("deliveredAt")) {
-        const gsidColor = await getSheetIdByTitle(sid, tab);
-        if (gsidColor != null) {
-          const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
-          const WHITE = { red: 1, green: 1, blue: 1 };
-          const reqs: unknown[] = [];
-          const clearCol = (col: number) => reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } });
-          const paintCell = (col: number, i: number, bg: { red: number; green: number; blue: number }) =>
-            reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } });
+      if (gsid != null && (headerCols.has("stored") || headerCols.has("deliveredAt"))) {
+        const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
+        const WHITE = { red: 1, green: 1, blue: 1 };
+        const reqs: unknown[] = [];
+        const clearCol = (col: number) => reqs.push({ repeatCell: { range: { sheetId: gsid, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } });
+        const paintCell = (col: number, i: number, bg: { red: number; green: number; blue: number }) =>
+          reqs.push({ repeatCell: { range: { sheetId: gsid, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } });
 
-          const storedCol = headerCols.get("stored");
-          if (storedCol != null) {
-            clearCol(storedCol);
-            fieldRows.forEach((r, i) => { if (r.stored === "lưu kho") paintCell(storedCol, i, ORANGE); });
-          }
-          const deliveredCol = headerCols.get("deliveredAt");
-          if (deliveredCol != null) {
-            clearCol(deliveredCol);
-            fieldRows.forEach((r, i) => { if (typeof r.deliveredAt === "string" && r.deliveredAt) paintCell(deliveredCol, i, colorForDate(r.deliveredAt)); });
-          }
-          await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
+        const storedCol = headerCols.get("stored");
+        if (storedCol != null) {
+          clearCol(storedCol);
+          fieldRows.forEach((r, i) => { if (r.stored === "lưu kho") paintCell(storedCol, i, ORANGE); });
         }
+        const deliveredCol = headerCols.get("deliveredAt");
+        if (deliveredCol != null) {
+          clearCol(deliveredCol);
+          fieldRows.forEach((r, i) => { if (typeof r.deliveredAt === "string" && r.deliveredAt) paintCell(deliveredCol, i, colorForDate(r.deliveredAt)); });
+        }
+        await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
       }
 
       // ----- Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế, để trống cột Mã -----
@@ -1154,6 +1185,9 @@ async function runCustomerSync(customerId: string): Promise<void> {
         }
       }
 
+      // ----- Khóa các cột hệ thống tự ghi - khách/staff share file không sửa/xóa được, chỉ hệ thống ghi -----
+      if (gsid != null) await protectManagedRanges(sid, gsid, header, headerCols, depHeader);
+
       // ----- Khối TỔNG TT/CỌC/NỢ (H1/H2/H3): có tỉ giá -> thay hẳn sang ₫; không có -> giữ nguyên ¥ -----
       const jpyDepositTotal = monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);
       const vndDepositTotal = monthDeposits.filter((d) => d.currency === "VND").reduce((s, d) => s + Number(d.amountVnd), 0);
@@ -1164,7 +1198,6 @@ async function runCustomerSync(customerId: string): Promise<void> {
       await apiSheet(sid, `/values/${t}!H1:H3?valueInputOption=USER_ENTERED`, "PUT", { majorDimension: "COLUMNS", values: [[h1 || "", h2 || "", h3 || ""]] });
       // Dọn ô "Tổng/Nợ quy đổi ₫" cũ (bản trước ghi ở I:J, giờ gộp thẳng vào H nên không cần nữa)
       await apiSheet(sid, `/values/${t}!I1:J3:clear`, "POST", {});
-      const gsid = await getSheetIdByTitle(sid, tab);
       if (gsid != null) {
         const pattern = useVnd ? "#,##0 \"₫\"" : "\"¥\"#,##0";
         const cell = { userEnteredFormat: { numberFormat: { type: "NUMBER" as const, pattern } } };

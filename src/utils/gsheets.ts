@@ -47,15 +47,24 @@ async function getToken(): Promise<string> {
   return data.access_token;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function apiSheet(sid: string, path: string, method: string, body?: unknown) {
-  const token = await getToken();
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`GSHEET_API ${method} ${path} -> ${res.status} ${await res.text()}`);
-  return res.json();
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const token = await getToken();
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.ok) return res.json();
+    // 429 (rate limit) / 5xx là lỗi tạm thời của Google -> thử lại thay vì bỏ dở sync giữa chừng để lại dữ liệu cũ
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt === maxAttempts) throw new Error(`GSHEET_API ${method} ${path} -> ${res.status} ${await res.text()}`);
+    await sleep(500 * 2 ** (attempt - 1));
+  }
+  throw new Error(`GSHEET_API ${method} ${path} -> retries exhausted`);
 }
 const api = (path: string, method: string, body?: unknown) => apiSheet(SHEET_ID!, path, method, body);
 
@@ -1104,7 +1113,7 @@ async function protectManagedRanges(
   }
 }
 
-async function runCustomerSync(customerId: string): Promise<void> {
+async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
   if (!saEnabled()) return;
   try {
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -1213,6 +1222,12 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
     }
   } catch (e) {
+    // Còn 1 phần dở dang (lỗi API giữa chừng) -> thử lại cả lượt sync 1 lần, tránh để lại dữ liệu cũ trên sheet khách
+    if (attempt < 2) {
+      console.error("[gsheets] syncCustomerOrders retry", (e as Error).message);
+      await sleep(3000);
+      return runCustomerSync(customerId, attempt + 1);
+    }
     console.error("[gsheets] syncCustomerOrders", (e as Error).message);
   }
 }

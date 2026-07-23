@@ -197,6 +197,12 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
       const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
       const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
+      // Ship của cả đơn (order.shipAmount - phí ship/thanh toán tay, vd COMBINI) chỉ cộng vào món đầu (tránh nhân đôi
+      // khi đơn nhiều món). Cùng đơn vị ¥ với ship món -> ghép thành công thức "=shipMón+shipĐơn" để khách bấm vào
+      // sheet thấy rõ 2 khoản cộng ra sao; khác đơn vị (VND) thì cộng thẳng vào ₫ quy đổi, không ghép công thức được.
+      const orderShipJpy = idx === 0 && o.shipCurrency === "JPY" ? Number(o.shipAmount ?? 0) : 0;
+      const orderShipVndOnly = idx === 0 && o.shipCurrency !== "JPY" ? Number(o.shipAmount ?? 0) : 0;
+      const shipCell: string | number = orderShipJpy > 0 ? (ship > 0 ? `=${ship}+${orderShipJpy}` : orderShipJpy) : (ship || "");
       // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
       // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
       const weight = trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : null);
@@ -205,15 +211,15 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custShipRateVnd ?? null;
       const shipVndPerKg = rawShipRate != null ? (trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
       const shipTotal = trk ? trackingShipVnd({ ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null }, rate) : 0;
-      const jpy = giaWeb + ship;
-      const vnd = rate ? Math.round(jpy * rate) : 0;
+      const jpy = giaWeb + ship + orderShipJpy;
+      const vnd = (rate ? Math.round(jpy * rate) : 0) + orderShipVndOnly;
       const grandTotal = vnd + Math.round(shipTotal);
       const row: FieldRow = {
         code: o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         date: fmtDate(purchaseDate),
         acc: String(o.nick ?? ""),
         url: String(it.url ?? ""), method: String(it.paymentMethod ?? ""),
-        giaWeb: giaWeb || "", ship: ship || "", total: jpy,
+        giaWeb: giaWeb || "", ship: shipCell, total: jpy,
         rate: rate || "", vndConverted: vnd || "",
         weight: weight ?? "",
         surcharge: surchargeCell ? Math.round(surchargeCell) : "",

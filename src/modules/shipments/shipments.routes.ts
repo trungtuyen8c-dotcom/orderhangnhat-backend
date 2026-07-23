@@ -291,8 +291,11 @@ shipmentsRouter.put("/invoice-checklist/:key", authorize("trackings.update"), as
 // sheet/file (chưa có tên hàng/giá cụ thể) - lấy tạm tên/giá từ chính đơn hàng trong hệ thống để vẫn hiện
 // ra bảng, không phải chờ ai đó tô vàng thủ công mới thấy.
 async function buildExtraNeedsTaxRows(shownTrackingIds: Set<string>): Promise<TaxRowOut[]> {
+  // Tracking mồ côi (chưa gắn đơn) KHÔNG hiện ở đây - chưa biết khách thì "cần lấy thuế" chưa có ý nghĩa.
+  // Kho tự tìm khách/mở hàng ngoài quy trình riêng, gán đơn ở Orders (tự claim lại đúng dòng này) là tự
+  // hiện đúng ở đây ngay, không cần làm gì thêm - cờ needsTax vẫn giữ ngầm từ lúc đóng hàng.
   const trks = await prisma.tracking.findMany({
-    where: { needsTax: true, taxCollected: false, id: { notIn: [...shownTrackingIds] } },
+    where: { needsTax: true, taxCollected: false, orderId: { not: null }, id: { notIn: [...shownTrackingIds] } },
     include: { order: { include: { customer: { select: { name: true } }, items: true } }, carton: true },
   });
   if (!trks.length) return [];

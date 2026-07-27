@@ -30,7 +30,7 @@ app.set("trust proxy", true);
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
-app.use((req, _res, next) => { req.requestId = randomUUID(); next(); });
+app.use((req, res, next) => { req.requestId = randomUUID(); res.setHeader("X-Request-Id", req.requestId); next(); });
 app.use(metricsMiddleware);
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
@@ -54,8 +54,11 @@ app.use("/api/backup", backupRouter);
 
 // Error handler
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error({ request_id: req.requestId, err: { message: err?.message, stack: err?.stack } }, "request failed");
-  res.status(500).json({ error: "INTERNAL" });
+  logger.error({
+    request_id: req.requestId, method: req.method, url: req.originalUrl, user_id: req.user?.id,
+    err: { message: err?.message, stack: err?.stack },
+  }, "request failed");
+  res.status(500).json({ error: "INTERNAL", requestId: req.requestId });
 });
 
 app.listen(config.port, async () => {

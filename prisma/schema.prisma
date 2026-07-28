@@ -268,6 +268,8 @@ model Carton {
   // Sale/NV mua bấm xác nhận khi 2 tổng lệch >= 1kg nhưng đã hỏi kho Nhật xác nhận số đúng - mở khóa cân từng mã lẻ.
   // Sửa lại declaredWeightKg hoặc vnTotalWeightKg sau khi xác nhận thì reset về null (xác nhận cũ không còn hiệu lực).
   weightConfirmedAt DateTime?  @map("weight_confirmed_at")
+  // Số thiết bị điện tử công ty phụ thu (đếm/kiểm tra lại theo kiện) - nhân đơn giá cấu hình ở AppConfig electronics_price_vnd.
+  electronicsCount  Int?       @map("electronics_count")
   packedDate        DateTime?  @map("packed_date")
   note              String?
   createdAt         DateTime   @default(now()) @map("created_at")
@@ -499,6 +501,9 @@ model CompanyCost {
   refId        String?  @map("ref_id") @db.Uuid
   note         String?
   paid         Boolean  @default(false)
+  // Khoản nhập tay SAU khi ngày đóng hàng của tracking (refId) đã bị chốt hải quan - không tự vào invoice
+  // ngày đó nữa, cần khai bổ sung thủ công. Tính 1 lần lúc tạo, không đổi lại sau đó.
+  lateAfterLock Boolean @default(false) @map("late_after_lock")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([month])

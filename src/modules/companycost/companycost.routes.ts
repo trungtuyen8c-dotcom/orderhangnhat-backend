@@ -27,6 +27,18 @@ async function reinforceUnit(): Promise<number> {
   const c = await prisma.appConfig.findUnique({ where: { key: "reinforce_price_vnd" } });
   return Number(c?.value ?? 30000);
 }
+async function electronicsUnit(): Promise<number> {
+  const c = await prisma.appConfig.findUnique({ where: { key: "electronics_price_vnd" } });
+  return Number(c?.value ?? 0);
+}
+// Kiện của tháng (dựa theo packedDate - ngày kho Nhật đóng) - dùng chung cho phụ thu điện tử + đối soát cân theo ngày.
+async function cartonsOfMonth(month: string) {
+  const cartons = await prisma.carton.findMany({
+    where: { packedDate: { not: null } },
+    select: { packedDate: true, declaredWeightKg: true, vnTotalWeightKg: true, electronicsCount: true },
+  });
+  return cartons.filter((c) => c.packedDate && mk(c.packedDate) === month) as (typeof cartons[number] & { packedDate: Date })[];
+}
 
 // Báo cáo phải trả kho/cty theo tháng
 companyCostRouter.get("/report", authorize("companycost.view"), async (req, res) => {
@@ -43,6 +55,12 @@ companyCostRouter.get("/report", authorize("companycost.view"), async (req, res)
   const reinforceCount = reinforceOrders.size;
   const reinforceVnd = reinforceCount * unit;
 
+  // Phụ thu công ty đếm hàng điện tử - đếm/tổng hợp theo kiện đóng trong tháng
+  const eUnit = await electronicsUnit();
+  const cartonsThisMonth = await cartonsOfMonth(month);
+  const electronicsCount = cartonsThisMonth.reduce((s, c) => s + (c.electronicsCount ?? 0), 0);
+  const electronicsVnd = electronicsCount * eUnit;
+
   // Entry nhập tay (chakubarai, weight, other)
   const entries = await prisma.companyCost.findMany({ where: { month }, orderBy: { createdAt: "desc" } });
   // Khoản 着払い gắn tracking -> tra ngược đơn/khách để hiện cho biết đã tính vào công nợ ai
@@ -56,18 +74,47 @@ companyCostRouter.get("/report", authorize("companycost.view"), async (req, res)
     return {
       id: e.id, kind: e.kind, kindLabel: KIND_LABEL[e.kind] ?? e.kind, amountVnd: Number(e.amountVnd),
       currency: e.currency, amountOrig: Number(e.amountOrig), exchangeRate: e.exchangeRate ? Number(e.exchangeRate) : null,
-      note: e.note, paid: e.paid, createdAt: e.createdAt,
+      note: e.note, paid: e.paid, createdAt: e.createdAt, lateAfterLock: e.lateAfterLock,
       trackingCode: trk?.code ?? null, orderCode: trk?.order?.code ?? null, customerName: trk?.order?.customer?.name ?? null,
     };
   });
-  const byKind: Record<string, number> = { reinforce: reinforceVnd };
+  const byKind: Record<string, number> = { reinforce: reinforceVnd, electronics: electronicsVnd };
   for (const e of ser) byKind[e.kind] = (byKind[e.kind] ?? 0) + e.amountVnd;
-  const totalVnd = reinforceVnd + ser.reduce((s, e) => s + e.amountVnd, 0);
+  const totalVnd = reinforceVnd + electronicsVnd + ser.reduce((s, e) => s + e.amountVnd, 0);
   const paidVnd = ser.filter((e) => e.paid).reduce((s, e) => s + e.amountVnd, 0);
 
   res.json({
     month, reinforceCount, reinforceUnit: unit, reinforceVnd,
+    electronicsCount, electronicsUnit: eUnit, electronicsVnd,
     entries: ser, byKind, totalVnd, paidVnd, unpaidVnd: totalVnd - paidVnd,
+  });
+});
+
+// Đối soát cân theo ngày (kho Nhật khai báo vs VN nhập tay) để thanh toán tiền cân cho công ty vận chuyển -
+// thanh toán theo cân kho Nhật, cân VN chỉ để đối chiếu/tham khảo.
+companyCostRouter.get("/settlement", authorize("companycost.view"), async (req, res) => {
+  const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
+  const eUnit = await electronicsUnit();
+  const cartons = await cartonsOfMonth(month);
+  const byDay = new Map<string, { date: string; declaredKg: number; vnKg: number; electronicsCount: number }>();
+  for (const c of cartons) {
+    const day = c.packedDate.toISOString().slice(0, 10);
+    const row = byDay.get(day) ?? { date: day, declaredKg: 0, vnKg: 0, electronicsCount: 0 };
+    row.declaredKg += c.declaredWeightKg != null ? Number(c.declaredWeightKg) : 0;
+    row.vnKg += c.vnTotalWeightKg != null ? Number(c.vnTotalWeightKg) : 0;
+    row.electronicsCount += c.electronicsCount ?? 0;
+    byDay.set(day, row);
+  }
+  const rows = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)).map((r) => ({
+    date: r.date, declaredKg: Number(r.declaredKg.toFixed(2)), vnKg: Number(r.vnKg.toFixed(2)),
+    electronicsCount: r.electronicsCount, electronicsVnd: r.electronicsCount * eUnit,
+  }));
+  res.json({
+    month, rows,
+    totalDeclaredKg: Number(rows.reduce((s, r) => s + r.declaredKg, 0).toFixed(2)),
+    totalVnKg: Number(rows.reduce((s, r) => s + r.vnKg, 0).toFixed(2)),
+    totalElectronicsCount: rows.reduce((s, r) => s + r.electronicsCount, 0),
+    totalElectronicsVnd: rows.reduce((s, r) => s + r.electronicsVnd, 0),
   });
 });
 
@@ -80,6 +127,8 @@ const entrySchema = z.object({
   note: z.string().optional(),
   // Kho báo tracking + giá 着払い -> gắn thẳng vào đúng đơn/khách của mã đó, tự cộng vào công nợ (chỉ áp dụng kind=chakubarai)
   trackingCode: z.string().optional(),
+  // Thay thế cho trackingCode khi không nhớ đúng mã tracking - chỉ dùng được nếu đơn đó có ĐÚNG 1 tracking.
+  orderCode: z.string().optional(),
 });
 companyCostRouter.post("/", authorize("accounting.record_payment"), async (req, res) => {
   const p = entrySchema.safeParse(req.body);
@@ -88,20 +137,40 @@ companyCostRouter.post("/", authorize("accounting.record_payment"), async (req, 
   const amountVnd = p.data.currency === "JPY" ? Math.round(p.data.amount * p.data.exchangeRate!) : p.data.amount;
 
   let refId: string | null = null;
-  const code = p.data.trackingCode?.trim();
-  if (p.data.kind === "chakubarai" && code) {
-    const trk = await prisma.tracking.findFirst({ where: { code }, select: { id: true, orderId: true } });
-    if (!trk) return res.status(400).json({ error: "BAD_REQUEST", message: "Không tìm thấy mã tracking này" });
-    if (!trk.orderId) return res.status(400).json({ error: "BAD_REQUEST", message: "Mã tracking chưa gắn đơn nào" });
-    refId = trk.id;
+  if (p.data.kind === "chakubarai") {
+    const code = p.data.trackingCode?.trim();
+    const orderCode = p.data.orderCode?.trim();
+    if (code) {
+      const trk = await prisma.tracking.findFirst({ where: { code }, select: { id: true, orderId: true } });
+      if (!trk) return res.status(400).json({ error: "BAD_REQUEST", message: "Không tìm thấy mã tracking này" });
+      if (!trk.orderId) return res.status(400).json({ error: "BAD_REQUEST", message: "Mã tracking chưa gắn đơn nào" });
+      refId = trk.id;
+    } else if (orderCode) {
+      const order = await prisma.order.findUnique({ where: { code: orderCode }, select: { trackings: { select: { id: true } } } });
+      if (!order) return res.status(400).json({ error: "BAD_REQUEST", message: "Không tìm thấy mã đơn này" });
+      if (!order.trackings.length) return res.status(400).json({ error: "BAD_REQUEST", message: "Đơn chưa có tracking nào" });
+      if (order.trackings.length > 1) return res.status(400).json({ error: "BAD_REQUEST", message: "Đơn có nhiều tracking - nhập đúng mã tracking để xác định" });
+      refId = order.trackings[0].id;
+    }
+  }
+
+  // Điền sau khi ngày đóng hàng của tracking đã bị chốt hải quan -> không tự vào invoice ngày đó nữa, đánh dấu để biết cần khai bổ sung.
+  let lateAfterLock = false;
+  if (refId) {
+    const trk = await prisma.tracking.findUnique({ where: { id: refId }, select: { packedAt: true } });
+    if (trk?.packedAt) {
+      const dayStr = trk.packedAt.toISOString().slice(0, 10);
+      const lock = await prisma.packDayLock.findUnique({ where: { date: new Date(`${dayStr}T00:00:00`) } });
+      lateAfterLock = !!lock;
+    }
   }
 
   const c = await prisma.companyCost.create({ data: {
     id: uuid(), kind: p.data.kind, month: p.data.month, amountVnd, currency: p.data.currency,
-    amountOrig: p.data.amount, exchangeRate: p.data.exchangeRate ?? null, note: p.data.note ?? null, refId,
+    amountOrig: p.data.amount, exchangeRate: p.data.exchangeRate ?? null, note: p.data.note ?? null, refId, lateAfterLock,
   } });
   if (refId) await resyncTracking(refId);
-  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "company_cost.created", metadata: { kind: c.kind, amountVnd, refId } });
+  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "company_cost.created", metadata: { kind: c.kind, amountVnd, refId, lateAfterLock } });
   res.status(201).json(c);
 });
 
@@ -129,5 +198,16 @@ companyCostRouter.put("/reinforce-price", authorize("system.manage_settings"), a
   const p = z.object({ unit: z.number().nonnegative() }).safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   await prisma.appConfig.upsert({ where: { key: "reinforce_price_vnd" }, update: { value: String(p.data.unit) }, create: { key: "reinforce_price_vnd", value: String(p.data.unit) } });
+  res.json({ unit: p.data.unit });
+});
+
+// Cấu hình đơn giá phụ thu điện tử
+companyCostRouter.get("/electronics-price", authorize("companycost.view"), async (_req, res) => {
+  res.json({ unit: await electronicsUnit() });
+});
+companyCostRouter.put("/electronics-price", authorize("system.manage_settings"), async (req, res) => {
+  const p = z.object({ unit: z.number().nonnegative() }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  await prisma.appConfig.upsert({ where: { key: "electronics_price_vnd" }, update: { value: String(p.data.unit) }, create: { key: "electronics_price_vnd", value: String(p.data.unit) } });
   res.json({ unit: p.data.unit });
 });

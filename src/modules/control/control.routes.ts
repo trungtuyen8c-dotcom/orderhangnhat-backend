@@ -31,11 +31,11 @@ controlRouter.get("/cartons", authorize("trackings.list"), async (_req, res) => 
   res.json(rows);
 });
 
-const cartonSchema = z.object({ code: z.string().min(1), declaredWeightKg: z.number().nonnegative().optional(), packedDate: z.string().optional(), note: z.string().optional() });
+const cartonSchema = z.object({ code: z.string().min(1), declaredWeightKg: z.number().nonnegative().optional(), electronicsCount: z.number().int().nonnegative().optional(), packedDate: z.string().optional(), note: z.string().optional() });
 controlRouter.post("/cartons", authorize("trackings.update"), async (req, res) => {
   const p = cartonSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const c = await prisma.carton.create({ data: { id: uuid(), code: p.data.code, declaredWeightKg: p.data.declaredWeightKg ?? null, packedDate: p.data.packedDate ? new Date(p.data.packedDate) : null, note: p.data.note ?? null } });
+  const c = await prisma.carton.create({ data: { id: uuid(), code: p.data.code, declaredWeightKg: p.data.declaredWeightKg ?? null, electronicsCount: p.data.electronicsCount ?? null, packedDate: p.data.packedDate ? new Date(p.data.packedDate) : null, note: p.data.note ?? null } });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.created" });
   res.status(201).json(c);
 });

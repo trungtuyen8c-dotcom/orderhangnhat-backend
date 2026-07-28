@@ -82,7 +82,7 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
     const vnTotalWeightKg = c.vnTotalWeightKg != null ? Number(c.vnTotalWeightKg) : null;
     const actualKg = Number(c.trackings.reduce((s, t) => s + effKg(t), 0).toFixed(3));
     getDay(k).cartons.push({
-      id: c.id, code: c.code, note: c.note, declaredWeightKg: declared,
+      id: c.id, code: c.code, note: c.note, declaredWeightKg: declared, electronicsCount: c.electronicsCount,
       vnTotalWeightKg, weightConfirmedAt: c.weightConfirmedAt, weightLocked: cartonWeightLocked(c),
       actualKg, count: c.trackings.length, diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
       trackings: c.trackings,

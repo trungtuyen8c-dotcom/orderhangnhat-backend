@@ -7,7 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
-import { syncTracking, removeTrackingRow, syncCustomerOrders } from "../../utils/gsheets.js";
+import { syncTracking, removeTrackingRow, syncCustomerOrders, createOrphanTrackingSafe } from "../../utils/gsheets.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
@@ -148,7 +148,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const existing = await prisma.tracking.findFirst({ where: { code: p.data.code, orderId: null } });
   const t = existing
     ? await prisma.tracking.update({ where: { id: existing.id }, data: { ...p.data, cartonManual: p.data.cartonId !== undefined ? true : existing.cartonManual, status: p.data.orderId ? "linked" : existing.status } })
-    : await prisma.tracking.create({ data: { id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" } });
+    : await createOrphanTrackingSafe({ id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
   void syncTracking(t);

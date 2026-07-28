@@ -67,6 +67,11 @@ app.listen(config.port, async () => {
   // đóng hàng trước khi cờ needsTax được set tự động ngay lúc quét kho (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
   try { await prisma.tracking.updateMany({ where: { packedAt: { not: null }, needsTax: false }, data: { needsTax: true } }); }
   catch (e) { console.error("[startup] backfill needsTax", (e as Error).message); }
+  // Chặn trùng tracking mồ côi (order_id null) cùng mã ở tầng DB - Prisma schema không hỗ trợ partial index
+  // nên tạo bằng raw SQL, idempotent (IF NOT EXISTS). Chạy DEDUPE_APPLY=1 npx tsx prisma/dedupe-orphan-tracking.ts
+  // dọn dữ liệu trùng cũ TRƯỚC lần deploy đầu tiên có dòng này, nếu không CREATE INDEX sẽ lỗi vì đã có trùng.
+  try { await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS trackings_code_orphan_uniq ON trackings (code) WHERE order_id IS NULL`); }
+  catch (e) { console.error("[startup] create trackings_code_orphan_uniq", (e as Error).message); }
   startJobs();
   console.log(`API listening on :${config.port}`);
 });

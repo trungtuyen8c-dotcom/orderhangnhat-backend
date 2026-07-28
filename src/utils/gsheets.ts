@@ -2,9 +2,25 @@ import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
+
+// Tạo tracking mồ côi (orderId null) an toàn khi 2 nguồn (cron 2 phút + webhook tức thì) cùng đụng 1 mã cùng
+// lúc - unique index trackings_code_orphan_uniq (tạo ở index.ts startup) chặn trùng ở tầng DB, gặp lỗi trùng
+// thì lấy lại đúng dòng đã có thay vì crash cả loạt quét.
+export async function createOrphanTrackingSafe(data: Parameters<typeof prisma.tracking.create>[0]["data"]) {
+  try {
+    return await prisma.tracking.create({ data });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const existing = await prisma.tracking.findFirst({ where: { code: data.code as string, orderId: null } });
+      if (existing) return existing;
+    }
+    throw e;
+  }
+}
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
 // Bật khi có đủ env: GOOGLE_SA_EMAIL, GOOGLE_SA_PRIVATE_KEY, GSHEET_ID (GSHEET_TAB mặc định "Tracking").
@@ -685,7 +701,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const c of codes) {
     if (knownCodes.has(c)) continue;
     const packedAt = dateByCode.get(c) ?? new Date();
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt), needsTax: true } });
+    const created = await createOrphanTrackingSafe({ id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt), needsTax: true });
     trks.push({ ...created, order: null } as (typeof trks)[number]);
   }
 
@@ -956,7 +972,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); gán kiện theo BILL/thùng ngay bên dưới nếu có gửi kèm.
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked, needsTax: true } });
+    const created = await createOrphanTrackingSafe({ id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked, needsTax: true });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
     single = t;

@@ -368,16 +368,23 @@ function isChecked(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{
+  rows: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[];
+  // Dòng đã xóa trắng mã (E) nhưng còn sót tên/giá (F/G) hệ thống ghi từ trước - vd dòng "thua" trong cặp quét
+  // trùng (RED) không có Tracking.packRow đại diện (chỉ 1 dòng/mã được lưu packRow, dòng còn lại không có nơi nào
+  // trong DB nhớ tới nó) nên cơ chế dọn theo packRow (xem syncPackedFromWarehouse) bỏ sót, để lại rác vĩnh viễn.
+  staleBlank: { date: Date | null; tab: string; row: number; sheetId: number }[];
+}> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
     .filter((t): t is { title: string; sheetId: number; date: Date } => t.date != null);
   // Chỉ quét tab gần đây cho nhanh (webhook/cron). Tab cũ không có mã mới về.
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
-  if (!dateTabs.length) return [];
+  if (!dateTabs.length) return { rows: [], staleBlank: [] };
 
   const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[] = [];
+  const staleBlank: { date: Date | null; tab: string; row: number; sheetId: number }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
@@ -395,11 +402,14 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
         const code = (cell ?? "").trim();
         if (isTrackingCode(code)) {
           out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: isChecked(doneCol[j] ?? "") });
+        } else if ((nameCol[j] ?? "").trim()) {
+          // Mã (E) đã bị xóa trắng nhưng tên (F) hệ thống ghi trước đó vẫn còn -> dòng rác cần dọn.
+          staleBlank.push({ date, tab, row: j + 1, sheetId });
         }
       });
     });
   }
-  return out;
+  return { rows: out, staleBlank };
 }
 
 // "Vàng" do kho tự tô tay trong sheet nháp trước khi chốt nộp hải quan - không phải màu hệ thống tự ghi
@@ -608,7 +618,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: 0, updated: 0 };
-  const rows = await readWarehousePackRows(sid, opts?.recentDays);
+  const { rows, staleBlank } = await readWarehousePackRows(sid, opts?.recentDays);
 
   // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
   const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
@@ -663,6 +673,17 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         const row = Number(key.split("|")[1]);
         if (info) blankedRows.push({ sheetId: info.sheetId, tab: info.tab, row });
       }
+    }
+    // Dòng "thua" trong cặp quét trùng mã (RED) không có Tracking.packRow đại diện nên vòng trên bỏ sót -
+    // dò thêm theo tên (F) còn sót dù mã (E) đã trắng, gộp vào cùng 1 lượt dọn, tránh trùng dòng đã có.
+    const seenBlanked = new Set(blankedRows.map((b) => `${b.tab}|${b.row}`));
+    for (const b of staleBlank) {
+      const dayKey = b.date ? b.date.toISOString().slice(0, 10) : null;
+      if (dayKey && lockedDates.has(dayKey)) continue;
+      const k = `${b.tab}|${b.row}`;
+      if (seenBlanked.has(k)) continue;
+      seenBlanked.add(k);
+      blankedRows.push({ sheetId: b.sheetId, tab: b.tab, row: b.row });
     }
     if (blankedRows.length) {
       try {

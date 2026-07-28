@@ -814,7 +814,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
-        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + (i.shipJpy != null ? Number(i.shipJpy) : 0), 0);
         // Trước khi tách được 1-1 (packRow chưa gán xong), mã dùng chung nhiều đơn từng bị ghi GỘP tên+giá cả
         // nhóm (fallback an toàn). Sau khi tách được rồi, ô sheet vẫn còn đúng y tên gộp CŨ đó -> so với tên
         // MỘT món mới tính ra sẽ luôn khác -> hiểu lầm thành "kho tự sửa tên", mắc kẹt mãi không ghi đè lại được
@@ -1018,7 +1018,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
-        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + (i.shipJpy != null ? Number(i.shipJpy) : 0), 0);
         // Tên gộp CŨ (lúc chưa tách được 1-1) có thể còn nguyên trên sheet - so thêm để khỏi hiểu lầm thành
         // "kho tự sửa tên" rồi mắc kẹt mãi không ghi đè lại đúng tên/giá riêng từng đơn được nữa (xem gsheets.ts syncPackedFromWarehouse).
         // Dùng FULL group (không phải `orders` đã bị thu hẹp về 1 đơn khi single đã resolve) để tính đúng tên gộp cũ,

@@ -32,20 +32,32 @@ async function main() {
     let winner: (typeof rows)[number] | null = null;
     let losers: (typeof rows)[number][] = [];
 
-    if (withOrder.length === 1 && orphans.length >= 1) {
+    // Luôn rút gọn các dòng MỒ CÔI (orderId null) trùng mã về tối đa 1 dòng trước - đây là phần thật sự vi phạm
+    // unique index (WHERE order_id IS NULL), bất kể có bao nhiêu dòng khác đã gắn đơn khác nhau cùng mã.
+    let remainOrphan: (typeof rows)[number] | null = null;
+    if (orphans.length >= 2) {
+      remainOrphan = orphans.find((o) => o.cartonId) ?? orphans[0];
+      losers.push(...orphans.filter((o) => o.id !== remainOrphan!.id));
+    } else if (orphans.length === 1) {
+      remainOrphan = orphans[0];
+    }
+
+    if (withOrder.length === 1 && remainOrphan) {
+      // Đúng 1 đơn thật -> gộp luôn orphan còn lại vào đó cho sạch (không chỉ để vừa đủ unique index)
       winner = withOrder[0];
-      losers = orphans;
-    } else if (withOrder.length === 0 && orphans.length >= 2) {
-      winner = orphans.find((o) => o.cartonId) ?? orphans[0];
-      losers = orphans.filter((o) => o.id !== winner!.id);
+      losers.push(remainOrphan);
+    } else if (withOrder.length === 0 && remainOrphan) {
+      winner = remainOrphan;
     } else if (withOrder.length >= 2) {
+      // Nhiều đơn khác nhau dùng chung mã - hợp lệ, không đụng; phần orphan dư (nếu có) đã rút gọn ở trên rồi
       skippedMultiOrder++;
-      continue;
+      if (!losers.length) continue;
+      winner = remainOrphan; // chỉ để log dòng giữ lại cho phần orphan, các dòng withOrder không đổi
     } else {
       skippedNoWinner++;
       continue;
     }
-    if (!losers.length) continue;
+    if (!losers.length || !winner) continue;
     mergedGroups++;
 
     console.log(`\n[${g.code}] giu id=${winner.id} (order=${winner.orderId ?? "-"} carton=${winner.cartonId ?? "-"})`);

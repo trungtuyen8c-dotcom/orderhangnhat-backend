@@ -6,7 +6,7 @@ import { cacheHits, cacheMisses } from "./metrics.js";
 
 const PERM_TTL = 300; // 5 phút
 
-async function loadPermissions(userId: string): Promise<string[]> {
+export async function loadPermissions(userId: string): Promise<string[]> {
   const cacheKey = `perms:${userId}`;
   const cached = await redis.get(cacheKey);
   if (cached) { cacheHits.inc({ feature: "permission" }); return JSON.parse(cached); }

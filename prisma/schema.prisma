@@ -259,13 +259,19 @@ model PackDayLock {
 
 // Kiện / carton: kho Nhật báo cân tổng; hệ thống cộng cân lẻ tracking để đối soát
 model Carton {
-  id               String     @id @default(uuid()) @db.Uuid
-  code             String
-  declaredWeightKg Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
-  packedDate       DateTime?  @map("packed_date")
-  note             String?
-  createdAt        DateTime   @default(now()) @map("created_at")
-  trackings        Tracking[]
+  id                String     @id @default(uuid()) @db.Uuid
+  code              String
+  declaredWeightKg  Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
+  // Tổng cân VN do Kho VN tự nhập tay (khác actualKg tính tự động = tổng cân từng tracking) - dùng để
+  // đối soát với declaredWeightKg TRƯỚC khi cho điền cân từng mã lẻ trong kiện. Xem logic khóa ở warehouse.routes.ts.
+  vnTotalWeightKg   Decimal?   @map("vn_total_weight_kg") @db.Decimal(8, 3)
+  // Sale/NV mua bấm xác nhận khi 2 tổng lệch >= 1kg nhưng đã hỏi kho Nhật xác nhận số đúng - mở khóa cân từng mã lẻ.
+  // Sửa lại declaredWeightKg hoặc vnTotalWeightKg sau khi xác nhận thì reset về null (xác nhận cũ không còn hiệu lực).
+  weightConfirmedAt DateTime?  @map("weight_confirmed_at")
+  packedDate        DateTime?  @map("packed_date")
+  note              String?
+  createdAt         DateTime   @default(now()) @map("created_at")
+  trackings         Tracking[]
 
   @@map("cartons")
 }

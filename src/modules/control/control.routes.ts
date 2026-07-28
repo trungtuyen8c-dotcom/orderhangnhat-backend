@@ -44,7 +44,11 @@ controlRouter.patch("/cartons/:id", authorize("trackings.update"), async (req, r
   const p = cartonSchema.partial().safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const { packedDate, ...rest } = p.data;
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { ...rest, ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}) } });
+  const c = await prisma.carton.update({
+    where: { id: req.params.id },
+    // Sửa lại cân tổng kho Nhật -> xác nhận lệch cân cũ (nếu có) không còn hiệu lực, phải xác nhận lại.
+    data: { ...rest, ...(rest.declaredWeightKg !== undefined ? { weightConfirmedAt: null } : {}), ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}) },
+  });
   res.json(c);
 });
 
@@ -143,9 +147,11 @@ async function storageOverdueCount(): Promise<number> {
 
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
-  const weekAgo = new Date(Date.now() - 7 * 86400000);
-  const [lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock, taxPendingTracking, taxPendingName] = await Promise.all([
-    prisma.order.count({ where: { status: { not: "cancelled" }, trackings: { none: {} }, createdAt: { lt: weekAgo } } }),
+  // Đơn quá 5 ngày chưa có tracking nào - tách riêng theo 3 loại web (nguồn khác nhau, người xử lý khác nhau).
+  const lateCut = new Date(Date.now() - 5 * 86400000);
+  const lateOrdersBySource = (source: string) => prisma.order.count({ where: { status: { not: "cancelled" }, source, trackings: { none: {} }, createdAt: { lt: lateCut } } });
+  const [lateOrdersMercari, lateOrdersYahoo, lateOrdersNormal, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock, taxPendingTracking, taxPendingName] = await Promise.all([
+    lateOrdersBySource("mercari"), lateOrdersBySource("yahoo"), lateOrdersBySource("normal"),
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
     prisma.tracking.count({ where: { orderId: null } }),
@@ -166,7 +172,7 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     return Math.abs(actual - Number(c.declaredWeightKg)) > 0.1;
   }).length;
   res.json({
-    lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
+    lateOrdersMercari, lateOrdersYahoo, lateOrdersNormal, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
     overdueDebts: overdue.list.length, storageOverdue, lateAfterLock, taxPending: taxPendingTracking + taxPendingName,
   });
 });

@@ -305,7 +305,7 @@ async function buildExtraNeedsTaxRows(shownTrackingIds: Set<string>): Promise<Ta
   return trks.map((t): TaxRowOut => {
     const items = t.order?.items ?? [];
     const itemName = items.map((i) => i.name).join(" + ") || "(chưa quét chi tiết)";
-    const price = items.length ? items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0) : null;
+    const price = items.length ? items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + (i.shipJpy != null ? Number(i.shipJpy) : 0), 0) : null;
     return {
       trackingId: t.id, trackingCode: t.code, itemName, priceJpy: price,
       orderCode: t.order?.code ?? null, customerName: t.order?.customer?.name ?? null, nick: t.order?.nick ?? null,

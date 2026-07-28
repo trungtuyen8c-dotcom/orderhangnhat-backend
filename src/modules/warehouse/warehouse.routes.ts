@@ -67,7 +67,15 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
   const customerQ = String(req.query.customer ?? "").trim();
   const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
   const [cartons, loose] = await Promise.all([
-    prisma.carton.findMany({ orderBy: { createdAt: "desc" }, include: { trackings: { where: { ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "asc" }, { packRow: "asc" }] } } }),
+    prisma.carton.findMany({
+      orderBy: { createdAt: "desc" },
+      include: {
+        trackings: { where: { ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "asc" }, { packRow: "asc" }] },
+        // Tổng tracking TỪNG gán vào kiện (mọi trạng thái) - phân biệt kiện mới tạo chưa gán gì (vẫn hiện để gán)
+        // với kiện đã dồn hết tracking sang Lưu kho (ẩn khỏi board, xem lại ở "Lưu kho"/"Tra cứu Kho VN").
+        _count: { select: { trackings: true } },
+      },
+    }),
     prisma.tracking.findMany({ where: { packedAt: { not: null }, cartonId: null, ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "desc" }, { packRow: "asc" }] }),
   ]);
   type Day = { day: string; cartons: any[]; unassigned: any[] };
@@ -84,15 +92,16 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
     getDay(k).cartons.push({
       id: c.id, code: c.code, note: c.note, declaredWeightKg: declared, electronicsCount: c.electronicsCount,
       vnTotalWeightKg, weightConfirmedAt: c.weightConfirmedAt, weightLocked: cartonWeightLocked(c),
-      actualKg, count: c.trackings.length, diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
+      actualKg, count: c.trackings.length, everAssignedCount: c._count.trackings,
+      diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
       trackings: c.trackings,
     });
   }
   for (const t of loose) getDay(dayKey(t.packedAt)!).unassigned.push(t);
 
-  // Kiện đã dồn hết tracking sang Lưu kho (0 dòng còn hiện trên board) không còn gì để đối soát ở đây nữa -
-  // ẩn khỏi board cho đỡ rác, vẫn xem lại được ở "Lưu kho" / "Tra cứu Kho VN" qua mã kiện.
-  for (const d of days.values()) d.cartons = d.cartons.filter((c) => c.count > 0);
+  // Kiện đã dồn hết tracking sang Lưu kho (0 dòng còn hiện trên board, nhưng TỪNG có tracking) không còn gì để
+  // đối soát ở đây nữa - ẩn khỏi board cho đỡ rác. Kiện mới tạo, chưa từng gán mã nào thì vẫn giữ để còn gán tiếp.
+  for (const d of days.values()) d.cartons = d.cartons.filter((c) => c.count > 0 || c.everAssignedCount === 0);
   const out = [...days.values()].filter((d) => d.cartons.length > 0 || d.unassigned.length > 0).sort((a, b) => (a.day < b.day ? 1 : -1));
   res.json(out);
 });

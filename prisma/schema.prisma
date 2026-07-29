@@ -105,6 +105,8 @@ model Customer {
   note          String?
   sheetId       String?  @map("sheet_id")
   shipRatePerKg Decimal? @map("ship_rate_per_kg") @db.Decimal(14, 2)
+  // Khách chỉ lấy chứng từ/thuế, không cân ở Kho VN - đơn mới tạo cho khách này tự bật sẵn Order.skipVnWeighing.
+  skipVnWeighingDefault Boolean @default(false) @map("skip_vn_weighing_default")
   createdAt     DateTime @default(now()) @map("created_at")
   orders        Order[]
 
@@ -270,6 +272,8 @@ model Carton {
   weightConfirmedAt DateTime?  @map("weight_confirmed_at")
   // Số thiết bị điện tử công ty phụ thu (đếm/kiểm tra lại theo kiện) - nhân đơn giá cấu hình ở AppConfig electronics_price_vnd.
   electronicsCount  Int?       @map("electronics_count")
+  // Kho VN bấm xác nhận sau khi đếm thực tế khớp electronicsCount. Sửa lại electronicsCount thì reset về null.
+  electronicsConfirmedAt DateTime? @map("electronics_confirmed_at")
   packedDate        DateTime?  @map("packed_date")
   note              String?
   createdAt         DateTime   @default(now()) @map("created_at")

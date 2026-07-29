@@ -47,7 +47,12 @@ controlRouter.patch("/cartons/:id", authorize("trackings.update"), async (req, r
   const c = await prisma.carton.update({
     where: { id: req.params.id },
     // Sửa lại cân tổng kho Nhật -> xác nhận lệch cân cũ (nếu có) không còn hiệu lực, phải xác nhận lại.
-    data: { ...rest, ...(rest.declaredWeightKg !== undefined ? { weightConfirmedAt: null } : {}), ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}) },
+    data: {
+      ...rest,
+      ...(rest.declaredWeightKg !== undefined ? { weightConfirmedAt: null } : {}),
+      ...(rest.electronicsCount !== undefined ? { electronicsConfirmedAt: null } : {}),
+      ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}),
+    },
   });
   res.json(c);
 });

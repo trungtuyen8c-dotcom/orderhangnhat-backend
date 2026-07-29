@@ -11,15 +11,48 @@ statsRouter.get("/alerts", async (_req, res) => {
   res.json(raw ? JSON.parse(raw) : { count: 0, orders: [] });
 });
 
+// "Hoàn tất" thực tế không dựa vào Order.status (trường này ít khi được cập nhật tay) mà suy ra từ dữ liệu thật:
+// - Khách không cân ở Kho VN (externalWarehouse/skipVnWeighing): xong khi đã đủ giá, có tracking Nhật, đã đóng
+//   hàng (packedAt) và đã lấy thuế xong (mọi tracking needsTax=true đều taxCollected=true).
+// - Khách có cân: thêm điều kiện đủ cân Nhật/VN từng mã + có Tracking VN.
+function isOrderComplete(o: {
+  externalWarehouse: boolean; skipVnWeighing: boolean;
+  items: { unitPriceJpy: unknown }[];
+  trackings: { packedAt: Date | null; needsTax: boolean; taxCollected: boolean; jpWeightKg: unknown; vnWeightKg: unknown; vnTrackingCode: string | null }[];
+}): boolean {
+  if (!o.trackings.length) return false;
+  if (o.items.some((i) => Number(i.unitPriceJpy) === 0)) return false;
+  if (o.trackings.some((t) => !t.packedAt)) return false;
+  if (o.trackings.some((t) => t.needsTax && !t.taxCollected)) return false;
+  if (!o.externalWarehouse && !o.skipVnWeighing) {
+    if (o.trackings.some((t) => t.jpWeightKg == null || t.vnWeightKg == null || !t.vnTrackingCode)) return false;
+  }
+  return true;
+}
+
 statsRouter.get("/", async (_req, res) => {
-  const [byStatus, customers, totalOrders] = await Promise.all([
+  const [byStatus, customers, totalOrders, cancelledOrders, liveOrders] = await Promise.all([
     prisma.order.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.customer.count(),
     prisma.order.count(),
+    prisma.order.count({ where: { status: "cancelled" } }),
+    prisma.order.findMany({
+      where: { status: { not: "cancelled" } },
+      select: {
+        externalWarehouse: true, skipVnWeighing: true,
+        items: { select: { unitPriceJpy: true } },
+        trackings: { select: { packedAt: true, needsTax: true, taxCollected: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true } },
+      },
+    }),
   ]);
+  const completedOrders = liveOrders.filter(isOrderComplete).length;
+  const inProgressOrders = liveOrders.length - completedOrders;
   res.json({
     totalOrders,
     customers,
+    completedOrders,
+    inProgressOrders,
+    cancelledOrders,
     byStatus: byStatus.map((s) => ({ status: s.status, count: s._count._all })),
   });
 });

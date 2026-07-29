@@ -168,6 +168,12 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const d = parsed.data;
   const wrongUrl = findWrongMarketplaceUrl(d.source ?? "normal", d.items);
   if (wrongUrl) return res.status(400).json({ error: "WRONG_MARKETPLACE", message: `Link không khớp: ${wrongUrl}` });
+  // Không tự chỉ định skipVnWeighing -> lấy mặc định theo khách (khách chỉ lấy thuế, không cân ở Kho VN).
+  let skipVnWeighing = d.skipVnWeighing;
+  if (skipVnWeighing === undefined) {
+    const customer = await prisma.customer.findUnique({ where: { id: d.customerId }, select: { skipVnWeighingDefault: true } });
+    skipVnWeighing = customer?.skipVnWeighingDefault ?? false;
+  }
   const baseData = {
     id: uuid(),
     customerId: d.customerId,
@@ -192,7 +198,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
     externalWarehouse: d.externalWarehouse ?? false,
-    skipVnWeighing: d.skipVnWeighing ?? false,
+    skipVnWeighing,
     publicToken: uuid(),
     items: { create: d.items },
   };

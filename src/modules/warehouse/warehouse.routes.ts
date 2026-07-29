@@ -91,6 +91,7 @@ warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) =
     const actualKg = Number(c.trackings.reduce((s, t) => s + effKg(t), 0).toFixed(3));
     getDay(k).cartons.push({
       id: c.id, code: c.code, note: c.note, declaredWeightKg: declared, electronicsCount: c.electronicsCount,
+      electronicsConfirmedAt: c.electronicsConfirmedAt,
       vnTotalWeightKg, weightConfirmedAt: c.weightConfirmedAt, weightLocked: cartonWeightLocked(c),
       actualKg, count: c.trackings.length, everAssignedCount: c._count.trackings,
       diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
@@ -158,6 +159,25 @@ warehouseRouter.post("/cartons/:id/confirm-weight", authorize("trackings.update"
   if (carton.declaredWeightKg == null || carton.vnTotalWeightKg == null) return res.status(400).json({ error: "MISSING_TOTALS", message: "Cần đủ cân tổng kho Nhật và tổng cân VN trước khi xác nhận" });
   const c = await prisma.carton.update({ where: { id: req.params.id }, data: { weightConfirmedAt: new Date() } });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.weight_confirmed", metadata: { declaredWeightKg: String(carton.declaredWeightKg), vnTotalWeightKg: String(carton.vnTotalWeightKg) } });
+  res.json(c);
+});
+
+// Số thiết bị điện tử (Kho VN tự đếm/kiểm tra lại khi nhận kiện) - sửa lại số thì reset xác nhận cũ.
+const electronicsSchema = z.object({ electronicsCount: z.number().int().nonnegative().nullable() });
+warehouseRouter.patch("/cartons/:id/electronics", authorize("warehouse.weigh_vn"), async (req, res) => {
+  const p = electronicsSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
+  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { electronicsCount: p.data.electronicsCount, electronicsConfirmedAt: null } });
+  res.json(c);
+});
+
+// Kho VN xác nhận đã đếm thực tế khớp đúng electronicsCount đã điền.
+warehouseRouter.post("/cartons/:id/confirm-electronics", authorize("warehouse.weigh_vn"), async (req, res) => {
+  const carton = await prisma.carton.findUnique({ where: { id: req.params.id }, select: { electronicsCount: true } });
+  if (!carton) return res.status(404).json({ error: "NOT_FOUND" });
+  if (carton.electronicsCount == null) return res.status(400).json({ error: "MISSING_COUNT", message: "Cần điền số thiết bị trước khi xác nhận" });
+  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { electronicsConfirmedAt: new Date() } });
+  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.electronics_confirmed", metadata: { electronicsCount: String(carton.electronicsCount) } });
   res.json(c);
 });
 

@@ -18,7 +18,7 @@ ordersRouter.use(authenticate);
 const PAY_LATER_SOURCES = ["yahoo", "mercari"] as const;
 
 // Chặn dán nhầm link Yahoo vào đơn Mercari và ngược lại (source phải khớp domain link món hàng)
-function findWrongMarketplaceUrl(source: string, items: { url?: string }[]): string | null {
+export function findWrongMarketplaceUrl(source: string, items: { url?: string }[]): string | null {
   if (source !== "yahoo" && source !== "mercari") return null;
   for (const i of items) {
     if (!i.url) continue;

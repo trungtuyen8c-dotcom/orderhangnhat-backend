@@ -7,6 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { vnMonthKey } from "../../utils/vnTime.js";
 
 // 着払い gắn tracking -> đơn/khách -> gọi sau khi tạo/xóa khoản để công nợ + sheet khách cập nhật/trừ lại ngay.
 async function resyncTracking(trackingId: string): Promise<void> {
@@ -20,7 +21,7 @@ async function resyncTracking(trackingId: string): Promise<void> {
 export const companyCostRouter = Router();
 companyCostRouter.use(authenticate);
 
-const mk = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+export const mk = vnMonthKey;
 const KIND_LABEL: Record<string, string> = { chakubarai: "着払い (hàng trả sau)", weight: "Tiền cân tháng", other: "Khác" };
 
 async function reinforceUnit(): Promise<number> {

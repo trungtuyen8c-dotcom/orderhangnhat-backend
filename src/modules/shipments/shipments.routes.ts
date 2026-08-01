@@ -8,6 +8,7 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { parseSheetId, readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../../utils/gsheets.js";
+import { vnMonthRange } from "../../utils/vnTime.js";
 
 export const shipmentsRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -49,7 +50,7 @@ type TaxRowOut = { trackingId: string | null; trackingCode: string | null; itemN
 
 // Tracking.url gần như luôn trống (kho Nhật ít điền tay) -> lấy link mua hàng thật từ OrderItem.url (sync sẵn từ
 // cột "LINK đặt" trên sheet đơn hàng). Ưu tiên item có tên khớp gần đúng với tên hàng quét được trên dòng vàng.
-function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName: string): string | null {
+export function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName: string): string | null {
   const norm = (s: string) => s.replace(/\s+/g, "").toLowerCase();
   const target = norm(itemName);
   const matched = target && items.find((i) => i.url && target.includes(norm(i.name)));
@@ -58,14 +59,14 @@ function pickPurchaseUrl(items: { name: string; url: string | null }[], itemName
 }
 
 // Khóa lưu Ghi chú/"Đã lấy thuế" cho dòng khớp theo tên - phải khớp đúng công thức taxRowKey ở FE.
-function nameRowKey(bill: string | null, orderCode: string | null, itemName: string): string {
+export function nameRowKey(bill: string | null, orderCode: string | null, itemName: string): string {
   return `name:${bill ?? ""}:${orderCode ?? ""}:${itemName}`;
 }
 
-const normName = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+export const normName = (s: string) => s.replace(/\s+/g, "").toLowerCase();
 // Khớp theo tên khi dòng vàng không có mã tracking (vd file hải quan GB.xxx chỉ có tên hàng, không mang tracking).
 // Kém chắc chắn hơn khớp mã (nhiều đơn có thể trùng/gần giống tên) - FE đánh dấu riêng để nhân viên xác nhận lại.
-function findByName<T extends { name: string }>(candidates: T[], itemName: string): T | null {
+export function findByName<T extends { name: string }>(candidates: T[], itemName: string): T | null {
   const target = normName(itemName);
   if (!target) return null;
   return candidates.find((i) => { const n = normName(i.name); return n === target || n.includes(target) || target.includes(n); }) ?? null;
@@ -78,7 +79,7 @@ function bigrams(s: string): Set<string> {
   for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
   return out;
 }
-function diceSimilarity(a: string, b: string): number {
+export function diceSimilarity(a: string, b: string): number {
   const A = bigrams(a), B = bigrams(b);
   if (!A.size || !B.size) return 0;
   let inter = 0;
@@ -86,7 +87,7 @@ function diceSimilarity(a: string, b: string): number {
   return (2 * inter) / (A.size + B.size);
 }
 const FUZZY_THRESHOLD = 0.5;
-function suggestByName<T extends { name: string }>(candidates: T[], itemName: string): { item: T; similarity: number } | null {
+export function suggestByName<T extends { name: string }>(candidates: T[], itemName: string): { item: T; similarity: number } | null {
   const target = normName(itemName);
   if (target.length < 4) return null;
   let best: { item: T; similarity: number } | null = null;
@@ -213,8 +214,7 @@ shipmentsRouter.put("/tax-rows/:code/note", authorize("trackings.update"), async
 shipmentsRouter.get("/tax-audit", authorize("shipments.list"), async (req, res) => {
   const m = /^(\d{4})-(\d{2})$/.exec(String(req.query.month ?? ""));
   if (!m) return res.status(400).json({ error: "BAD_REQUEST" });
-  const start = new Date(Number(m[1]), Number(m[2]) - 1, 1);
-  const end = new Date(Number(m[1]), Number(m[2]), 1);
+  const { start, end } = vnMonthRange(`${m[1]}-${m[2]}`);
   const trks = await prisma.tracking.findMany({
     where: { packedAt: { gte: start, lt: end }, order: { status: { not: "cancelled" } } },
     select: { id: true, code: true, packedAt: true, needsTax: true, taxCollected: true, taxAuditDismissed: true, order: { select: { code: true, nick: true, customer: { select: { name: true } } } } },
@@ -248,8 +248,7 @@ shipmentsRouter.patch("/tax-audit/:trackingId", authorize("trackings.update"), a
 shipmentsRouter.get("/invoice-checklist", authorize("shipments.list"), async (req, res) => {
   const m = /^(\d{4})-(\d{2})$/.exec(String(req.query.month ?? ""));
   if (!m) return res.status(400).json({ error: "BAD_REQUEST" });
-  const start = new Date(Number(m[1]), Number(m[2]) - 1, 1);
-  const end = new Date(Number(m[1]), Number(m[2]), 1);
+  const { start, end } = vnMonthRange(`${m[1]}-${m[2]}`);
   const cartons = await prisma.carton.findMany({
     where: { packedDate: { gte: start, lt: end } },
     select: { code: true, packedDate: true, trackings: { select: { id: true } } },

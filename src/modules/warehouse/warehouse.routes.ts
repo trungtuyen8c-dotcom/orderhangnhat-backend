@@ -41,14 +41,14 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
 warehouseRouter.use(authenticate);
 
 // ===== Bảng kho VN: tracking đóng từ Nhật, chia theo NGÀY > KIỆN > tracking =====
-const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
-const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
+export const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+export const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
   t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
 
 // Kiện khóa cân từng mã lẻ (không khóa Tracking VN/ship) khi: thiếu 1 trong 2 tổng (kho Nhật khai báo / kho VN
 // nhập tay), hoặc 2 tổng lệch nhau >= 1kg mà chưa được Sale/NV mua bấm "Xác nhận" (weightConfirmedAt).
 const CARTON_WEIGHT_DIFF_THRESHOLD_KG = 1;
-function cartonWeightLocked(c: { declaredWeightKg: unknown; vnTotalWeightKg: unknown; weightConfirmedAt: Date | null }): boolean {
+export function cartonWeightLocked(c: { declaredWeightKg: unknown; vnTotalWeightKg: unknown; weightConfirmedAt: Date | null }): boolean {
   const declared = c.declaredWeightKg != null ? Number(c.declaredWeightKg) : null;
   const vnTotal = c.vnTotalWeightKg != null ? Number(c.vnTotalWeightKg) : null;
   if (declared == null || vnTotal == null) return true;

@@ -36,7 +36,7 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (customerQ) where.order = { customer: { name: { contains: customerQ, mode: "insensitive" } } };
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 500,
-    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
+    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, exchangeRate: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
   });
   res.json(rows);
 });

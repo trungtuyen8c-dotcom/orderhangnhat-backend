@@ -335,12 +335,15 @@ export function syncCustomerOrders(customerId: string): Promise<void> {
 
 // ===== Quét file kho (bên đóng hàng): mã trùng tracking -> set "Đóng hàng về" (cam) =====
 // Tên tab kiểu "26.6" / "8.6" = ngày.tháng -> ngày đóng. Bỏ tab không phải ngày (vd "TRANG MẪU").
-function tabDate(title: string): Date | null {
+export function tabDate(title: string, now: Date = new Date()): Date | null {
   const m = title.trim().match(/^0*(\d{1,2})[.\/-]0*(\d{1,2})$/);
   if (!m) return null;
   const d = Number(m[1]), mo = Number(m[2]);
   if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
-  const dt = new Date(new Date().getFullYear(), mo - 1, d);
+  let dt = new Date(now.getFullYear(), mo - 1, d);
+  // Tab không ghi năm - quét tab "31.12" đầu tháng 1 năm sau sẽ ghép nhầm thành 31/12 NĂM SAU (tương lai gần
+  // 1 năm) nếu cứ lấy năm hiện tại. Ra tương lai hơn 30 ngày -> chắc chắn là tab của năm trước, lùi lại 1 năm.
+  if (dt.getTime() - now.getTime() > 30 * 86400000) dt = new Date(now.getFullYear() - 1, mo - 1, d);
   return isNaN(dt.getTime()) ? null : dt;
 }
 

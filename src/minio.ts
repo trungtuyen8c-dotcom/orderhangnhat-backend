@@ -1,4 +1,5 @@
 import { Client } from "minio";
+import { logError } from "./utils/systemLog.js";
 
 export const BUCKET = process.env.MINIO_BUCKET ?? "orderhn";
 
@@ -14,6 +15,6 @@ export async function ensureBucket(): Promise<void> {
   try {
     if (!(await minio.bucketExists(BUCKET))) await minio.makeBucket(BUCKET);
   } catch (e) {
-    console.error("MinIO bucket init failed", e);
+    logError({ err: (e as Error).message }, "minio_bucket_init_failed");
   }
 }

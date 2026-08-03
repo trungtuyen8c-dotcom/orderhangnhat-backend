@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
+import { logWarn, logError } from "./systemLog.js";
 
 // Tạo tracking mồ côi (orderId null) an toàn khi 2 nguồn (cron 2 phút + webhook tức thì) cùng đụng 1 mã cùng
 // lúc - unique index trackings_code_orphan_uniq (tạo ở index.ts startup) chặn trùng ở tầng DB, gặp lỗi trùng
@@ -136,7 +137,7 @@ export async function syncTracking(t: TrackingRow): Promise<void> {
       await api(`/values/${encodeURIComponent(TAB)}!A1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { values: [rowValues(t)] });
     }
   } catch (e) {
-    console.error("[gsheets] syncTracking", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_sync_tracking_failed");
   }
 }
 
@@ -147,7 +148,7 @@ export async function removeTrackingRow(id: string): Promise<void> {
     const row = await findRow(id);
     if (row) await api(`/values/${encodeURIComponent(TAB)}!A${row}:J${row}:clear`, "POST", {});
   } catch (e) {
-    console.error("[gsheets] removeTrackingRow", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_remove_tracking_row_failed");
   }
 }
 
@@ -708,7 +709,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         ]);
         for (let i = 0; i < colorReqs.length; i += CW) await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
       } catch (e) {
-        console.error("[gsheets] clearBlankedRows", (e as Error).message);
+        logError({ err: (e as Error).message }, "gsheets_clear_blanked_rows_failed");
       }
     }
   }
@@ -910,7 +911,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
     }
   } catch (e) {
-    console.error("[gsheets] writeInvoiceToWarehouse", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_write_invoice_to_warehouse_failed");
   }
 
   return { matched: trks.length, updated };
@@ -950,7 +951,7 @@ export async function clearWarehouseRow(packedAt: Date | null, row: number | nul
       { setDataValidation: { range: { sheetId: found.properties.sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 } } },
     ] });
   } catch (e) {
-    console.error("[gsheets] clearWarehouseRow", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_clear_warehouse_row_failed");
   }
 }
 
@@ -1094,7 +1095,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
             : { setDataValidation: { range: xRange } },
         ] });
       }
-    } catch (e) { console.error("[gsheets] syncPackedOne", (e as Error).message); }
+    } catch (e) { logError({ err: (e as Error).message }, "gsheets_sync_packed_one_failed"); }
   }
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   return { matched: true };
@@ -1149,7 +1150,7 @@ async function protectManagedRanges(
     }));
     if (reqs.length) await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
   } catch (e) {
-    console.error("[gsheets] protectManagedRanges", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_protect_managed_ranges_failed");
   }
 }
 
@@ -1264,10 +1265,10 @@ async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
   } catch (e) {
     // Còn 1 phần dở dang (lỗi API giữa chừng) -> thử lại cả lượt sync 1 lần, tránh để lại dữ liệu cũ trên sheet khách
     if (attempt < 2) {
-      console.error("[gsheets] syncCustomerOrders retry", (e as Error).message);
+      logWarn({ err: (e as Error).message }, "gsheets_sync_customer_orders_retry");
       await sleep(3000);
       return runCustomerSync(customerId, attempt + 1);
     }
-    console.error("[gsheets] syncCustomerOrders", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_sync_customer_orders_failed");
   }
 }

@@ -186,7 +186,9 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     storageOverdueCount(),
     prisma.tracking.count({ where: { lateAfterLock: true } }),
     // Từng khớp dòng vàng "cần lấy thuế" (needsTax) nhưng chưa tick "Đã lấy thuế" - cảnh báo dồn nhiều chuyến chưa thu.
-    prisma.tracking.count({ where: { needsTax: true, taxCollected: false } }),
+    // Loại tracking chưa gắn đơn (orderId null) - trang Shipments cũng ẩn nhóm này (chưa biết khách/đơn thì
+    // chưa xử lý được ở đây), tính vào đây sẽ tạo cảnh báo cụt không có chỗ xử lý.
+    prisma.tracking.count({ where: { needsTax: true, taxCollected: false, orderId: { not: null } } }),
     // Dòng khớp theo tên (file GB, không có mã tracking) đã đăng ký lúc quét nhưng chưa tick "Đã lấy thuế".
     prisma.taxRowNote.count({ where: { trackingCode: { startsWith: "name:" }, taxCollected: false } }),
   ]);

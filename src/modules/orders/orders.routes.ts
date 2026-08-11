@@ -60,6 +60,17 @@ ordersRouter.get("/fix-requests", authorize("orders.update"), async (req, res) =
 });
 
 // Cảnh báo trùng link sản phẩm / mã tracking với đơn khác - để sale tự xác nhận trước khi lưu, không tự chặn.
+// Tra đơn theo mã - dùng để gán tracking lạ (chưa khớp đơn) vào đúng đơn
+ordersRouter.get("/lookup-code", authorize("orders.list"), async (req, res) => {
+  const code = String(req.query.code ?? "").trim();
+  if (!code) return res.json({ order: null });
+  const o = await prisma.order.findFirst({
+    where: { code: { equals: code, mode: "insensitive" } },
+    select: { id: true, code: true, customer: { select: { name: true } } },
+  });
+  res.json({ order: o ? { id: o.id, code: o.code, customerName: o.customer.name } : null });
+});
+
 ordersRouter.get("/check-duplicate", authorize("orders.list"), async (req, res) => {
   const url = String(req.query.url ?? "").trim();
   const code = String(req.query.code ?? "").trim();

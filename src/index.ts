@@ -26,6 +26,7 @@ import { adminRouter } from "./modules/admin/admin.routes.js";
 import { scrapeRouter } from "./modules/scrape/scrape.routes.js";
 import { backupRouter } from "./modules/backup/backup.routes.js";
 import { systemLogsRouter } from "./modules/system-logs/system-logs.routes.js";
+import { clientLogsRouter } from "./modules/client-logs/client-logs.routes.js";
 
 const app = express();
 app.set("trust proxy", true);
@@ -53,6 +54,7 @@ app.use("/api/payroll", payrollRouter);
 app.use("/api/public", publicRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/system-logs", systemLogsRouter);
+app.use("/api/client-logs", clientLogsRouter);
 app.use("/api/backup", backupRouter);
 
 // Error handler

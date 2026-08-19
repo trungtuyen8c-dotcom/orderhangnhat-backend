@@ -14,7 +14,7 @@ accountingRouter.use(authenticate);
 
 export { vnDayStart, vnDayEnd };
 
-async function recomputeDebt(orderId: string) {
+export async function recomputeDebt(orderId: string) {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { payments: true } });
   if (!order) return;
   const { balance, currency } = computeDebtBalance(order, order.payments);
@@ -570,7 +570,7 @@ async function getFund() {
   return prisma.fund.upsert({ where: { id: "main" }, update: {}, create: { id: "main", balance: 0 } });
 }
 
-async function applyFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; note: string | null }) {
+export async function applyFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; note: string | null }) {
   const amt = Number(t.amountYen);
   if (t.type === "topup") await prisma.fund.update({ where: { id: "main" }, data: { balance: { increment: amt } } });
   else if (t.type === "set") await prisma.fund.update({ where: { id: "main" }, data: { balance: amt } });
@@ -583,7 +583,7 @@ async function applyFundTxn(t: { id: string; type: string; amountYen: unknown; w
     await prisma.walletTxn.create({ data: { id: uuid(), walletId: t.walletId!, amount: amt, type: "cashback", statementRef: t.note ?? null, refFundTxnId: t.id } });
   }
 }
-async function reverseFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; prevBalance: unknown }) {
+export async function reverseFundTxn(t: { id: string; type: string; amountYen: unknown; walletId: string | null; prevBalance: unknown }) {
   const amt = Number(t.amountYen);
   if (t.type === "topup") await prisma.fund.update({ where: { id: "main" }, data: { balance: { decrement: amt } } });
   else if (t.type === "set") await prisma.fund.update({ where: { id: "main" }, data: { balance: Number(t.prevBalance ?? 0) } });

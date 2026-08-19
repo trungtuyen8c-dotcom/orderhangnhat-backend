@@ -42,9 +42,18 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + Number(i.shipJpy ?? 0), 0);
   const rate = Number(order.exchangeRate ?? 0);
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
-  // Đơn giá ship/kg: ưu tiên đặt trên tracking, không có thì lấy mặc định của khách (kho không cần nhập)
+  // Đơn giá ship/kg: ưu tiên đặt trên tracking, không có thì lấy mặc định của khách (kho không cần nhập).
+  // custRate luôn là VND (giá mặc định khách không có lựa chọn tiền tệ) -> khi fallback sang custRate phải
+  // ép shipRateCurrency về "VND", nếu không trackingShipVnd sẽ tưởng vẫn là JPY (giữ nguyên cờ cũ trên
+  // tracking) và nhân nhầm thêm 1 lần tỉ giá nữa (bug đã gây sai tổng tiền gấp hàng trăm lần).
   const custRate = order.customer?.shipRatePerKg != null ? Number(order.customer.shipRatePerKg) : null;
-  const trackingShip = order.trackings.reduce((s, t) => s + trackingShipVnd({ ...t, unitPriceVndPerKg: t.unitPriceVndPerKg ?? custRate }, rate), 0);
+  const trackingShip = order.trackings.reduce((s, t) => {
+    const usingCustRate = t.unitPriceVndPerKg == null;
+    return s + trackingShipVnd(
+      { ...t, unitPriceVndPerKg: t.unitPriceVndPerKg ?? custRate, shipRateCurrency: usingCustRate ? "VND" : t.shipRateCurrency },
+      rate,
+    );
+  }, 0);
 
   // 着払い/COD do kho Nhật báo theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng thẳng vào công nợ khách
   // của đúng đơn gắn mã đó. Lấy sống từ CompanyCost (không cache) -> xóa khoản là tự trừ lại ngay lần recompute sau.

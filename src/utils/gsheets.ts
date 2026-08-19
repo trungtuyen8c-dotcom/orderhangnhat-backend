@@ -234,9 +234,15 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       const weight = trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : null);
       // Quy đổi đúng ra ₫/kg để hiện khớp với "Tổng tiền vận chuyển" (= cân x đơn giá này) - đơn giá tracking có
       // thể để theo ¥ (shipRateCurrency) nên phải nhân tỉ giá, đơn giá mặc định của khách luôn tính sẵn theo ₫.
+      // usingCustRate: đang fallback sang giá mặc định khách (luôn VND) -> KHÔNG được nhân tỉ giá dù
+      // trk.shipRateCurrency cũ còn ghi "JPY" (đó là cờ cho giá riêng của tracking, không áp dụng cho giá khách).
+      const usingCustRate = trk?.unitPriceVndPerKg == null;
       const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custShipRateVnd ?? null;
-      const shipVndPerKg = rawShipRate != null ? (trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
-      const shipTotal = trk ? trackingShipVnd({ ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null }, rate) : 0;
+      const shipVndPerKg = rawShipRate != null ? (!usingCustRate && trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
+      const shipTotal = trk ? trackingShipVnd(
+        { ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null, shipRateCurrency: usingCustRate ? "VND" : trk.shipRateCurrency },
+        rate,
+      ) : 0;
       const jpy = giaWeb + ship + orderShipJpy;
       const vnd = (rate ? Math.round(jpy * rate) : 0) + orderShipVndOnly;
       const grandTotal = vnd + Math.round(shipTotal);

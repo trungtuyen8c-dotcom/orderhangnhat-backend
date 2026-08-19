@@ -157,6 +157,19 @@ describe("recomputeOrderTotals", () => {
     expect(result).toEqual({ totalQuote: 0, totalVnd: 100000 });
   });
 
+  // Regression: tracking để lại shipRateCurrency="JPY" từ trước (chưa từng set unitPriceVndPerKg riêng) rồi
+  // fallback sang giá mặc định khách (luôn VND) - trước fix, cờ JPY cũ bị giữ nguyên khiến trackingShipVnd
+  // nhân nhầm thêm 1 lần tỉ giá (2kg x 50.000đ = 100.000đ bị tính sai thành 18.000.000đ, gấp đúng tỉ giá 180).
+  it("recomputeOrderTotals_customerDefaultShipRateWithStaleJpyCurrencyFlag_doesNotDoubleConvertByRate", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
+      exchangeRate: "180",
+      customer: { shipRatePerKg: "50000" },
+      trackings: [{ id: "t1", unitPriceVndPerKg: null, shipRateCurrency: "JPY", jpWeightKg: "2", vnWeightKg: null }],
+    }));
+    const result = await recomputeOrderTotals("o1");
+    expect(result).toEqual({ totalQuote: 0, totalVnd: 100000 });
+  });
+
   it("recomputeOrderTotals_companyCostChakubaraiRows_addsCodVndToTotal", async () => {
     mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
       exchangeRate: "180",
@@ -184,5 +197,26 @@ describe("recomputeOrderTotals", () => {
     }));
     await recomputeOrderTotals("o1");
     expect(mockPrisma.debt.update).not.toHaveBeenCalled();
+  });
+
+  it("recomputeOrderTotals_allFeesInVndCurrencyNoRate_sumsFeesWithoutNeedingExchangeRate", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
+      shipAmount: "50000", shipCurrency: "VND",
+      surchargeAmount: "10000", surchargeCurrency: "VND",
+      discountAmount: "5000", discountCurrency: "VND",
+    }));
+    const result = await recomputeOrderTotals("o1");
+    expect(result).toEqual({ totalQuote: 0, totalVnd: 55000 });
+  });
+
+  it("recomputeOrderTotals_discountAmountJpyWithRate_subtractsConvertedDiscountFromTotal", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
+      exchangeRate: "180",
+      items: [{ qty: 1, unitPriceJpy: "10000", shipJpy: null }],
+      discountAmount: "1000", discountCurrency: "JPY",
+    }));
+    const result = await recomputeOrderTotals("o1");
+    // subtotalJpy(10000)*180 - discount(1000)*180 = 1800000 - 180000 = 1620000
+    expect(result).toEqual({ totalQuote: 10000, totalVnd: 1620000 });
   });
 });

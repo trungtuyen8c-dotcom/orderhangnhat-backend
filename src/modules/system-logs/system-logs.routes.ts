@@ -15,14 +15,14 @@ const RANGE_MS: Record<string, number> = {
   "3m": 90 * 24 * 3600 * 1000,
 };
 
-function sinceFromRange(range: unknown): Date {
+export function sinceFromRange(range: unknown): Date {
   const key = typeof range === "string" && range in RANGE_MS ? range : "1d";
   return new Date(Date.now() - RANGE_MS[key]);
 }
 
 type LogRow = { id: bigint; level: string; message: string; meta: unknown; created_at: Date };
 
-function buildWhere(req: Request) {
+export function buildWhere(req: Request) {
   const since = sinceFromRange(req.query.range);
   const level = typeof req.query.level === "string" && ["warn", "error"].includes(req.query.level) ? req.query.level : undefined;
   const q = typeof req.query.q === "string" && req.query.q.trim() ? req.query.q.trim() : undefined;
@@ -42,7 +42,7 @@ systemLogsRouter.get("/", authorize("system.manage_settings"), async (req, res) 
   res.json(rows.map((r) => ({ ...r, id: r.id.toString() })));
 });
 
-function csvEscape(v: unknown): string {
+export function csvEscape(v: unknown): string {
   const s = v === null || v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v);
   return `"${s.replace(/"/g, '""')}"`;
 }

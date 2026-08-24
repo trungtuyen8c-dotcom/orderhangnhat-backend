@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit, logOrder } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
@@ -12,7 +12,7 @@ import { detectMarketplace } from "../../utils/scrape.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const ordersRouter = Router();
-ordersRouter.use(authenticate);
+ordersRouter.use(authenticateEither);
 
 // Nguồn "thanh toán sau" (lên đơn trước, trừ thẻ khi bấm Đã thanh toán) - không đụng thẻ lúc tạo
 const PAY_LATER_SOURCES = ["yahoo", "mercari"] as const;

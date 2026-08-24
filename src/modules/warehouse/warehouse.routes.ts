@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize, loadPermissions } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab, clearWarehouseRow } from "../../utils/gsheets.js";
@@ -38,7 +38,7 @@ warehouseRouter.post("/sync-hook", async (req, res) => {
   res.json(r);
 });
 
-warehouseRouter.use(authenticate);
+warehouseRouter.use(authenticateEither);
 
 // ===== Bảng kho VN: tracking đóng từ Nhật, chia theo NGÀY > KIỆN > tracking =====
 export const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
@@ -195,7 +195,7 @@ warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), async (req, res)
   res.json({ stored: r.count });
 });
 
-warehouseRouter.get("/stored", authorize("warehouse.weigh_vn"), async (req, res) => {
+warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), async (req, res) => {
   const customerQ = String(req.query.customer ?? "").trim();
   const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
   const rows = await prisma.tracking.findMany({
@@ -211,7 +211,7 @@ warehouseRouter.get("/stored", authorize("warehouse.weigh_vn"), async (req, res)
 
 // Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
 // Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
-warehouseRouter.get("/history", authorize("warehouse.weigh_vn"), async (req, res) => {
+warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.history.read"), async (req, res) => {
   const date = String(req.query.date ?? "").trim();
   const vnCode = String(req.query.vnTrackingCode ?? "").trim();
   const jpCode = String(req.query.code ?? "").trim();
@@ -393,7 +393,7 @@ warehouseRouter.post("/vn-weight", authorize("warehouse.weigh_vn"), async (req, 
   res.status(201).json(recon);
 });
 
-warehouseRouter.get("/recon", authorize("warehouse.weigh_vn"), async (_req, res) => {
+warehouseRouter.get("/recon", authorize("warehouse.weigh_vn", "warehouse.recon.read"), async (_req, res) => {
   const rows = await prisma.weightRecon.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
   res.json(rows);
 });

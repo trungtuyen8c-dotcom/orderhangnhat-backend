@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
@@ -10,7 +10,7 @@ import { computeDebtBalance } from "../../utils/orderTotals.js";
 import { vnDayStart, vnDayEnd, vnMonthKey } from "../../utils/vnTime.js";
 
 export const accountingRouter = Router();
-accountingRouter.use(authenticate);
+accountingRouter.use(authenticateEither);
 
 export { vnDayStart, vnDayEnd };
 
@@ -217,7 +217,7 @@ accountingRouter.post("/customer-deposits/:id/unconfirm", authorize("accounting.
 });
 
 // Danh sách cọc theo tab (chờ xác nhận / đã xác nhận / yêu cầu sửa / tất cả), lọc theo ngày - kèm tên khách + tên NV ghi/xác nhận
-accountingRouter.get("/deposits", authorize("accounting.reconcile"), async (req, res) => {
+accountingRouter.get("/deposits", authorize("accounting.reconcile", "accounting.deposits.read"), async (req, res) => {
   const status = String(req.query.status ?? "pending");
   const from = req.query.from ? vnDayStart(String(req.query.from)) : null;
   const to = req.query.to ? vnDayEnd(String(req.query.to)) : null;
@@ -247,7 +247,7 @@ accountingRouter.get("/deposits", authorize("accounting.reconcile"), async (req,
 });
 
 // Đếm số cọc theo từng tab, hiện badge không cần tải cả danh sách
-accountingRouter.get("/deposits/counts", authorize("accounting.reconcile"), async (_req, res) => {
+accountingRouter.get("/deposits/counts", authorize("accounting.reconcile", "accounting.deposits.read"), async (_req, res) => {
   const [pending, confirmed, fixRequest, all] = await Promise.all([
     prisma.customerDeposit.count({ where: { confirmed: false, isOpening: false } }),
     prisma.customerDeposit.count({ where: { confirmed: true, isOpening: false } }),
@@ -490,7 +490,7 @@ accountingRouter.get("/expenses/monthly", authorize("orders.read"), async (req, 
   });
 });
 
-accountingRouter.get("/wallets", authorize("accounting.reconcile"), async (_req, res) => {
+accountingRouter.get("/wallets", authorize("accounting.reconcile", "accounting.wallets.read"), async (_req, res) => {
   const wallets = await prisma.wallet.findMany({ orderBy: { name: "asc" } });
   res.json(wallets);
 });
@@ -617,7 +617,7 @@ accountingRouter.post("/backfill-yahoo-dates", authorize("wallets.manage"), asyn
   res.json({ updated, skipped, totalPaidOrders: orders.length });
 });
 
-accountingRouter.get("/fund", authorize("accounting.reconcile"), async (req, res) => {
+accountingRouter.get("/fund", authorize("accounting.reconcile", "accounting.fund.read"), async (req, res) => {
   const fund = await getFund();
   const status = String(req.query.status ?? "all");
   const where = status === "pending" ? { confirmed: false, fixRequest: null }
@@ -634,7 +634,7 @@ accountingRouter.get("/fund", authorize("accounting.reconcile"), async (req, res
   });
 });
 
-accountingRouter.get("/fund/counts", authorize("accounting.reconcile"), async (_req, res) => {
+accountingRouter.get("/fund/counts", authorize("accounting.reconcile", "accounting.fund.read"), async (_req, res) => {
   const [pending, confirmed, fixRequest, all] = await Promise.all([
     prisma.fundTxn.count({ where: { confirmed: false, fixRequest: null } }),
     prisma.fundTxn.count({ where: { confirmed: true } }),
@@ -851,13 +851,13 @@ accountingRouter.delete("/wallet-txns/:id", authorize("wallets.manage"), async (
 });
 
 // Đối soát: liệt kê giao dịch chưa đối soát theo ví
-accountingRouter.get("/reconcile", authorize("accounting.reconcile"), async (_req, res) => {
+accountingRouter.get("/reconcile", authorize("accounting.reconcile", "accounting.reconcile_list.read"), async (_req, res) => {
   const txns = await prisma.walletTxn.findMany({ where: { reconciled: false }, orderBy: { createdAt: "desc" }, take: 300, include: { wallet: { select: { name: true } } } });
   res.json(txns);
 });
 
 // Sao kê 1 ví: số dư lũy kế (残高) + lọc theo ngày / khách / tracking / từ khóa
-accountingRouter.get("/statement", authorize("accounting.reconcile"), async (req, res) => {
+accountingRouter.get("/statement", authorize("accounting.reconcile", "accounting.statement.read"), async (req, res) => {
   const walletId = typeof req.query.walletId === "string" ? req.query.walletId : null;
   if (!walletId) return res.json({ rows: [], balance: 0 });
 

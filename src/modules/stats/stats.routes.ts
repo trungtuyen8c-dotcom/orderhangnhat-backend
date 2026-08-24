@@ -1,12 +1,13 @@
 import { Router } from "express";
 import { prisma } from "../../db.js";
 import { redis } from "../../redis.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
+import { authorize } from "../../middlewares/authorize.js";
 
 export const statsRouter = Router();
-statsRouter.use(authenticate);
+statsRouter.use(authenticateEither);
 
-statsRouter.get("/alerts", async (_req, res) => {
+statsRouter.get("/alerts", authorize("stats.view"), async (_req, res) => {
   const raw = await redis.get("alerts:late_orders");
   res.json(raw ? JSON.parse(raw) : { count: 0, orders: [] });
 });
@@ -31,7 +32,7 @@ export function isOrderComplete(o: {
   return true;
 }
 
-statsRouter.get("/", async (_req, res) => {
+statsRouter.get("/", authorize("stats.view"), async (_req, res) => {
   const [byStatus, customers, totalOrders, cancelledOrders, liveOrders] = await Promise.all([
     prisma.order.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.customer.count(),

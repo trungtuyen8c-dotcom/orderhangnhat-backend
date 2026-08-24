@@ -2,12 +2,12 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 
 export const controlRouter = Router();
-controlRouter.use(authenticate);
+controlRouter.use(authenticateEither);
 
 const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
   t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);

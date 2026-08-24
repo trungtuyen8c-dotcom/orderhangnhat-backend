@@ -4,7 +4,7 @@ import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
 import { minio, BUCKET } from "../../minio.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { parseSheetId, readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../../utils/gsheets.js";
@@ -12,7 +12,7 @@ import { vnMonthRange } from "../../utils/vnTime.js";
 
 export const shipmentsRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
-shipmentsRouter.use(authenticate);
+shipmentsRouter.use(authenticateEither);
 
 // Upload chứng từ GA (invoice/packing/ingredient/purchase_invoice/tax) qua backend -> MinIO
 shipmentsRouter.post("/documents", authorize("shipments.upload_doc"), upload.single("file"), async (req, res) => {

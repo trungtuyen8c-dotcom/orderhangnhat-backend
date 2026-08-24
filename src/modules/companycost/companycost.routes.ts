@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
@@ -19,7 +19,7 @@ async function resyncTracking(trackingId: string): Promise<void> {
 }
 
 export const companyCostRouter = Router();
-companyCostRouter.use(authenticate);
+companyCostRouter.use(authenticateEither);
 
 export const mk = vnMonthKey;
 const KIND_LABEL: Record<string, string> = { chakubarai: "着払い (hàng trả sau)", weight: "Tiền cân tháng", other: "Khác" };

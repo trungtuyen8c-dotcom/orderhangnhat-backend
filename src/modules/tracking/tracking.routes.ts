@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
@@ -12,7 +12,7 @@ import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const trackingRouter = Router();
-trackingRouter.use(authenticate);
+trackingRouter.use(authenticateEither);
 
 // Lấy tên + giá ¥ từ link sản phẩm (Yahoo Flea/Auctions, Mercari)
 trackingRouter.get("/scrape", authorize("trackings.create"), async (req, res) => {

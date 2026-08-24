@@ -11,6 +11,7 @@ import { logError } from "./utils/systemLog.js";
 import { metricsMiddleware, metricsHandler } from "./middlewares/metrics.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { meRouter } from "./modules/me/me.routes.js";
+import { apiKeysRouter } from "./modules/api-keys/api-keys.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { customersRouter } from "./modules/customers/customers.routes.js";
 import { statsRouter } from "./modules/stats/stats.routes.js";
@@ -40,6 +41,7 @@ app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 app.get("/metrics", metricsHandler); // Nginx chặn path này ra ngoài (deny all)
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
+app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/scrape", scrapeRouter);
 app.use("/api/customers", customersRouter);

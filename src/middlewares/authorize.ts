@@ -25,10 +25,20 @@ export async function invalidatePermissions(userId: string): Promise<void> {
   await redis.del(`perms:${userId}`);
 }
 
-export function authorize(required: string) {
+// apiKeyScope: tag riêng cho API key, mặc định trùng `required`. Dùng khi `required` là 1 permission
+// dùng chung cho cả route đọc lẫn route ghi (vd. accounting.reconcile, warehouse.weigh_vn) - đặt tag khác
+// cho route đọc để API key không bao giờ vô tình mở khóa route ghi cùng permission.
+export function authorize(required: string, apiKeyScope?: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const user = req.user;
     if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+    // API key luôn bị ép giao với scopes đã cấp lúc tạo key, kể cả khi user sở hữu là super_admin
+    const scope = apiKeyScope ?? required;
+    if (req.apiKeyScopes && !req.apiKeyScopes.includes(scope)) {
+      await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: scope, via: "api_key_scope" }, ip: req.ip });
+      return res.status(403).json({ error: "FORBIDDEN", message: `API key thiếu scope: ${scope}` });
+    }
 
     if (user.roles.includes("super_admin")) {
       if (required.startsWith("system.") || required.includes("refund")) {

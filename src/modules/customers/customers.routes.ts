@@ -2,13 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { parseSheetId, syncCustomerOrders } from "../../utils/gsheets.js";
 
 export const customersRouter = Router();
-customersRouter.use(authenticate);
+customersRouter.use(authenticateEither);
 
 customersRouter.get("/", authorize("customers.list"), async (_req, res) => {
   const rows = await prisma.customer.findMany({ orderBy: { createdAt: "desc" }, take: 500 });

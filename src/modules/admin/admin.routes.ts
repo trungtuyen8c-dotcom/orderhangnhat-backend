@@ -2,14 +2,14 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../db.js";
-import { authenticate } from "../../middlewares/authenticate.js";
+import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import { invalidatePermissions } from "../../middlewares/authorize.js";
 import { hashPassword } from "../../utils/password.js";
 import { logAudit } from "../../utils/audit.js";
 
 export const adminRouter = Router();
-adminRouter.use(authenticate);
+adminRouter.use(authenticateEither);
 
 adminRouter.get("/users", authorize("users.list"), async (_req, res) => {
   const users = await prisma.user.findMany({

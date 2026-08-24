@@ -16,20 +16,21 @@ const PERMISSIONS = [
   "media.upload",
   "control.view",
   "companycost.view",
+  "stats.view",
   "system.view_audit_log", "system.manage_settings",
 ];
 
 const ROLES: Record<string, { name: string; system: boolean; perms: string[] | "*" }> = {
   super_admin: { name: "Super Admin", system: true, perms: "*" },
   admin: { name: "Admin", system: true, perms: PERMISSIONS.filter((p) => !p.startsWith("system.manage")) },
-  sale: { name: "Sale", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view"] },
-  accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage", "companycost.view"] },
-  buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view", "companycost.view"] },
-  jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload", "control.view"] },
-  vn_warehouse: { name: "Kho VN", system: false, perms: ["trackings.list", "warehouse.weigh_vn"] },
-  customs: { name: "Hải quan", system: false, perms: ["orders.list", "orders.update_status", "shipments.list"] },
-  delivery: { name: "Giao hàng", system: false, perms: ["orders.list", "orders.update_status"] },
-  viewer: { name: "Viewer", system: false, perms: ["orders.list", "orders.read"] },
+  sale: { name: "Sale", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view", "stats.view"] },
+  accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage", "companycost.view", "stats.view"] },
+  buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view", "companycost.view", "stats.view"] },
+  jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload", "control.view", "stats.view"] },
+  vn_warehouse: { name: "Kho VN", system: false, perms: ["trackings.list", "warehouse.weigh_vn", "stats.view"] },
+  customs: { name: "Hải quan", system: false, perms: ["orders.list", "orders.update_status", "shipments.list", "stats.view"] },
+  delivery: { name: "Giao hàng", system: false, perms: ["orders.list", "orders.update_status", "stats.view"] },
+  viewer: { name: "Viewer", system: false, perms: ["orders.list", "orders.read", "stats.view"] },
 };
 
 async function main() {

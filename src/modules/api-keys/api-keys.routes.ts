@@ -69,3 +69,14 @@ apiKeysRouter.delete("/:id", async (req, res) => {
   await logAudit({ actorId: req.user!.id, action: "api_key.revoked", metadata: { apiKeyId: key.id }, ip: req.ip });
   res.json({ ok: true });
 });
+
+// Xoá hẳn khỏi bảng - chỉ cho key đã thu hồi, tránh xoá nhầm key đang hoạt động.
+apiKeysRouter.delete("/:id/purge", async (req, res) => {
+  const key = await prisma.apiKey.findUnique({ where: { id: req.params.id } });
+  if (!key || key.userId !== req.user!.id) return res.status(404).json({ error: "NOT_FOUND" });
+  if (!key.revokedAt) return res.status(400).json({ error: "NOT_REVOKED", message: "Chỉ xoá được key đã thu hồi" });
+
+  await prisma.apiKey.delete({ where: { id: key.id } });
+  await logAudit({ actorId: req.user!.id, action: "api_key.purged", metadata: { apiKeyId: key.id }, ip: req.ip });
+  res.json({ ok: true });
+});

@@ -85,6 +85,51 @@ describe("authorize middleware", () => {
     expect(next).not.toHaveBeenCalled();
     expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "permission.checked.denied" }));
   });
+
+  // API key luôn bị ép giao với scopes đã cấp lúc tạo key - không được vô tình mở khóa route ghi cùng permission.
+  it("authorize_apiKeyScopeMissingRequiredScope_returns403EvenIfRealPermissionGranted", async () => {
+    const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
+    const res = fakeRes();
+    const next = vi.fn();
+    await authorize("accounting.reconcile")(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+    // Chặn ngay từ scope check, không đi tới loadPermissions (redis.get chưa từng bị gọi).
+    expect(mockRedis.get).not.toHaveBeenCalled();
+  });
+
+  // Case quan trọng nhất: API key gắn với user super_admin vẫn KHÔNG được lách qua scope check.
+  it("authorize_apiKeyScopeMissingRequiredScope_blocksEvenSuperAdminUser", async () => {
+    const req: any = { user: { id: "u1", roles: ["super_admin"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
+    const res = fakeRes();
+    const next = vi.fn();
+    await authorize("system.manage_settings")(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  // apiKeyScope riêng cho route đọc, tách khỏi permission thật (dùng chung với route ghi) - đúng cơ chế
+  // API_KEY_SCOPE_TO_PERMISSION: key xin được "accounting.reconcile_list.read" thì vẫn phải có quyền
+  // "accounting.reconcile" thật mới qua được bước kiểm tra thứ 2.
+  it("authorize_apiKeyScopeUsesDistinctApiKeyScopeParam_passesWhenRealPermissionAlsoGranted", async () => {
+    mockRedis.get.mockResolvedValue(JSON.stringify(["accounting.reconcile"]));
+    const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["accounting.reconcile_list.read"], ip: "1.1.1.1" };
+    const res = fakeRes();
+    const next = vi.fn();
+    await authorize("accounting.reconcile", "accounting.reconcile_list.read")(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it("authorize_apiKeyScopeMatchesButRealPermissionMissing_returns403", async () => {
+    mockRedis.get.mockResolvedValue(JSON.stringify([]));
+    const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
+    const res = fakeRes();
+    const next = vi.fn();
+    await authorize("orders.list")(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+  });
 });
 
 describe("loadPermissions", () => {

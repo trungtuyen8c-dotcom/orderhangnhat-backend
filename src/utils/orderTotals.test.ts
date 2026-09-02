@@ -219,4 +219,27 @@ describe("recomputeOrderTotals", () => {
     // subtotalJpy(10000)*180 - discount(1000)*180 = 1800000 - 180000 = 1620000
     expect(result).toEqual({ totalQuote: 10000, totalVnd: 1620000 });
   });
+
+  it("recomputeOrderTotals_commissionPercentSet_addsPercentOfSubtotalToTotalVndBeforeRate", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
+      exchangeRate: "180",
+      items: [{ qty: 1, unitPriceJpy: "10000", shipJpy: null }],
+      commissionPercent: "10",
+    }));
+    const result = await recomputeOrderTotals("o1");
+    // commissionJpy = 10000*10% = 1000 -> (10000+1000)*180 = 1980000. Công không cộng vào totalQuote (giá mua thật).
+    expect(result).toEqual({ totalQuote: 10000, totalVnd: 1980000 });
+  });
+
+  it("recomputeOrderTotals_commissionAppliesOnlyToItemsNotOrderShipFee_excludesShipAmountFromCommissionBase", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
+      exchangeRate: "180",
+      items: [{ qty: 1, unitPriceJpy: "10000", shipJpy: null }],
+      commissionPercent: "10",
+      shipAmount: "5000", shipCurrency: "JPY",
+    }));
+    const result = await recomputeOrderTotals("o1");
+    // commissionJpy = 10000*10% = 1000 (KHÔNG tính trên shipAmount) -> (10000+1000)*180 + 5000*180 = 1980000+900000
+    expect(result).toEqual({ totalQuote: 10000, totalVnd: 2880000 });
+  });
 });

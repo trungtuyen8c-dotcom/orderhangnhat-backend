@@ -9,6 +9,7 @@ import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syn
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
+import { bumpOrderStatus } from "../../utils/orderStatus.js";
 
 export const warehouseRouter = Router();
 
@@ -137,7 +138,11 @@ warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), async
     else if (!hasNow) data.deliveredAt = null;
   }
   const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
-  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
+  if (t.orderId) {
+    await recomputeOrderTotals(t.orderId);
+    if (data.deliveredAt) await bumpOrderStatus(t.orderId, "delivered");
+    const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId);
+  }
   void syncTracking(t);
   res.json(t);
 });
@@ -186,13 +191,18 @@ const storeSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
 warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), async (req, res) => {
   const p = storeSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const r = await prisma.tracking.updateMany({ where: { id: { in: p.data.ids } }, data: { status: "stored" } });
-  await logAudit({ actorId: req.user!.id, action: "warehouse.store", metadata: { count: r.count } });
+  // storedAt chỉ set lần đầu (không đè lại nếu đã có) - đúng mốc "bắt đầu nằm lưu kho" để tính tuổi tồn kho,
+  // tránh bị reset về "mới" nếu lỡ bấm "Chuyển lưu kho" lại cho hàng đã lưu kho từ trước.
+  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids }, storedAt: null }, data: { status: "stored", storedAt: new Date() } });
+  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids }, storedAt: { not: null } }, data: { status: "stored" } });
+  await logAudit({ actorId: req.user!.id, action: "warehouse.store", metadata: { count: p.data.ids.length } });
   // Đổ chữ/màu "lưu kho" ngay lên sheet khách, không đợi lần sync khác.
-  const stored = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { order: { select: { customerId: true } } } });
+  const stored = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { orderId: true, order: { select: { customerId: true } } } });
   const customerIds = new Set(stored.map((s) => s.order?.customerId).filter((c): c is string => !!c));
   for (const cid of customerIds) void syncCustomerOrders(cid);
-  res.json({ stored: r.count });
+  const orderIds = [...new Set(stored.map((s) => s.orderId).filter((c): c is string => !!c))];
+  await bumpOrderStatus(orderIds, "vn_warehouse");
+  res.json({ stored: p.data.ids.length });
 });
 
 warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), async (req, res) => {
@@ -200,9 +210,9 @@ warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored
   const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
   const rows = await prisma.tracking.findMany({
     where: { status: "stored", OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], ...customerFilter },
-    orderBy: { packedAt: "asc" }, take: 500,
+    orderBy: { storedAt: "asc" }, take: 500,
     select: {
-      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true,
+      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, storedAt: true,
       carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
     },
   });
@@ -223,6 +233,7 @@ warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.histo
     where, orderBy: { packedAt: "desc" }, take: 200,
     select: {
       id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, deliveredAt: true,
+      storedAt: true, customerReceivedAt: true,
       carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
     },
   });

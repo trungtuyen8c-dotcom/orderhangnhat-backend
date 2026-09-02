@@ -181,6 +181,8 @@ model Order {
   jpDomesticShipCurrency String      @default("JPY") @map("jp_domestic_ship_currency")
   intlShipAmount         Decimal     @default(0) @map("intl_ship_amount") @db.Decimal(14, 2)
   intlShipCurrency       String      @default("VND") @map("intl_ship_currency")
+  // % công tính trên tổng tiền JPY (món + ship món), cộng thêm vào totalVnd khi tính lại
+  commissionPercent      Decimal     @default(0) @map("commission_percent") @db.Decimal(5, 2)
   totalVnd               Decimal?    @map("total_vnd") @db.Decimal(16, 2)
   deposit                Decimal     @default(0) @db.Decimal(14, 2)
   paidAt                 DateTime?   @map("paid_at")
@@ -252,6 +254,12 @@ model Tracking {
   // Ngày điền Tracking VN (giao vận nội địa) lần đầu - hiện ở cột "Ngày giao cho khách hàng" trên sheet khách;
   // xóa Tracking VN thì tự về null, không phải ngày sync chạy mà là đúng ngày lúc kho thực sự điền.
   deliveredAt       DateTime?     @map("delivered_at")
+  // Ngày bấm "Chuyển lưu kho" (status="stored") lần đầu - mốc đúng để tính tuổi tồn kho VN, KHÔNG dùng packedAt
+  // (đó là ngày kho Nhật đóng gói, không phải ngày hàng thực nằm ở kho VN chờ ship).
+  storedAt          DateTime?     @map("stored_at")
+  // Ngày xác nhận khách ĐÃ THỰC NHẬN hàng - khác deliveredAt (chỉ là ngày tạo mã vận đơn nội địa, không phải
+  // ngày khách cầm được hàng). Set tay qua nút "Đã giao khách" sau khi có xác nhận thật.
+  customerReceivedAt DateTime?    @map("customer_received_at")
   cartonId          String?       @map("carton_id") @db.Uuid
   // true nếu người dùng tự gán/gỡ kiện tay trong app - sync sẽ KHÔNG tự đổi cartonId nữa (tránh đè thao tác thủ công)
   cartonManual      Boolean       @default(false) @map("carton_manual")

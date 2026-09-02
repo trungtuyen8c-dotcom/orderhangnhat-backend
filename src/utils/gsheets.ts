@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
+import { bumpOrderStatus } from "./orderStatus.js";
 import { logWarn, logError } from "./systemLog.js";
 
 // Tạo tracking mồ côi (orderId null) an toàn khi 2 nguồn (cron 2 phút + webhook tức thì) cùng đụng 1 mã cùng
@@ -214,9 +215,12 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
+    // % công (order.commissionPercent) - tính trên giá món + ship món (không gồm ship cả đơn), giống recomputeOrderTotals.
+    const commissionPercent = Number(o.commissionPercent ?? 0);
     o.items.forEach((it, idx) => {
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
+      const commissionJpy = (giaWeb + ship) * (commissionPercent / 100);
       const trk = o.trackings[idx];
       const purchaseDate = it.purchaseDate ?? o.createdAt;
       const m = vnDate(purchaseDate).getUTCMonth() + 1;
@@ -243,7 +247,7 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
         { ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null, shipRateCurrency: usingCustRate ? "VND" : trk.shipRateCurrency },
         rate,
       ) : 0;
-      const jpy = giaWeb + ship + orderShipJpy;
+      const jpy = giaWeb + ship + commissionJpy + orderShipJpy;
       const vnd = (rate ? Math.round(jpy * rate) : 0) + orderShipVndOnly;
       const grandTotal = vnd + Math.round(shipTotal);
       const row: FieldRow = {
@@ -741,6 +745,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const t of trks) { const arr = trksByCode.get(t.code) ?? []; arr.push(t); trksByCode.set(t.code, arr); }
   let updated = 0;
   const customers = new Set<string>();
+  const packedOrderIds = new Set<string>();
   for (const t of trks) {
     if (t.packedAt) continue;
     const packedAt = dateByCode.get(t.code) ?? new Date();
@@ -750,9 +755,10 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     t.lateAfterLock = lateAfterLock;
     void syncTracking({ ...t, packedAt } as TrackingRow);
     updated++;
-    if (t.order) { await recomputeOrderTotals(t.orderId!); customers.add(t.order.customerId); }
+    if (t.order) { await recomputeOrderTotals(t.orderId!); customers.add(t.order.customerId); packedOrderIds.add(t.orderId!); }
   }
   for (const c of customers) await syncCustomerOrders(c);
+  await bumpOrderStatus([...packedOrderIds], "jp_warehouse");
 
   // Tự tạo/gán Carton (kiện) theo BILL + Số thùng của từng dòng vật lý trong sheet — thay cho gán tay.
   // Tự tạo/gán lại theo đúng BILL/Thùng hiện tại trong sheet (đổi tên/số thùng thì tự theo) -
@@ -1013,6 +1019,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
     await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked, needsTax: true } });
     t.lateAfterLock = locked;
     t.needsTax = true;
+    if (t.orderId) await bumpOrderStatus(t.orderId, "jp_warehouse");
   }
   if (row && group.length === 1 && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
 

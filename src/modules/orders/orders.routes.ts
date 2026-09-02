@@ -130,11 +130,13 @@ const pricingSchema = {
   jpDomesticShipCurrency: curEnum.optional(),
   intlShipAmount: z.number().nonnegative().optional(),
   intlShipCurrency: curEnum.optional(),
+  commissionPercent: z.number().min(0).max(100).optional(),
 };
 const PRICING_FIELDS = [
   "exchangeRate", "shipAmount", "shipCurrency", "surchargeAmount", "surchargeCurrency",
   "discountAmount", "discountCurrency", "serviceFeeAmount", "serviceFeeCurrency",
   "jpDomesticShipAmount", "jpDomesticShipCurrency", "intlShipAmount", "intlShipCurrency",
+  "commissionPercent",
 ] as const;
 
 const trackingsField = z.array(z.object({
@@ -206,6 +208,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
     intlShipAmount: d.intlShipAmount ?? 0,
     intlShipCurrency: d.intlShipCurrency ?? "VND",
+    commissionPercent: d.commissionPercent ?? 0,
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
     externalWarehouse: d.externalWarehouse ?? false,

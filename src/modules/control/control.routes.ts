@@ -165,8 +165,21 @@ controlRouter.put("/storage-config", authorize("system.manage_settings"), async 
 async function storageOverdueCount(): Promise<number> {
   const cfg = await getStorageConfig();
   const cut = new Date(Date.now() - cfg.overdueDays * 86400000);
-  return prisma.tracking.count({ where: { status: "stored", packedAt: { lt: cut }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], NOT: { order: { externalWarehouse: true } } } });
+  // Tuổi tồn kho tính theo storedAt (ngày bấm "Chuyển lưu kho" - đúng mốc hàng bắt đầu nằm chờ ở kho VN).
+  // Bản ghi cũ trước khi có field này chưa có storedAt -> tạm dùng packedAt làm mốc dự phòng.
+  return prisma.tracking.count({
+    where: {
+      status: "stored",
+      OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }],
+      AND: [{ OR: [{ storedAt: { lt: cut } }, { AND: [{ storedAt: null }, { packedAt: { lt: cut } }] }] }],
+      NOT: { order: { externalWarehouse: true } },
+    },
+  });
 }
+// Đếm riêng cho Kho VN xem (role vn_warehouse không có quyền control.view để đọc /overview đầy đủ).
+controlRouter.get("/storage-overdue-count", authorize("warehouse.weigh_vn"), async (_req, res) => {
+  res.json({ storageOverdue: await storageOverdueCount() });
+});
 
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {

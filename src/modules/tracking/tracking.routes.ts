@@ -171,6 +171,8 @@ const updateSchema = z.object({
   packedAt: z.coerce.date().nullable().optional(),
   status: z.string().optional(),
   taxCollected: z.boolean().optional(),
+  // Ngày xác nhận khách ĐÃ THỰC NHẬN hàng (khác deliveredAt = ngày tạo mã vận đơn nội địa) - set tay qua nút riêng.
+  customerReceivedAt: z.coerce.date().nullable().optional(),
 });
 
 trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {

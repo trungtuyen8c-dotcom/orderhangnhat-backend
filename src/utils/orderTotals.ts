@@ -40,6 +40,8 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   if (!order) return;
 
   const subtotalJpy = order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + Number(i.shipJpy ?? 0), 0);
+  // Công = % trên tổng tiền JPY (món + ship món), cộng thẳng vào subtotal trước khi quy đổi ra VND.
+  const commissionJpy = subtotalJpy * (Number(order.commissionPercent ?? 0) / 100);
   const rate = Number(order.exchangeRate ?? 0);
   const toVnd = (amt: number, cur: string) => (cur === "JPY" ? amt * rate : amt);
   // Đơn giá ship/kg: ưu tiên đặt trên tracking, không có thì lấy mặc định của khách (kho không cần nhập).
@@ -81,7 +83,7 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
 
   const totalVnd = hasUnconverted
     ? null
-    : subtotalJpy * rate
+    : (subtotalJpy + commissionJpy) * rate
       + toVnd(Number(order.shipAmount), order.shipCurrency)
       + toVnd(Number(order.surchargeAmount), order.surchargeCurrency)
       + toVnd(Number(order.serviceFeeAmount), order.serviceFeeCurrency)

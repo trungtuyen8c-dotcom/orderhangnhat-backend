@@ -1,9 +1,14 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { randomUUID } from "crypto";
 import { config } from "./config.js";
+import { prisma } from "./db.js";
 import { ensureBucket } from "./minio.js";
 import { startJobs } from "./jobs/alerts.js";
+import { logger } from "./logger.js";
+import { logError } from "./utils/systemLog.js";
+import { metricsMiddleware, metricsHandler } from "./middlewares/metrics.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { meRouter } from "./modules/me/me.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
@@ -20,14 +25,19 @@ import { publicRouter } from "./modules/public/public.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { scrapeRouter } from "./modules/scrape/scrape.routes.js";
 import { backupRouter } from "./modules/backup/backup.routes.js";
+import { systemLogsRouter } from "./modules/system-logs/system-logs.routes.js";
+import { clientLogsRouter } from "./modules/client-logs/client-logs.routes.js";
 
 const app = express();
 app.set("trust proxy", true);
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
+app.use((req, res, next) => { req.requestId = randomUUID(); res.setHeader("X-Request-Id", req.requestId); next(); });
+app.use(metricsMiddleware);
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/metrics", metricsHandler); // Nginx chặn path này ra ngoài (deny all)
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
 app.use("/api/orders", ordersRouter);
@@ -43,16 +53,30 @@ app.use("/api/company-costs", companyCostRouter);
 app.use("/api/payroll", payrollRouter);
 app.use("/api/public", publicRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/system-logs", systemLogsRouter);
+app.use("/api/client-logs", clientLogsRouter);
 app.use("/api/backup", backupRouter);
 
 // Error handler
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err);
-  res.status(500).json({ error: "INTERNAL" });
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logError({
+    request_id: req.requestId, method: req.method, url: req.originalUrl, user_id: req.user?.id,
+    err: { message: err?.message, stack: err?.stack },
+  }, "request_failed");
+  res.status(500).json({ error: "INTERNAL", requestId: req.requestId });
 });
 
 app.listen(config.port, async () => {
   await ensureBucket();
+  // Mọi mã tracking đã đóng hàng đều cần lấy thuế 100% (không phân biệt) - backfill 1 lần cho dữ liệu cũ
+  // đóng hàng trước khi cờ needsTax được set tự động ngay lúc quét kho (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
+  try { await prisma.tracking.updateMany({ where: { packedAt: { not: null }, needsTax: false }, data: { needsTax: true } }); }
+  catch (e) { logError({ err: (e as Error).message }, "startup_backfill_needs_tax_failed"); }
+  // Chặn trùng tracking mồ côi (order_id null) cùng mã ở tầng DB - Prisma schema không hỗ trợ partial index
+  // nên tạo bằng raw SQL, idempotent (IF NOT EXISTS). Chạy DEDUPE_APPLY=1 npx tsx prisma/dedupe-orphan-tracking.ts
+  // dọn dữ liệu trùng cũ TRƯỚC lần deploy đầu tiên có dòng này, nếu không CREATE INDEX sẽ lỗi vì đã có trùng.
+  try { await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS trackings_code_orphan_uniq ON trackings (code) WHERE order_id IS NULL`); }
+  catch (e) { logError({ err: (e as Error).message }, "startup_create_orphan_index_failed"); }
   startJobs();
-  console.log(`API listening on :${config.port}`);
+  logger.info({ port: config.port }, "api_listening");
 });

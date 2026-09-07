@@ -95,6 +95,18 @@ model AccessAudit {
   @@map("access_audit")
 }
 
+model SystemLog {
+  id        BigInt   @id @default(autoincrement())
+  level     String
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@map("system_logs")
+}
+
 model Customer {
   id            String   @id @default(uuid()) @db.Uuid
   code          String?
@@ -105,6 +117,8 @@ model Customer {
   note          String?
   sheetId       String?  @map("sheet_id")
   shipRatePerKg Decimal? @map("ship_rate_per_kg") @db.Decimal(14, 2)
+  // Khách chỉ lấy chứng từ/thuế, không cân ở Kho VN - đơn mới tạo cho khách này tự bật sẵn Order.skipVnWeighing.
+  skipVnWeighingDefault Boolean @default(false) @map("skip_vn_weighing_default")
   createdAt     DateTime @default(now()) @map("created_at")
   orders        Order[]
 
@@ -235,6 +249,9 @@ model Tracking {
   needsTax          Boolean       @default(false) @map("needs_tax")
   // Tick khi đã lấy được thuế từ khách - đồng bộ hiển thị giữa trang Chứng từ và Orders/PayLaterOrders.
   taxCollected      Boolean       @default(false) @map("tax_collected")
+  // Tick thủ công ở "Soát theo tháng" khi đã bổ sung tracking này vào sheet nháp kho (đang chờ needsTax
+  // tự bật ở lần quét sau) - ẩn khỏi danh sách "chưa lên thuế" dù needsTax vẫn false, tránh lặp lại việc đã xử lý.
+  taxAuditDismissed Boolean       @default(false) @map("tax_audit_dismissed")
   status            String        @default("new")
   createdAt         DateTime      @default(now()) @map("created_at")
   order             Order?        @relation(fields: [orderId], references: [id])
@@ -256,13 +273,23 @@ model PackDayLock {
 
 // Kiện / carton: kho Nhật báo cân tổng; hệ thống cộng cân lẻ tracking để đối soát
 model Carton {
-  id               String     @id @default(uuid()) @db.Uuid
-  code             String
-  declaredWeightKg Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
-  packedDate       DateTime?  @map("packed_date")
-  note             String?
-  createdAt        DateTime   @default(now()) @map("created_at")
-  trackings        Tracking[]
+  id                String     @id @default(uuid()) @db.Uuid
+  code              String
+  declaredWeightKg  Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
+  // Tổng cân VN do Kho VN tự nhập tay (khác actualKg tính tự động = tổng cân từng tracking) - dùng để
+  // đối soát với declaredWeightKg TRƯỚC khi cho điền cân từng mã lẻ trong kiện. Xem logic khóa ở warehouse.routes.ts.
+  vnTotalWeightKg   Decimal?   @map("vn_total_weight_kg") @db.Decimal(8, 3)
+  // Sale/NV mua bấm xác nhận khi 2 tổng lệch >= 1kg nhưng đã hỏi kho Nhật xác nhận số đúng - mở khóa cân từng mã lẻ.
+  // Sửa lại declaredWeightKg hoặc vnTotalWeightKg sau khi xác nhận thì reset về null (xác nhận cũ không còn hiệu lực).
+  weightConfirmedAt DateTime?  @map("weight_confirmed_at")
+  // Số thiết bị điện tử công ty phụ thu (đếm/kiểm tra lại theo kiện) - nhân đơn giá cấu hình ở AppConfig electronics_price_vnd.
+  electronicsCount  Int?       @map("electronics_count")
+  // Kho VN bấm xác nhận sau khi đếm thực tế khớp electronicsCount. Sửa lại electronicsCount thì reset về null.
+  electronicsConfirmedAt DateTime? @map("electronics_confirmed_at")
+  packedDate        DateTime?  @map("packed_date")
+  note              String?
+  createdAt         DateTime   @default(now()) @map("created_at")
+  trackings         Tracking[]
 
   @@map("cartons")
 }
@@ -435,6 +462,31 @@ model AppConfig {
   @@map("app_config")
 }
 
+// Ghi chú thủ công cho dòng vàng "cần lấy thuế" theo mã tracking - dùng khi dòng chưa khớp đơn (mã seller
+// ghi sai/thiếu, phải mở hàng ra mới biết) để note lại tình trạng, không tự gán đơn.
+// trackingCode là khóa tra cứu chung: mã tracking thật (dòng khớp mã) hoặc khóa tổng hợp
+// "name:bill:orderCode:itemName" (dòng khớp theo tên, không có mã tracking) - cùng công thức taxRowKey ở FE.
+model TaxRowNote {
+  trackingCode String   @id @map("tracking_code")
+  note         String
+  taxCollected Boolean  @default(false) @map("tax_collected")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedBy    String?  @map("updated_by") @db.Uuid
+
+  @@map("tax_row_notes")
+}
+
+// Tick "đã lấy hóa đơn" (biên lai mua hàng, lưu ngoài Google Drive theo Tháng>Ngày>Bill) theo từng Bill
+// trong 1 ngày đóng hàng - key = "YYYY-MM-DD|BILL". Chỉ lưu trạng thái, không lưu file (file vẫn ở Drive).
+model BillInvoiceStatus {
+  key       String   @id
+  done      Boolean  @default(false)
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@map("bill_invoice_status")
+}
+
 model BackupRun {
   id          String    @id @default(uuid()) @db.Uuid
   kind        String    @default("manual") // manual | scheduled
@@ -465,6 +517,9 @@ model CompanyCost {
   refId        String?  @map("ref_id") @db.Uuid
   note         String?
   paid         Boolean  @default(false)
+  // Khoản nhập tay SAU khi ngày đóng hàng của tracking (refId) đã bị chốt hải quan - không tự vào invoice
+  // ngày đó nữa, cần khai bổ sung thủ công. Tính 1 lần lúc tạo, không đổi lại sau đó.
+  lateAfterLock Boolean @default(false) @map("late_after_lock")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([month])

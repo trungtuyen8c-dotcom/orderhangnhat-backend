@@ -31,11 +31,11 @@ controlRouter.get("/cartons", authorize("trackings.list"), async (_req, res) => 
   res.json(rows);
 });
 
-const cartonSchema = z.object({ code: z.string().min(1), declaredWeightKg: z.number().nonnegative().optional(), packedDate: z.string().optional(), note: z.string().optional() });
+const cartonSchema = z.object({ code: z.string().min(1), declaredWeightKg: z.number().nonnegative().optional(), electronicsCount: z.number().int().nonnegative().optional(), packedDate: z.string().optional(), note: z.string().optional() });
 controlRouter.post("/cartons", authorize("trackings.update"), async (req, res) => {
   const p = cartonSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const c = await prisma.carton.create({ data: { id: uuid(), code: p.data.code, declaredWeightKg: p.data.declaredWeightKg ?? null, packedDate: p.data.packedDate ? new Date(p.data.packedDate) : null, note: p.data.note ?? null } });
+  const c = await prisma.carton.create({ data: { id: uuid(), code: p.data.code, declaredWeightKg: p.data.declaredWeightKg ?? null, electronicsCount: p.data.electronicsCount ?? null, packedDate: p.data.packedDate ? new Date(p.data.packedDate) : null, note: p.data.note ?? null } });
   await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.created" });
   res.status(201).json(c);
 });
@@ -44,7 +44,16 @@ controlRouter.patch("/cartons/:id", authorize("trackings.update"), async (req, r
   const p = cartonSchema.partial().safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
   const { packedDate, ...rest } = p.data;
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { ...rest, ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}) } });
+  const c = await prisma.carton.update({
+    where: { id: req.params.id },
+    // Sửa lại cân tổng kho Nhật -> xác nhận lệch cân cũ (nếu có) không còn hiệu lực, phải xác nhận lại.
+    data: {
+      ...rest,
+      ...(rest.declaredWeightKg !== undefined ? { weightConfirmedAt: null } : {}),
+      ...(rest.electronicsCount !== undefined ? { electronicsConfirmedAt: null } : {}),
+      ...(packedDate !== undefined ? { packedDate: packedDate ? new Date(packedDate) : null } : {}),
+    },
+  });
   res.json(c);
 });
 
@@ -96,24 +105,42 @@ controlRouter.put("/debt-config", authorize("system.manage_settings"), async (re
   res.json(p.data);
 });
 
+// Gộp nợ theo khách + tiền tệ - KHÔNG lọc where:{currency:"VND"} như trước (bỏ sót hoàn toàn khách nợ ¥
+// khi đơn chưa có tỉ giá - computeDebtBalance cố ý giữ nợ theo ¥ trong trường hợp đó, không quy đổi ẩu).
+// Ngưỡng số tiền (thresholdVnd) chỉ áp dụng được cho nợ ₫; nợ ¥ chỉ xét theo số ngày quá hạn.
+export function summarizeOverdueDebts(
+  debtAgg: { customerId: string; currency: string; _sum: { balance: unknown } }[],
+  oldest: Map<string, Date>,
+  customers: { id: string; name: string; code: string | null; phone: string | null }[],
+  cfg: { thresholdVnd: number; overdueDays: number },
+  now: number,
+) {
+  const cmap = new Map(customers.map((c) => [c.id, c]));
+  const byCustomer = new Map<string, { balanceVnd: number; balanceJpy: number }>();
+  for (const g of debtAgg) {
+    const cur = byCustomer.get(g.customerId) ?? { balanceVnd: 0, balanceJpy: 0 };
+    const amt = Number(g._sum.balance ?? 0);
+    if (g.currency === "JPY") cur.balanceJpy += amt; else cur.balanceVnd += amt;
+    byCustomer.set(g.customerId, cur);
+  }
+  return [...byCustomer.entries()].map(([customerId, { balanceVnd, balanceJpy }]) => {
+    const od = oldest.get(customerId);
+    const days = od ? Math.floor((now - new Date(od).getTime()) / 86400000) : 0;
+    return { customerId, name: cmap.get(customerId)?.name ?? "?", code: cmap.get(customerId)?.code ?? null, phone: cmap.get(customerId)?.phone ?? null, balanceVnd, balanceJpy, days };
+  }).filter((r) => (r.balanceVnd > 0 || r.balanceJpy > 0) && (r.balanceVnd >= cfg.thresholdVnd || r.days >= cfg.overdueDays))
+    .sort((a, b) => b.balanceVnd - a.balanceVnd || b.balanceJpy - a.balanceJpy);
+}
+
 async function overdueDebts() {
   const cfg = await getDebtConfig();
   const [debtAgg, orders, customers] = await Promise.all([
-    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true } }),
+    prisma.debt.groupBy({ by: ["customerId", "currency"], _sum: { balance: true } }),
     prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, createdAt: true } }),
     prisma.customer.findMany({ select: { id: true, name: true, code: true, phone: true } }),
   ]);
-  const cmap = new Map(customers.map((c) => [c.id, c]));
   const oldest = new Map<string, Date>();
   for (const o of orders) { const cur = oldest.get(o.customerId); if (!cur || o.createdAt < cur) oldest.set(o.customerId, o.createdAt); }
-  const now = Date.now();
-  const list = debtAgg.map((g) => {
-    const balance = Number(g._sum.balance ?? 0);
-    const od = oldest.get(g.customerId);
-    const days = od ? Math.floor((now - new Date(od).getTime()) / 86400000) : 0;
-    return { customerId: g.customerId, name: cmap.get(g.customerId)?.name ?? "?", code: cmap.get(g.customerId)?.code ?? null, phone: cmap.get(g.customerId)?.phone ?? null, balance, days };
-  }).filter((r) => r.balance > 0 && (r.balance >= cfg.thresholdVnd || r.days >= cfg.overdueDays))
-    .sort((a, b) => b.balance - a.balance);
+  const list = summarizeOverdueDebts(debtAgg, oldest, customers, cfg, Date.now());
   return { cfg, list };
 }
 controlRouter.get("/overdue-debts", authorize("orders.read"), async (_req, res) => {
@@ -143,9 +170,11 @@ async function storageOverdueCount(): Promise<number> {
 
 // ===== Trung tâm kiểm soát: gom số đếm =====
 controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
-  const weekAgo = new Date(Date.now() - 7 * 86400000);
-  const [lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock] = await Promise.all([
-    prisma.order.count({ where: { status: { not: "cancelled" }, trackings: { none: {} }, createdAt: { lt: weekAgo } } }),
+  // Đơn quá 5 ngày chưa có tracking nào - tách riêng theo 3 loại web (nguồn khác nhau, người xử lý khác nhau).
+  const lateCut = new Date(Date.now() - 5 * 86400000);
+  const lateOrdersBySource = (source: string) => prisma.order.count({ where: { status: { not: "cancelled" }, source, trackings: { none: {} }, createdAt: { lt: lateCut } } });
+  const [lateOrdersMercari, lateOrdersYahoo, lateOrdersNormal, notReviewed, pendingDeposits, unmatched, missingPrice, cartons, overdue, storageOverdue, lateAfterLock, taxPendingTracking, taxPendingName] = await Promise.all([
+    lateOrdersBySource("mercari"), lateOrdersBySource("yahoo"), lateOrdersBySource("normal"),
     prisma.tracking.count({ where: { review: null, orderId: { not: null } } }),
     prisma.customerDeposit.count({ where: { confirmed: false } }),
     prisma.tracking.count({ where: { orderId: null } }),
@@ -156,13 +185,19 @@ controlRouter.get("/overview", authorize("orders.read"), async (_req, res) => {
     overdueDebts(),
     storageOverdueCount(),
     prisma.tracking.count({ where: { lateAfterLock: true } }),
+    // Từng khớp dòng vàng "cần lấy thuế" (needsTax) nhưng chưa tick "Đã lấy thuế" - cảnh báo dồn nhiều chuyến chưa thu.
+    // Loại tracking chưa gắn đơn (orderId null) - trang Shipments cũng ẩn nhóm này (chưa biết khách/đơn thì
+    // chưa xử lý được ở đây), tính vào đây sẽ tạo cảnh báo cụt không có chỗ xử lý.
+    prisma.tracking.count({ where: { needsTax: true, taxCollected: false, orderId: { not: null } } }),
+    // Dòng khớp theo tên (file GB, không có mã tracking) đã đăng ký lúc quét nhưng chưa tick "Đã lấy thuế".
+    prisma.taxRowNote.count({ where: { trackingCode: { startsWith: "name:" }, taxCollected: false } }),
   ]);
   const cartonMismatch = cartons.filter((c) => {
     const actual = c.trackings.reduce((s, t) => s + effKg(t), 0);
     return Math.abs(actual - Number(c.declaredWeightKg)) > 0.1;
   }).length;
   res.json({
-    lateOrders, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
-    overdueDebts: overdue.list.length, storageOverdue, lateAfterLock,
+    lateOrdersMercari, lateOrdersYahoo, lateOrdersNormal, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,
+    overdueDebts: overdue.list.length, storageOverdue, lateAfterLock, taxPending: taxPendingTracking + taxPendingName,
   });
 });

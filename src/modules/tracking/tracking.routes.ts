@@ -7,7 +7,7 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
-import { syncTracking, removeTrackingRow, syncCustomerOrders } from "../../utils/gsheets.js";
+import { syncTracking, removeTrackingRow, syncCustomerOrders, createOrphanTrackingSafe } from "../../utils/gsheets.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
@@ -36,7 +36,7 @@ trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
   if (customerQ) where.order = { customer: { name: { contains: customerQ, mode: "insensitive" } } };
   const rows = await prisma.tracking.findMany({
     where, orderBy: { createdAt: "desc" }, take: 500,
-    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
+    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, exchangeRate: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
   });
   res.json(rows);
 });
@@ -148,7 +148,7 @@ trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
   const existing = await prisma.tracking.findFirst({ where: { code: p.data.code, orderId: null } });
   const t = existing
     ? await prisma.tracking.update({ where: { id: existing.id }, data: { ...p.data, cartonManual: p.data.cartonId !== undefined ? true : existing.cartonManual, status: p.data.orderId ? "linked" : existing.status } })
-    : await prisma.tracking.create({ data: { id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" } });
+    : await createOrphanTrackingSafe({ id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" });
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
   void syncTracking(t);
@@ -176,7 +176,7 @@ const updateSchema = z.object({
 trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {
   const p = updateSchema.safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const before = await prisma.tracking.findUnique({ where: { id: req.params.id }, select: { cartonId: true } });
+  const before = await prisma.tracking.findUnique({ where: { id: req.params.id }, select: { cartonId: true, code: true } });
   // Tự tay đổi/gỡ kiện qua API này -> đánh dấu manual để sync kho không tự đè lại theo BILL/Thùng nữa.
   const data: typeof p.data & { cartonManual?: boolean } = { ...p.data };
   if (p.data.cartonId !== undefined) data.cartonManual = true;
@@ -184,6 +184,13 @@ trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => 
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   void syncTracking(t);
   if (before && before.cartonId !== t.cartonId) await deleteCartonIfEmpty(before.cartonId);
+  // Sửa mã tracking qua đường nhanh (Orders...) cũng phải để lại vết - không bắt buộc nhập lý do như "Xử lý lạ",
+  // nhưng vẫn cần biết đã từng đổi từ mã gì sang mã gì để tra cứu khi có tranh chấp/nhầm lẫn.
+  if (before && p.data.code !== undefined && p.data.code !== before.code) {
+    await prisma.trackingLog.create({
+      data: { trackingId: t.id, actorId: req.user!.id, oldValue: { code: before.code }, newValue: { code: t.code }, reason: "Sửa mã tracking" },
+    });
+  }
   res.json(t);
 });
 

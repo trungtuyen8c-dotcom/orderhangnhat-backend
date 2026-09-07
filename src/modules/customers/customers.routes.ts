@@ -51,6 +51,7 @@ const schema = z.object({
   note: z.string().nullable().optional(),
   sheetUrl: z.string().nullable().optional(),
   shipRatePerKg: z.number().nonnegative().nullable().optional(),
+  skipVnWeighingDefault: z.boolean().optional(),
 });
 
 function withSheet(d: Record<string, unknown>) {

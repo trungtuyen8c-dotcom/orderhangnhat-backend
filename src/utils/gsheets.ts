@@ -1,8 +1,27 @@
 import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
+import ExcelJS from "exceljs";
+import JSZip from "jszip";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
+import { logWarn, logError } from "./systemLog.js";
+
+// Tạo tracking mồ côi (orderId null) an toàn khi 2 nguồn (cron 2 phút + webhook tức thì) cùng đụng 1 mã cùng
+// lúc - unique index trackings_code_orphan_uniq (tạo ở index.ts startup) chặn trùng ở tầng DB, gặp lỗi trùng
+// thì lấy lại đúng dòng đã có thay vì crash cả loạt quét.
+export async function createOrphanTrackingSafe(data: Parameters<typeof prisma.tracking.create>[0]["data"]) {
+  try {
+    return await prisma.tracking.create({ data });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const existing = await prisma.tracking.findFirst({ where: { code: data.code as string, orderId: null } });
+      if (existing) return existing;
+    }
+    throw e;
+  }
+}
 
 // Đồng bộ Tracking sang Google Sheets bằng service account.
 // Bật khi có đủ env: GOOGLE_SA_EMAIL, GOOGLE_SA_PRIVATE_KEY, GSHEET_ID (GSHEET_TAB mặc định "Tracking").
@@ -45,15 +64,24 @@ async function getToken(): Promise<string> {
   return data.access_token;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function apiSheet(sid: string, path: string, method: string, body?: unknown) {
-  const token = await getToken();
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`GSHEET_API ${method} ${path} -> ${res.status} ${await res.text()}`);
-  return res.json();
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const token = await getToken();
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.ok) return res.json();
+    // 429 (rate limit) / 5xx là lỗi tạm thời của Google -> thử lại thay vì bỏ dở sync giữa chừng để lại dữ liệu cũ
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt === maxAttempts) throw new Error(`GSHEET_API ${method} ${path} -> ${res.status} ${await res.text()}`);
+    await sleep(500 * 2 ** (attempt - 1));
+  }
+  throw new Error(`GSHEET_API ${method} ${path} -> retries exhausted`);
 }
 const api = (path: string, method: string, body?: unknown) => apiSheet(SHEET_ID!, path, method, body);
 
@@ -109,7 +137,7 @@ export async function syncTracking(t: TrackingRow): Promise<void> {
       await api(`/values/${encodeURIComponent(TAB)}!A1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { values: [rowValues(t)] });
     }
   } catch (e) {
-    console.error("[gsheets] syncTracking", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_sync_tracking_failed");
   }
 }
 
@@ -120,7 +148,7 @@ export async function removeTrackingRow(id: string): Promise<void> {
     const row = await findRow(id);
     if (row) await api(`/values/${encodeURIComponent(TAB)}!A${row}:J${row}:clear`, "POST", {});
   } catch (e) {
-    console.error("[gsheets] removeTrackingRow", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_remove_tracking_row_failed");
   }
 }
 
@@ -195,6 +223,12 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
       const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
       const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
+      // Ship của cả đơn (order.shipAmount - phí ship/thanh toán tay, vd COMBINI) chỉ cộng vào món đầu (tránh nhân đôi
+      // khi đơn nhiều món). Cùng đơn vị ¥ với ship món -> ghép thành công thức "=shipMón+shipĐơn" để khách bấm vào
+      // sheet thấy rõ 2 khoản cộng ra sao; khác đơn vị (VND) thì cộng thẳng vào ₫ quy đổi, không ghép công thức được.
+      const orderShipJpy = idx === 0 && o.shipCurrency === "JPY" ? Number(o.shipAmount ?? 0) : 0;
+      const orderShipVndOnly = idx === 0 && o.shipCurrency !== "JPY" ? Number(o.shipAmount ?? 0) : 0;
+      const shipCell: string | number = orderShipJpy > 0 ? (ship > 0 ? `=${ship}+${orderShipJpy}` : orderShipJpy) : (ship || "");
       // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
       // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
       const weight = trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : null);
@@ -203,15 +237,15 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custShipRateVnd ?? null;
       const shipVndPerKg = rawShipRate != null ? (trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
       const shipTotal = trk ? trackingShipVnd({ ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null }, rate) : 0;
-      const jpy = giaWeb + ship;
-      const vnd = rate ? Math.round(jpy * rate) : 0;
+      const jpy = giaWeb + ship + orderShipJpy;
+      const vnd = (rate ? Math.round(jpy * rate) : 0) + orderShipVndOnly;
       const grandTotal = vnd + Math.round(shipTotal);
       const row: FieldRow = {
         code: o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         date: fmtDate(purchaseDate),
         acc: String(o.nick ?? ""),
         url: String(it.url ?? ""), method: String(it.paymentMethod ?? ""),
-        giaWeb: giaWeb || "", ship: ship || "", total: jpy,
+        giaWeb: giaWeb || "", ship: shipCell, total: jpy,
         rate: rate || "", vndConverted: vnd || "",
         weight: weight ?? "",
         surcharge: surchargeCell ? Math.round(surchargeCell) : "",
@@ -302,12 +336,15 @@ export function syncCustomerOrders(customerId: string): Promise<void> {
 
 // ===== Quét file kho (bên đóng hàng): mã trùng tracking -> set "Đóng hàng về" (cam) =====
 // Tên tab kiểu "26.6" / "8.6" = ngày.tháng -> ngày đóng. Bỏ tab không phải ngày (vd "TRANG MẪU").
-function tabDate(title: string): Date | null {
+export function tabDate(title: string, now: Date = new Date()): Date | null {
   const m = title.trim().match(/^0*(\d{1,2})[.\/-]0*(\d{1,2})$/);
   if (!m) return null;
   const d = Number(m[1]), mo = Number(m[2]);
   if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
-  const dt = new Date(new Date().getFullYear(), mo - 1, d);
+  let dt = new Date(now.getFullYear(), mo - 1, d);
+  // Tab không ghi năm - quét tab "31.12" đầu tháng 1 năm sau sẽ ghép nhầm thành 31/12 NĂM SAU (tương lai gần
+  // 1 năm) nếu cứ lấy năm hiện tại. Ra tương lai hơn 30 ngày -> chắc chắn là tab của năm trước, lùi lại 1 năm.
+  if (dt.getTime() - now.getTime() > 30 * 86400000) dt = new Date(now.getFullYear() - 1, mo - 1, d);
   return isNaN(dt.getTime()) ? null : dt;
 }
 
@@ -335,16 +372,23 @@ function isChecked(v: string): boolean {
 
 // Đọc mọi tab-ngày của file kho: cột A = BILL, B = Số thùng, E = mã tracking, ngày đóng = ngày của tab.
 // Dùng batchGet gộp nhiều tab/1 request (file kho có thể >100 tab -> tránh 429 rate limit).
-export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{ code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[]> {
+export async function readWarehousePackRows(sid: string, recentDays?: number): Promise<{
+  rows: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[];
+  // Dòng đã xóa trắng mã (E) nhưng còn sót tên/giá (F/G) hệ thống ghi từ trước - vd dòng "thua" trong cặp quét
+  // trùng (RED) không có Tracking.packRow đại diện (chỉ 1 dòng/mã được lưu packRow, dòng còn lại không có nơi nào
+  // trong DB nhớ tới nó) nên cơ chế dọn theo packRow (xem syncPackedFromWarehouse) bỏ sót, để lại rác vĩnh viễn.
+  staleBlank: { date: Date | null; tab: string; row: number; sheetId: number }[];
+}> {
   const meta = (await apiSheet(sid, `?fields=sheets.properties(title,sheetId)`, "GET")) as { sheets?: { properties: { title: string; sheetId: number } }[] };
   let dateTabs = (meta.sheets ?? [])
     .map((s) => ({ title: s.properties.title, sheetId: s.properties.sheetId, date: tabDate(s.properties.title) }))
     .filter((t): t is { title: string; sheetId: number; date: Date } => t.date != null);
   // Chỉ quét tab gần đây cho nhanh (webhook/cron). Tab cũ không có mã mới về.
   if (recentDays) { const cut = Date.now() - recentDays * 86400000; dateTabs = dateTabs.filter((t) => t.date.getTime() >= cut); }
-  if (!dateTabs.length) return [];
+  if (!dateTabs.length) return { rows: [], staleBlank: [] };
 
   const out: { code: string; date: Date | null; tab: string; row: number; sheetId: number; bill: string; thung: string; sheetName: string; resolved: boolean }[] = [];
+  const staleBlank: { date: Date | null; tab: string; row: number; sheetId: number }[] = [];
   const CHUNK = 50;
   for (let i = 0; i < dateTabs.length; i += CHUNK) {
     const batch = dateTabs.slice(i, i + CHUNK);
@@ -362,11 +406,14 @@ export async function readWarehousePackRows(sid: string, recentDays?: number): P
         const code = (cell ?? "").trim();
         if (isTrackingCode(code)) {
           out.push({ code, date, tab, row: j + 1, sheetId, bill: (billCol[j] ?? "").trim(), thung: (thungCol[j] ?? "").trim(), sheetName: (nameCol[j] ?? "").trim(), resolved: isChecked(doneCol[j] ?? "") });
+        } else if ((nameCol[j] ?? "").trim()) {
+          // Mã (E) đã bị xóa trắng nhưng tên (F) hệ thống ghi trước đó vẫn còn -> dòng rác cần dọn.
+          staleBlank.push({ date, tab, row: j + 1, sheetId });
         }
       });
     });
   }
-  return out;
+  return { rows: out, staleBlank };
 }
 
 // "Vàng" do kho tự tô tay trong sheet nháp trước khi chốt nộp hải quan - không phải màu hệ thống tự ghi
@@ -381,19 +428,19 @@ function looksYellow(bg?: { red?: number; green?: number; blue?: number }): bool
 // Đọc sheet nháp kho ("invoice test") -> lấy các dòng đang tô vàng (cần lấy thuế), dùng cho tính năng
 // Chứng từ hải quan. Sheet là 1 khối liên tục do kho tự đóng gói, KHÔNG lọc theo ngày - "vàng" là do kho tự
 // tô tay ngay trước khi chốt nộp hải quan, độc lập với ngày hóa đơn user nhập lúc upload chứng từ.
-export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string; itemName: string; price: number | null }[]> {
+export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]> {
   if (!saEnabled()) return [];
   const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets.properties(title)")}`, "GET")) as { sheets?: { properties: { title: string } }[] };
   const tabs = (meta.sheets ?? []).map((s) => s.properties.title);
   const fields = "sheets(data(rowData(values(formattedValue,userEnteredFormat.backgroundColor))))";
-  const out: { trackingCode: string; itemName: string; price: number | null }[] = [];
+  const out: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[] = [];
   for (const tab of tabs) {
     const esc = tab.replace(/'/g, "''");
     const data = (await apiSheet(sid, `?ranges=${encodeURIComponent(`'${esc}'!A1:Z3000`)}&fields=${encodeURIComponent(fields)}`, "GET")) as {
       sheets?: { data?: { rowData?: { values?: { formattedValue?: string; userEnteredFormat?: { backgroundColor?: { red?: number; green?: number; blue?: number } } }[] }[] }[] }[];
     };
     const rows = data.sheets?.[0]?.data?.[0]?.rowData ?? [];
-    let trackingCol = -1, nameCol = -1, priceCol = -1, headerRow = -1;
+    let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
     for (let i = 0; i < rows.length; i++) {
       const cells = rows[i]?.values ?? [];
       const idx = cells.findIndex((c) => (c.formattedValue ?? "").trim().toUpperCase().includes("TRACKING"));
@@ -402,6 +449,7 @@ export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: s
         headerRow = i;
         nameCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Tên hàng hóa");
         priceCol = cells.findIndex((c) => (c.formattedValue ?? "").trim() === "Giá tiền");
+        billCol = cells.findIndex((c) => (c.formattedValue ?? "").trim().toUpperCase() === "BILL");
         break;
       }
     }
@@ -414,9 +462,157 @@ export async function readInvoiceTaxRows(sid: string): Promise<{ trackingCode: s
       if (!looksYellow(codeCell?.userEnteredFormat?.backgroundColor)) continue;
       const itemName = nameCol >= 0 ? (cells[nameCol]?.formattedValue ?? "").trim() : "";
       const priceRaw = priceCol >= 0 ? (cells[priceCol]?.formattedValue ?? "").replace(/[^\d.-]/g, "") : "";
-      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null });
+      // Đọc cột BILL của đúng dòng; nếu trống (có sheet chỉ điền BILL ở đầu mỗi nhóm) thì dò ngược lên dòng gần nhất có giá trị.
+      let bill: string | null = null;
+      if (billCol >= 0) {
+        for (let j = i; j > headerRow; j--) {
+          const v = (rows[j]?.values?.[billCol]?.formattedValue ?? "").trim();
+          if (v) { bill = v; break; }
+        }
+      }
+      out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
     }
   }
+  return out;
+}
+
+function argbToRgb01(argb?: string): { red: number; green: number; blue: number } | undefined {
+  if (!argb) return undefined;
+  const hex = argb.length === 8 ? argb.slice(2) : argb; // bỏ kênh alpha (AARRGGBB)
+  if (hex.length !== 6) return undefined;
+  return { red: parseInt(hex.slice(0, 2), 16) / 255, green: parseInt(hex.slice(2, 4), 16) / 255, blue: parseInt(hex.slice(4, 6), 16) / 255 };
+}
+
+// Ô nằm trong vùng merge (không phải ô gốc) khiến ExcelJS ném lỗi khi đọc `.text` (MergeValue null) -> nuốt lỗi, coi như rỗng.
+function safeText(cell: ExcelJS.Cell): string {
+  try { return (cell.text ?? "").trim(); } catch { return ""; }
+}
+
+// Bảng màu "indexed" mặc định của OOXML (64 màu). File Numbers xuất ra thường ghi đè bảng này bằng
+// <indexedColors> riêng trong xl/styles.xml (vd index 14 = vàng thay vì tím) - ExcelJS không tự tra bảng
+// ghi đè này, chỉ trả về số index thô, nên phải tự đọc styles.xml để map đúng màu thật của từng file.
+const DEFAULT_INDEXED_COLORS = [
+  "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
+  "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
+  "800000", "008000", "000080", "808000", "800080", "008080", "C0C0C0", "808080",
+  "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
+  "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF",
+  "00CCFF", "CCFFFF", "CCFFCC", "FFFF99", "99CCFF", "FF99CC", "CC99FF", "FFCC99",
+  "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
+  "003366", "339966", "003300", "333300", "993300", "993366", "333399", "333333",
+];
+
+async function loadIndexedPalette(buffer: Buffer): Promise<string[]> {
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const block = stylesXml?.match(/<indexedColors>([\s\S]*?)<\/indexedColors>/)?.[1];
+    if (!block) return DEFAULT_INDEXED_COLORS;
+    const colors = [...block.matchAll(/rgb="([0-9a-fA-F]{6,8})"/g)].map((m) => m[1].slice(-6));
+    return colors.length ? colors : DEFAULT_INDEXED_COLORS;
+  } catch {
+    return DEFAULT_INDEXED_COLORS;
+  }
+}
+
+function fillToRgb01(
+  fill: { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined,
+  palette: string[],
+): { red: number; green: number; blue: number } | undefined {
+  if (fill?.type !== "pattern") return undefined;
+  if (fill.fgColor?.argb) return argbToRgb01(fill.fgColor.argb);
+  if (fill.fgColor?.indexed !== undefined) return argbToRgb01(palette[fill.fgColor.indexed]);
+  return undefined;
+}
+
+const NAME_HEADERS = ["Tên hàng hóa", "Item Name"];
+const PRICE_HEADERS = ["Giá tiền", "Unit Price(JPY)", "Unit Price (JPY)"];
+
+// File hải quan dạng GB.xxx không có cột BILL riêng, nhưng có ô "Invoice No: GB-xxxxxx" ở đầu trang
+// -> dùng tạm làm mã Bill hiển thị (thay vì để trống) khi fallback quét theo tên.
+function findInvoiceNo(sheet: ExcelJS.Worksheet): string | null {
+  for (let r = 1; r <= Math.min(sheet.rowCount, 15); r++) {
+    const row = sheet.getRow(r);
+    for (let c = 1; c <= row.cellCount; c++) {
+      if (!/invoice\s*no/i.test(safeText(row.getCell(c)))) continue;
+      for (let c2 = c + 1; c2 <= row.cellCount; c2++) {
+        const v2 = safeText(row.getCell(c2));
+        if (v2 && !/invoice\s*no/i.test(v2)) return v2;
+      }
+    }
+  }
+  return null;
+}
+
+// Đọc file Excel chứng từ GA do người dùng upload trực tiếp (thay vì Google Sheet cấu hình sẵn) -> cùng
+// quy tắc nhận diện với readInvoiceTaxRows: dò cột "TRACKING", lấy dòng có ô mã tracking tô vàng.
+// Sheet không có cột TRACKING (vd file hải quan GB.xxx chỉ có Tên hàng + Giá) -> fallback quét theo TÊN
+// (trackingCode=null), matchTaxRows sẽ thử khớp tên với OrderItem - kém chắc chắn hơn khớp mã, cần xác nhận lại.
+export async function readInvoiceTaxRowsFromExcel(buffer: Buffer): Promise<{ trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[]> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as any);
+  const palette = await loadIndexedPalette(buffer);
+  const out: { trackingCode: string | null; itemName: string; price: number | null; bill: string | null }[] = [];
+  wb.eachSheet((sheet) => {
+    let trackingCol = -1, nameCol = -1, priceCol = -1, billCol = -1, headerRow = -1;
+    for (let r = 1; r <= sheet.rowCount && headerRow < 0; r++) {
+      const row = sheet.getRow(r);
+      for (let c = 1; c <= row.cellCount; c++) {
+        if (safeText(row.getCell(c)).toUpperCase().includes("TRACKING")) { trackingCol = c; headerRow = r; break; }
+      }
+    }
+    if (trackingCol >= 0) {
+      const hRow = sheet.getRow(headerRow);
+      for (let c = 1; c <= hRow.cellCount; c++) {
+        const v = safeText(hRow.getCell(c));
+        if (NAME_HEADERS.includes(v)) nameCol = c;
+        if (PRICE_HEADERS.includes(v)) priceCol = c;
+        if (v.toUpperCase() === "BILL") billCol = c;
+      }
+      for (let r = headerRow + 1; r <= sheet.rowCount; r++) {
+        const row = sheet.getRow(r);
+        const codeCell = row.getCell(trackingCol);
+        const code = safeText(codeCell);
+        if (!isTrackingCode(code)) continue;
+        const fill = codeCell.fill as { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined;
+        if (!looksYellow(fillToRgb01(fill, palette))) continue;
+        const itemName = nameCol > 0 ? safeText(row.getCell(nameCol)) : "";
+        const priceRaw = priceCol > 0 ? safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "") : "";
+        // Đọc BILL đúng dòng; nếu trống thì dò ngược lên dòng gần nhất có giá trị (sheet chỉ điền BILL ở đầu nhóm).
+        let bill: string | null = null;
+        if (billCol > 0) {
+          for (let j = r; j > headerRow; j--) {
+            const v = safeText(sheet.getRow(j).getCell(billCol));
+            if (v) { bill = v; break; }
+          }
+        }
+        out.push({ trackingCode: code, itemName, price: priceRaw ? Number(priceRaw) : null, bill });
+      }
+      return;
+    }
+    // Không có cột TRACKING -> tìm cột Tên hàng + Giá, quét dòng tô vàng trên cột Tên hàng (fallback khớp tên).
+    let nameHeaderRow = -1;
+    for (let r = 1; r <= sheet.rowCount && nameHeaderRow < 0; r++) {
+      const row = sheet.getRow(r);
+      for (let c = 1; c <= row.cellCount; c++) {
+        const v = safeText(row.getCell(c));
+        if (NAME_HEADERS.includes(v)) { nameCol = c; nameHeaderRow = r; }
+        if (PRICE_HEADERS.includes(v)) priceCol = c;
+      }
+    }
+    if (nameCol < 0 || priceCol < 0) return;
+    const invoiceNo = findInvoiceNo(sheet);
+    for (let r = nameHeaderRow + 1; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      const nameCell = row.getCell(nameCol);
+      const itemName = safeText(nameCell);
+      if (!itemName) continue;
+      const fill = nameCell.fill as { type?: string; fgColor?: { argb?: string; indexed?: number } } | undefined;
+      if (!looksYellow(fillToRgb01(fill, palette))) continue;
+      const priceRaw = safeText(row.getCell(priceCol)).replace(/[^\d.-]/g, "");
+      out.push({ trackingCode: null, itemName, price: priceRaw ? Number(priceRaw) : null, bill: invoiceNo });
+    }
+  });
   return out;
 }
 
@@ -426,7 +622,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const sid = cfg?.value ? parseSheetId(cfg.value) : null;
   if (!sid) return { matched: 0, updated: 0 };
-  const rows = await readWarehousePackRows(sid, opts?.recentDays);
+  const { rows, staleBlank } = await readWarehousePackRows(sid, opts?.recentDays);
 
   // Ngày đã "chốt" khai hải quan -> mã quét vào ngày đó (kể cả mồ côi) đánh dấu lateAfterLock, cần khai bổ sung riêng
   const lockedDates = new Set((await prisma.packDayLock.findMany({ select: { date: true } })).map((l) => l.date.toISOString().slice(0, 10)));
@@ -482,6 +678,17 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         if (info) blankedRows.push({ sheetId: info.sheetId, tab: info.tab, row });
       }
     }
+    // Dòng "thua" trong cặp quét trùng mã (RED) không có Tracking.packRow đại diện nên vòng trên bỏ sót -
+    // dò thêm theo tên (F) còn sót dù mã (E) đã trắng, gộp vào cùng 1 lượt dọn, tránh trùng dòng đã có.
+    const seenBlanked = new Set(blankedRows.map((b) => `${b.tab}|${b.row}`));
+    for (const b of staleBlank) {
+      const dayKey = b.date ? b.date.toISOString().slice(0, 10) : null;
+      if (dayKey && lockedDates.has(dayKey)) continue;
+      const k = `${b.tab}|${b.row}`;
+      if (seenBlanked.has(k)) continue;
+      seenBlanked.add(k);
+      blankedRows.push({ sheetId: b.sheetId, tab: b.tab, row: b.row });
+    }
     if (blankedRows.length) {
       try {
         const WHITE = { red: 1, green: 1, blue: 1 };
@@ -502,7 +709,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
         ]);
         for (let i = 0; i < colorReqs.length; i += CW) await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
       } catch (e) {
-        console.error("[gsheets] clearBlankedRows", (e as Error).message);
+        logError({ err: (e as Error).message }, "gsheets_clear_blanked_rows_failed");
       }
     }
   }
@@ -519,7 +726,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   for (const c of codes) {
     if (knownCodes.has(c)) continue;
     const packedAt = dateByCode.get(c) ?? new Date();
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt) } });
+    const created = await createOrphanTrackingSafe({ id: uuid(), code: c, packedAt, status: "new", lateAfterLock: isLocked(packedAt), needsTax: true });
     trks.push({ ...created, order: null } as (typeof trks)[number]);
   }
 
@@ -532,7 +739,8 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
     if (t.packedAt) continue;
     const packedAt = dateByCode.get(t.code) ?? new Date();
     const lateAfterLock = isLocked(packedAt);
-    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock } });
+    // Mọi mã đóng hàng đều cần lấy thuế 100% - tự set needsTax ngay lúc quét kho, không cần tô vàng thủ công nữa.
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock, needsTax: true } });
     t.lateAfterLock = lateAfterLock;
     void syncTracking({ ...t, packedAt } as TrackingRow);
     updated++;
@@ -631,7 +839,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
-        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + (i.shipJpy != null ? Number(i.shipJpy) : 0), 0);
         // Trước khi tách được 1-1 (packRow chưa gán xong), mã dùng chung nhiều đơn từng bị ghi GỘP tên+giá cả
         // nhóm (fallback an toàn). Sau khi tách được rồi, ô sheet vẫn còn đúng y tên gộp CŨ đó -> so với tên
         // MỘT món mới tính ra sẽ luôn khác -> hiểu lầm thành "kho tự sửa tên", mắc kẹt mãi không ghi đè lại được
@@ -703,7 +911,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
       await apiSheet(sid, `:batchUpdate`, "POST", { requests: colorReqs.slice(i, i + CW) });
     }
   } catch (e) {
-    console.error("[gsheets] writeInvoiceToWarehouse", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_write_invoice_to_warehouse_failed");
   }
 
   return { matched: trks.length, updated };
@@ -743,7 +951,7 @@ export async function clearWarehouseRow(packedAt: Date | null, row: number | nul
       { setDataValidation: { range: { sheetId: found.properties.sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 23, endColumnIndex: 24 } } },
     ] });
   } catch (e) {
-    console.error("[gsheets] clearWarehouseRow", (e as Error).message);
+    logError({ err: (e as Error).message }, "gsheets_clear_warehouse_row_failed");
   }
 }
 
@@ -789,12 +997,17 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); gán kiện theo BILL/thùng ngay bên dưới nếu có gửi kèm.
-    const created = await prisma.tracking.create({ data: { id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked } });
+    const created = await createOrphanTrackingSafe({ id: uuid(), code: c, packedAt, status: "new", lateAfterLock: locked, needsTax: true });
     t = { ...created, order: null } as typeof group[number];
     group.push(t);
     single = t;
   }
-  if (!t.packedAt) { await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked } }); t.lateAfterLock = locked; }
+  // Mọi mã đóng hàng đều cần lấy thuế 100% - tự set needsTax ngay lúc kho gõ mã, không cần tô vàng thủ công nữa.
+  if (!t.packedAt || !t.needsTax) {
+    await prisma.tracking.update({ where: { id: t.id }, data: { packedAt, lateAfterLock: locked, needsTax: true } });
+    t.lateAfterLock = locked;
+    t.needsTax = true;
+  }
   if (row && group.length === 1 && t.packRow !== row) await prisma.tracking.update({ where: { id: t.id }, data: { packRow: row } });
 
   // Gán kiện (BILL/Thùng) ngay tức thì, không đợi cron 2 phút - trừ khi tracking đã cartonManual (gán/gỡ tay).
@@ -830,7 +1043,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
       let editedByKho = false;
       if (items.length) {
         const name = items.map((i) => i.name).join(" + ");
-        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
+        const price = items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy) + (i.shipJpy != null ? Number(i.shipJpy) : 0), 0);
         // Tên gộp CŨ (lúc chưa tách được 1-1) có thể còn nguyên trên sheet - so thêm để khỏi hiểu lầm thành
         // "kho tự sửa tên" rồi mắc kẹt mãi không ghi đè lại đúng tên/giá riêng từng đơn được nữa (xem gsheets.ts syncPackedFromWarehouse).
         // Dùng FULL group (không phải `orders` đã bị thu hẹp về 1 đơn khi single đã resolve) để tính đúng tên gộp cũ,
@@ -882,7 +1095,7 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
             : { setDataValidation: { range: xRange } },
         ] });
       }
-    } catch (e) { console.error("[gsheets] syncPackedOne", (e as Error).message); }
+    } catch (e) { logError({ err: (e as Error).message }, "gsheets_sync_packed_one_failed"); }
   }
   if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
   return { matched: true };
@@ -908,7 +1121,40 @@ async function findDepositHeader(sid: string, tab: string): Promise<{ row: numbe
   return null;
 }
 
-async function runCustomerSync(customerId: string): Promise<void> {
+// Khóa các cột hệ thống tự ghi (Mã Link/Ngày đặt/.../TRACKING, khối TỔNG H1:H3, cột Ngày+Số tiền của sổ cọc)
+// bằng Protected Range - chỉ service account được sửa, khách/staff được share file KHÔNG sửa/xóa được các ô
+// này (cột khách tự thêm như "% Công" không đụng tới, vẫn tự do). Idempotent: chỉ add range nào chưa có
+// (so theo `description`) - tránh add trùng mỗi lần sync (mỗi lần lưu đơn/cọc/tracking đều gọi lại).
+async function protectManagedRanges(
+  sid: string,
+  gsid: number,
+  headerRow: number,
+  headerCols: Map<FieldKey, number>,
+  depHeader: { row: number; dateCol: number; amtCol: number } | null,
+): Promise<void> {
+  if (!SA_EMAIL) return;
+  const desired = new Map<string, { startRowIndex: number; endRowIndex: number; startColumnIndex: number; endColumnIndex: number }>();
+  for (const [key, col] of headerCols) desired.set(`sys:${key}`, { startRowIndex: headerRow - 1, endRowIndex: 100000, startColumnIndex: col, endColumnIndex: col + 1 });
+  desired.set("sys:total", { startRowIndex: 0, endRowIndex: 3, startColumnIndex: 7, endColumnIndex: 8 });
+  if (depHeader) {
+    desired.set("sys:dep-date", { startRowIndex: depHeader.row - 1, endRowIndex: 100000, startColumnIndex: depHeader.dateCol, endColumnIndex: depHeader.dateCol + 1 });
+    desired.set("sys:dep-amt", { startRowIndex: depHeader.row - 1, endRowIndex: 100000, startColumnIndex: depHeader.amtCol, endColumnIndex: depHeader.amtCol + 2 });
+  }
+  try {
+    const meta = (await apiSheet(sid, `?fields=${encodeURIComponent("sheets(properties(sheetId),protectedRanges(description))")}`, "GET")) as {
+      sheets?: { properties: { sheetId: number }; protectedRanges?: { description?: string }[] }[];
+    };
+    const existing = new Set((meta.sheets ?? []).find((s) => s.properties.sheetId === gsid)?.protectedRanges?.map((p) => p.description ?? "") ?? []);
+    const reqs = [...desired].filter(([tag]) => !existing.has(tag)).map(([tag, range]) => ({
+      addProtectedRange: { protectedRange: { range: { sheetId: gsid, ...range }, description: tag, warningOnly: false, editors: { users: [SA_EMAIL] } } },
+    }));
+    if (reqs.length) await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
+  } catch (e) {
+    logError({ err: (e as Error).message }, "gsheets_protect_managed_ranges_failed");
+  }
+}
+
+async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
   if (!saEnabled()) return;
   try {
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -949,6 +1195,7 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
       const start = header + 1;
       const headerCols = await readHeaderColumns(sid, tab, header);
+      const gsid = await getSheetIdByTitle(sid, tab);
       for (const [key, col] of headerCols) {
         const letter = colLetter(col);
         await apiSheet(sid, `/values/${t}!${letter}${start}:${letter}100000:clear`, "POST", {});
@@ -959,28 +1206,25 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
 
       // ----- Tô nền: "lưu kho" cam khi đang lưu kho (tự trắng khi ship), "Ngày giao" tô theo màu riêng từng ngày -----
-      if (headerCols.has("stored") || headerCols.has("deliveredAt")) {
-        const gsidColor = await getSheetIdByTitle(sid, tab);
-        if (gsidColor != null) {
-          const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
-          const WHITE = { red: 1, green: 1, blue: 1 };
-          const reqs: unknown[] = [];
-          const clearCol = (col: number) => reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } });
-          const paintCell = (col: number, i: number, bg: { red: number; green: number; blue: number }) =>
-            reqs.push({ repeatCell: { range: { sheetId: gsidColor, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } });
+      if (gsid != null && (headerCols.has("stored") || headerCols.has("deliveredAt"))) {
+        const ORANGE = { red: 1, green: 0.85, blue: 0.6 };
+        const WHITE = { red: 1, green: 1, blue: 1 };
+        const reqs: unknown[] = [];
+        const clearCol = (col: number) => reqs.push({ repeatCell: { range: { sheetId: gsid, startRowIndex: start - 1, endRowIndex: start + 499, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: WHITE } }, fields: "userEnteredFormat.backgroundColor" } });
+        const paintCell = (col: number, i: number, bg: { red: number; green: number; blue: number }) =>
+          reqs.push({ repeatCell: { range: { sheetId: gsid, startRowIndex: start - 1 + i, endRowIndex: start + i, startColumnIndex: col, endColumnIndex: col + 1 }, cell: { userEnteredFormat: { backgroundColor: bg } }, fields: "userEnteredFormat.backgroundColor" } });
 
-          const storedCol = headerCols.get("stored");
-          if (storedCol != null) {
-            clearCol(storedCol);
-            fieldRows.forEach((r, i) => { if (r.stored === "lưu kho") paintCell(storedCol, i, ORANGE); });
-          }
-          const deliveredCol = headerCols.get("deliveredAt");
-          if (deliveredCol != null) {
-            clearCol(deliveredCol);
-            fieldRows.forEach((r, i) => { if (typeof r.deliveredAt === "string" && r.deliveredAt) paintCell(deliveredCol, i, colorForDate(r.deliveredAt)); });
-          }
-          await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
+        const storedCol = headerCols.get("stored");
+        if (storedCol != null) {
+          clearCol(storedCol);
+          fieldRows.forEach((r, i) => { if (r.stored === "lưu kho") paintCell(storedCol, i, ORANGE); });
         }
+        const deliveredCol = headerCols.get("deliveredAt");
+        if (deliveredCol != null) {
+          clearCol(deliveredCol);
+          fieldRows.forEach((r, i) => { if (typeof r.deliveredAt === "string" && r.deliveredAt) paintCell(deliveredCol, i, colorForDate(r.deliveredAt)); });
+        }
+        await apiSheet(sid, `:batchUpdate`, "POST", { requests: reqs });
       }
 
       // ----- Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế, để trống cột Mã -----
@@ -997,6 +1241,9 @@ async function runCustomerSync(customerId: string): Promise<void> {
         }
       }
 
+      // ----- Khóa các cột hệ thống tự ghi - khách/staff share file không sửa/xóa được, chỉ hệ thống ghi -----
+      if (gsid != null) await protectManagedRanges(sid, gsid, header, headerCols, depHeader);
+
       // ----- Khối TỔNG TT/CỌC/NỢ (H1/H2/H3): có tỉ giá -> thay hẳn sang ₫; không có -> giữ nguyên ¥ -----
       const jpyDepositTotal = monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);
       const vndDepositTotal = monthDeposits.filter((d) => d.currency === "VND").reduce((s, d) => s + Number(d.amountVnd), 0);
@@ -1007,7 +1254,6 @@ async function runCustomerSync(customerId: string): Promise<void> {
       await apiSheet(sid, `/values/${t}!H1:H3?valueInputOption=USER_ENTERED`, "PUT", { majorDimension: "COLUMNS", values: [[h1 || "", h2 || "", h3 || ""]] });
       // Dọn ô "Tổng/Nợ quy đổi ₫" cũ (bản trước ghi ở I:J, giờ gộp thẳng vào H nên không cần nữa)
       await apiSheet(sid, `/values/${t}!I1:J3:clear`, "POST", {});
-      const gsid = await getSheetIdByTitle(sid, tab);
       if (gsid != null) {
         const pattern = useVnd ? "#,##0 \"₫\"" : "\"¥\"#,##0";
         const cell = { userEnteredFormat: { numberFormat: { type: "NUMBER" as const, pattern } } };
@@ -1017,6 +1263,12 @@ async function runCustomerSync(customerId: string): Promise<void> {
       }
     }
   } catch (e) {
-    console.error("[gsheets] syncCustomerOrders", (e as Error).message);
+    // Còn 1 phần dở dang (lỗi API giữa chừng) -> thử lại cả lượt sync 1 lần, tránh để lại dữ liệu cũ trên sheet khách
+    if (attempt < 2) {
+      logWarn({ err: (e as Error).message }, "gsheets_sync_customer_orders_retry");
+      await sleep(3000);
+      return runCustomerSync(customerId, attempt + 1);
+    }
+    logError({ err: (e as Error).message }, "gsheets_sync_customer_orders_failed");
   }
 }

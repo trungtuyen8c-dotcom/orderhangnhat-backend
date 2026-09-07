@@ -18,7 +18,7 @@ ordersRouter.use(authenticate);
 const PAY_LATER_SOURCES = ["yahoo", "mercari"] as const;
 
 // Chặn dán nhầm link Yahoo vào đơn Mercari và ngược lại (source phải khớp domain link món hàng)
-function findWrongMarketplaceUrl(source: string, items: { url?: string }[]): string | null {
+export function findWrongMarketplaceUrl(source: string, items: { url?: string }[]): string | null {
   if (source !== "yahoo" && source !== "mercari") return null;
   for (const i of items) {
     if (!i.url) continue;
@@ -60,6 +60,17 @@ ordersRouter.get("/fix-requests", authorize("orders.update"), async (req, res) =
 });
 
 // Cảnh báo trùng link sản phẩm / mã tracking với đơn khác - để sale tự xác nhận trước khi lưu, không tự chặn.
+// Tra đơn theo mã - dùng để gán tracking lạ (chưa khớp đơn) vào đúng đơn
+ordersRouter.get("/lookup-code", authorize("orders.list"), async (req, res) => {
+  const code = String(req.query.code ?? "").trim();
+  if (!code) return res.json({ order: null });
+  const o = await prisma.order.findFirst({
+    where: { code: { equals: code, mode: "insensitive" } },
+    select: { id: true, code: true, customer: { select: { name: true } } },
+  });
+  res.json({ order: o ? { id: o.id, code: o.code, customerName: o.customer.name } : null });
+});
+
 ordersRouter.get("/check-duplicate", authorize("orders.list"), async (req, res) => {
   const url = String(req.query.url ?? "").trim();
   const code = String(req.query.code ?? "").trim();
@@ -94,12 +105,14 @@ ordersRouter.get("/:id", authorize("orders.read"), async (req, res) => {
     },
   });
   if (!order) return res.status(404).json({ error: "NOT_FOUND" });
-  const [debt, documents] = await Promise.all([
+  const [debt, documents, trackingLogs] = await Promise.all([
     prisma.debt.findFirst({ where: { orderId: order.id } }),
     prisma.document.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "desc" } }),
+    // Lịch sử sửa mã tracking (kể cả sửa nhanh ở Orders, không chỉ "Xử lý lạ") - để biết đã từng đổi từ mã nào.
+    prisma.trackingLog.findMany({ where: { trackingId: { in: order.trackings.map((t) => t.id) } }, orderBy: { createdAt: "desc" } }),
   ]);
   const logs = order.logs.map((l) => ({ ...l, id: l.id.toString() }));
-  res.json({ ...order, logs, debt, documents });
+  res.json({ ...order, logs, trackingLogs: trackingLogs.map((l) => ({ ...l, id: l.id.toString() })), debt, documents });
 });
 
 const curEnum = z.enum(["JPY", "VND"]);
@@ -166,6 +179,12 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
   const d = parsed.data;
   const wrongUrl = findWrongMarketplaceUrl(d.source ?? "normal", d.items);
   if (wrongUrl) return res.status(400).json({ error: "WRONG_MARKETPLACE", message: `Link không khớp: ${wrongUrl}` });
+  // Không tự chỉ định skipVnWeighing -> lấy mặc định theo khách (khách chỉ lấy thuế, không cân ở Kho VN).
+  let skipVnWeighing = d.skipVnWeighing;
+  if (skipVnWeighing === undefined) {
+    const customer = await prisma.customer.findUnique({ where: { id: d.customerId }, select: { skipVnWeighingDefault: true } });
+    skipVnWeighing = customer?.skipVnWeighingDefault ?? false;
+  }
   const baseData = {
     id: uuid(),
     customerId: d.customerId,
@@ -190,7 +209,7 @@ ordersRouter.post("/", authorize("orders.create"), async (req, res) => {
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
     externalWarehouse: d.externalWarehouse ?? false,
-    skipVnWeighing: d.skipVnWeighing ?? false,
+    skipVnWeighing,
     publicToken: uuid(),
     items: { create: d.items },
   };

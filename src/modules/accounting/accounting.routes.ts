@@ -7,14 +7,12 @@ import { authorize } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
 import { computeDebtBalance } from "../../utils/orderTotals.js";
+import { vnDayStart, vnDayEnd, vnMonthKey } from "../../utils/vnTime.js";
 
 export const accountingRouter = Router();
 accountingRouter.use(authenticate);
 
-// FE gửi "YYYY-MM-DD" luôn hiểu là ngày lịch VN (UTC+7) - phải parse mốc theo giờ VN,
-// không dùng new Date(string) mặc định (parse theo UTC) rồi setHours (theo giờ server) -> lệch múi giờ, lọc sai ngày.
-const vnDayStart = (d: string) => new Date(`${d}T00:00:00+07:00`);
-const vnDayEnd = (d: string) => new Date(`${d}T23:59:59.999+07:00`);
+export { vnDayStart, vnDayEnd };
 
 async function recomputeDebt(orderId: string) {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { payments: true } });
@@ -137,7 +135,7 @@ async function customerLedger(customerId: string) {
   const paidTotal = depositTotal + paymentTotal;
   const debt = orderTotal - paidTotal;
 
-  const mk = (d: Date) => `${new Date(d).getFullYear()}-${String(new Date(d).getMonth() + 1).padStart(2, "0")}`;
+  const mk = vnMonthKey;
   const months = new Map<string, { order: number; paid: number }>();
   const bump = (k: string, f: "order" | "paid", v: number) => { const m = months.get(k) ?? { order: 0, paid: 0 }; m[f] += v; months.set(k, m); };
   for (const o of orders) bump(mk(o.createdAt), "order", Number(o.totalVnd ?? 0));
@@ -404,7 +402,7 @@ accountingRouter.get("/customer-summary", authorize("orders.read"), async (_req,
 // Báo cáo theo tháng: tổng cân, tổng tiền mua, đã trả - từng khách + tổng. Kèm công nợ hiện tại (luỹ kế).
 // Tiền mua theo createdAt của đơn; cân theo packedAt của tracking (cân VN ưu tiên, chưa có dùng cân JP); đã trả = cọc xác nhận + thanh toán đơn trong tháng.
 accountingRouter.get("/monthly-report", authorize("orders.read"), async (req, res) => {
-  const mk = (d: Date | string) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}`; };
+  const mk = vnMonthKey;
   const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
 
   const [orders, trks, deposits, payments, customers, debtAgg] = await Promise.all([
@@ -472,7 +470,7 @@ accountingRouter.delete("/expenses/:id", authorize("accounting.record_payment"),
 
 // Báo cáo chi phí phát sinh theo tháng (theo incurredAt)
 accountingRouter.get("/expenses/monthly", authorize("orders.read"), async (req, res) => {
-  const mk = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const mk = vnMonthKey;
   const month = typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : mk(new Date());
   const all = await prisma.expense.findMany({ orderBy: { incurredAt: "desc" } });
   const rows = all.filter((e) => mk(e.incurredAt) === month);
@@ -516,14 +514,15 @@ accountingRouter.get("/wallets/:id/daily-summary", authorize("accounting.reconci
   if (!wallet) return res.status(404).json({ error: "WALLET_NOT_FOUND" });
 
   const monthStr = String(req.query.month ?? "");
-  const monthDate = /^\d{4}-\d{2}$/.test(monthStr) ? new Date(`${monthStr}-01T00:00:00`) : new Date();
-  const year = monthDate.getFullYear(), month = monthDate.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const monthEnd = new Date(year, month, daysInMonth, 23, 59, 59, 999);
+  const month = /^\d{4}-\d{2}$/.test(monthStr) ? monthStr : vnMonthKey(new Date());
+  const [year, monIdx] = month.split("-").map(Number);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const daysInMonth = new Date(Date.UTC(year, monIdx, 0)).getUTCDate();
+  const monthEnd = vnDayEnd(`${year}-${pad(monIdx)}-${pad(daysInMonth)}`);
 
   const [txns, actuals] = await Promise.all([
     prisma.walletTxn.findMany({ where: { walletId: wallet.id }, orderBy: { createdAt: "asc" } }),
-    prisma.walletDailyActual.findMany({ where: { walletId: wallet.id, date: { gte: new Date(year, month, 1), lte: monthEnd } } }),
+    prisma.walletDailyActual.findMany({ where: { walletId: wallet.id, date: { gte: vnDayStart(`${year}-${pad(monIdx)}-01`), lte: monthEnd } } }),
   ]);
   const current = Number(wallet.balance);
   const actualByDay = new Map(actuals.map((a) => [a.date.toISOString().slice(0, 10), Number(a.actualBalance)]));
@@ -533,21 +532,21 @@ accountingRouter.get("/wallets/:id/daily-summary", authorize("accounting.reconci
 
   const days: any[] = [];
   for (let d = daysInMonth; d >= 1; d--) {
-    const dayEnd = new Date(year, month, d, 23, 59, 59, 999);
-    const dayStart = new Date(year, month, d, 0, 0, 0, 0);
+    const dateKey = `${year}-${pad(monIdx)}-${pad(d)}`;
+    const dayStart = vnDayStart(dateKey);
+    const dayEnd = vnDayEnd(dateKey);
     let sameDay = 0;
     for (const t of txns) if (t.createdAt >= dayStart && t.createdAt <= dayEnd) sameDay += Number(t.amount);
     const closing = current - afterCursor;
     const opening = closing - sameDay;
     afterCursor += sameDay;
 
-    const dateKey = dayStart.toISOString().slice(0, 10);
     const actual = actualByDay.has(dateKey) ? actualByDay.get(dateKey)! : null;
     days.push({ date: dateKey, opening, closing, actual, diff: actual == null ? null : actual - closing });
   }
   days.reverse();
 
-  res.json({ walletId: wallet.id, name: wallet.name, currency: wallet.currency, month: `${year}-${String(month + 1).padStart(2, "0")}`, days });
+  res.json({ walletId: wallet.id, name: wallet.name, currency: wallet.currency, month, days });
 });
 
 accountingRouter.put("/wallets/:id/daily-actual", authorize("accounting.reconcile"), async (req, res) => {

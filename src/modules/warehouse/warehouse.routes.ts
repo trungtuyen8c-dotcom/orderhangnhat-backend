@@ -240,6 +240,26 @@ warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.histo
   res.json(rows);
 });
 
+// Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
+// Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
+warehouseRouter.get("/history", authorize("warehouse.weigh_vn"), async (req, res) => {
+  const date = String(req.query.date ?? "").trim();
+  const vnCode = String(req.query.vnTrackingCode ?? "").trim();
+  const jpCode = String(req.query.code ?? "").trim();
+  const where: Record<string, unknown> = { packedAt: { not: null } };
+  if (date) { const d = new Date(date); where.packedAt = { gte: d, lt: new Date(d.getTime() + 86400000) }; }
+  if (vnCode) where.vnTrackingCode = { contains: vnCode, mode: "insensitive" };
+  if (jpCode) where.code = { contains: jpCode, mode: "insensitive" };
+  const rows = await prisma.tracking.findMany({
+    where, orderBy: { packedAt: "desc" }, take: 200,
+    select: {
+      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, deliveredAt: true,
+      carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
+    },
+  });
+  res.json(rows);
+});
+
 // Thêm tracking tay vào kiện (khi seller/kho quét sai mã, đơn không tự khớp) — chỉ sale/buyer/admin (trackings.create),
 // Kho VN KHÔNG có quyền này vì là việc nội bộ gán đơn, không phải cân/ship.
 const addManualSchema = z.object({ orderCode: z.string().min(1), code: z.string().min(1), jpWeightKg: z.number().nonnegative().optional(), cartonId: z.string().uuid().optional() });

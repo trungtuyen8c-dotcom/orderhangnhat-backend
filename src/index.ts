@@ -28,6 +28,7 @@ import { scrapeRouter } from "./modules/scrape/scrape.routes.js";
 import { backupRouter } from "./modules/backup/backup.routes.js";
 import { systemLogsRouter } from "./modules/system-logs/system-logs.routes.js";
 import { clientLogsRouter } from "./modules/client-logs/client-logs.routes.js";
+import { extRouter } from "./modules/ext/ext.routes.js";
 
 const app = express();
 app.set("trust proxy", true);
@@ -42,6 +43,7 @@ app.get("/metrics", metricsHandler); // Nginx chặn path này ra ngoài (deny a
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
 app.use("/api/api-keys", apiKeysRouter);
+app.use("/api/ext", extRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/scrape", scrapeRouter);
 app.use("/api/customers", customersRouter);

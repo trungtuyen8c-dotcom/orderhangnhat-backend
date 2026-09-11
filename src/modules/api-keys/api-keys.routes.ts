@@ -11,7 +11,7 @@ export const apiKeysRouter = Router();
 apiKeysRouter.use(authenticate);
 
 const select = {
-  id: true, name: true, keyPrefix: true, scopes: true,
+  id: true, name: true, keyPrefix: true, scopes: true, rateLimit: true,
   lastUsedAt: true, expiresAt: true, revokedAt: true, createdAt: true,
 } as const;
 
@@ -28,12 +28,13 @@ const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
   scopes: z.array(z.enum(API_KEY_ALLOWED_SCOPES)).min(1),
   expiresInDays: z.number().int().positive().max(365).optional(),
+  rateLimit: z.number().int().positive().max(1000).optional(),
 });
 
 apiKeysRouter.post("/", async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST", detail: parsed.error.flatten() });
-  const { name, scopes, expiresInDays } = parsed.data;
+  const { name, scopes, expiresInDays, rateLimit } = parsed.data;
 
   // Không cho scope vượt quá quyền thật của user đang đăng nhập lúc tạo key
   const userPerms = req.user!.roles.includes("super_admin") ? null : await loadPermissions(req.user!.id);
@@ -51,6 +52,7 @@ apiKeysRouter.post("/", async (req, res) => {
       keyHash: hash,
       scopes,
       expiresAt: expiresInDays ? new Date(Date.now() + expiresInDays * 86400_000) : null,
+      ...(rateLimit ? { rateLimit } : {}),
     },
     select,
   });

@@ -27,6 +27,12 @@ export const API_KEY_SCOPE_TO_PERMISSION: Record<string, string> = {
   "warehouse.stored.read": "warehouse.weigh_vn",
   "warehouse.history.read": "warehouse.weigh_vn",
   "warehouse.recon.read": "warehouse.weigh_vn",
+  // Scope riêng cho module /api/ext (MCP) - tách biệt hoàn toàn route/middleware thật ở trên,
+  // chỉ dùng chung bảng api_keys + hàm hash này để 1 key quản lý ở 1 chỗ. Xem modules/ext/.
+  "orders:read": "orders.list",
+  "customers:read": "customers.list",
+  "trackings:read": "trackings.list",
+  "reports:read": "stats.view",
 };
 
 export const API_KEY_ALLOWED_SCOPES = Object.keys(API_KEY_SCOPE_TO_PERMISSION) as [string, ...string[]];

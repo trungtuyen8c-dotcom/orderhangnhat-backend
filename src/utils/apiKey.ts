@@ -3,32 +3,11 @@ import { sha256 } from "./password.js";
 
 const PREFIX = "oak_";
 
-// Toàn bộ scope API key có thể xin - chỉ phủ route ĐỌC (GET, không đụng DB ghi). Key = tag scope
-// (dùng trong request + hiển thị lúc tạo key), value = permission thật để kiểm tra user có đủ quyền
-// xin scope đó không (xem api-keys.routes.ts). Với permission dùng chung cho cả route đọc lẫn route
-// ghi (vd. accounting.reconcile, warehouse.weigh_vn), route.ts truyền thêm apiKeyScope riêng cho
-// authorize() (xem middlewares/authorize.ts) để API key không bao giờ chạm được route ghi cùng permission.
+// Scope API key - CHỈ còn dùng cho module /api/ext (MCP, xem modules/ext/), không còn scope nào
+// cho route thật (orders.routes.ts...) - route thật chỉ nhận JWT, không nhận API key nữa. Key =
+// tag scope (hiển thị lúc tạo key), value = permission thật để kiểm tra user có đủ quyền xin scope
+// đó không (xem api-keys.routes.ts).
 export const API_KEY_SCOPE_TO_PERMISSION: Record<string, string> = {
-  "orders.list": "orders.list",
-  "orders.read": "orders.read",
-  "customers.list": "customers.list",
-  "trackings.list": "trackings.list",
-  "shipments.list": "shipments.list",
-  "users.list": "users.list",
-  "permissions.list": "permissions.list",
-  "system.view_audit_log": "system.view_audit_log",
-  "companycost.view": "companycost.view",
-  "stats.view": "stats.view",
-  "accounting.deposits.read": "accounting.reconcile",
-  "accounting.wallets.read": "accounting.reconcile",
-  "accounting.fund.read": "accounting.reconcile",
-  "accounting.reconcile_list.read": "accounting.reconcile",
-  "accounting.statement.read": "accounting.reconcile",
-  "warehouse.stored.read": "warehouse.weigh_vn",
-  "warehouse.history.read": "warehouse.weigh_vn",
-  "warehouse.recon.read": "warehouse.weigh_vn",
-  // Scope riêng cho module /api/ext (MCP) - tách biệt hoàn toàn route/middleware thật ở trên,
-  // chỉ dùng chung bảng api_keys + hàm hash này để 1 key quản lý ở 1 chỗ. Xem modules/ext/.
   "orders:read": "orders.list",
   "customers:read": "customers.list",
   "trackings:read": "trackings.list",

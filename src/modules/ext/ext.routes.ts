@@ -2,6 +2,13 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { prisma } from "../../db.js";
 import { redis } from "../../redis.js";
 import { hashApiKey } from "../../utils/apiKey.js";
+import * as reportsStats from "./reports/stats.js";
+import * as reportsControl from "./reports/control.js";
+import * as reportsWarehouse from "./reports/warehouse.js";
+import * as reportsAdmin from "./reports/admin.js";
+import * as reportsCompanycost from "./reports/companycost.js";
+import * as reportsShipments from "./reports/shipments.js";
+import * as reportsAccounting from "./reports/accounting.js";
 
 // Module hoàn toàn tách biệt cho MCP (mcp-al) - CHỈ đọc Prisma trực tiếp, KHÔNG import bất kỳ
 // route/controller sản xuất nào (orders.routes.ts, customers.routes.ts...) để không đụng luồng xử
@@ -128,31 +135,56 @@ extRouter.get("/trackings", requireExtScope("trackings:read"), async (req, res) 
   });
 });
 
-// Danh sách report đã cài đặt trong /ext (tập con của report cũ - mở rộng dần khi cần, mỗi report
-// tự query Prisma trực tiếp, không gọi lại route/controller thật).
+// Toàn bộ report chỉ đọc, mỗi report tự query Prisma trực tiếp trong reports/*.ts - không gọi lại
+// route/controller sản xuất nào. params đọc thẳng từ req.query, mỗi hàm tự đọc field nó cần.
+const REPORTS: Record<string, (params: Record<string, string | undefined>) => Promise<unknown>> = {
+  stats_overview: reportsStats.stats_overview,
+  stats_alerts: reportsStats.stats_alerts,
+  control_overview: reportsControl.control_overview,
+  control_debt_config: reportsControl.control_debt_config,
+  control_overdue_debts: reportsControl.control_overdue_debts,
+  control_cartons: reportsControl.control_cartons,
+  control_unmatched: reportsControl.control_unmatched,
+  warehouse_vn_board: reportsWarehouse.warehouse_vn_board,
+  warehouse_stored: reportsWarehouse.warehouse_stored,
+  warehouse_history: reportsWarehouse.warehouse_history,
+  warehouse_recon: reportsWarehouse.warehouse_recon,
+  users_list: reportsAdmin.users_list,
+  roles_list: reportsAdmin.roles_list,
+  permissions_list: reportsAdmin.permissions_list,
+  audit_log: (p) => reportsAdmin.audit_log({ limit: p.limit ? Number(p.limit) : undefined }),
+  companycost_report: reportsCompanycost.companycost_report,
+  companycost_settlement: reportsCompanycost.companycost_settlement,
+  companycost_reinforce_price: reportsCompanycost.companycost_reinforce_price,
+  companycost_electronics_price: reportsCompanycost.companycost_electronics_price,
+  shipments_tax_audit: reportsShipments.shipments_tax_audit,
+  shipments_invoice_checklist: reportsShipments.shipments_invoice_checklist,
+  shipments_tax_rows: reportsShipments.shipments_tax_rows,
+  shipments_documents: reportsShipments.shipments_documents,
+  accounting_debts: reportsAccounting.accounting_debts,
+  accounting_deposits: reportsAccounting.accounting_deposits,
+  accounting_deposits_counts: reportsAccounting.accounting_deposits_counts,
+  accounting_opening_balances: reportsAccounting.accounting_opening_balances,
+  accounting_customer_summary: reportsAccounting.accounting_customer_summary,
+  accounting_monthly_report: reportsAccounting.accounting_monthly_report,
+  accounting_wallets: reportsAccounting.accounting_wallets,
+  accounting_fund: reportsAccounting.accounting_fund,
+  accounting_fund_counts: reportsAccounting.accounting_fund_counts,
+  accounting_reconcile: reportsAccounting.accounting_reconcile,
+  accounting_statement: reportsAccounting.accounting_statement,
+};
+
 extRouter.get("/reports", requireExtScope("reports:read"), async (req, res) => {
   const report = String(req.query.report ?? "");
-  switch (report) {
-    case "stats_overview": {
-      const [byStatus, customers, totalOrders] = await Promise.all([
-        prisma.order.groupBy({ by: ["status"], _count: { _all: true } }),
-        prisma.customer.count(),
-        prisma.order.count(),
-      ]);
-      return res.json({ totalOrders, customers, byStatus: byStatus.map((s) => ({ status: s.status, count: s._count._all })) });
-    }
-    case "control_overview": {
-      const [unmatched, cartons] = await Promise.all([
-        prisma.tracking.count({ where: { orderId: null } }),
-        prisma.carton.count(),
-      ]);
-      return res.json({ unmatchedTrackings: unmatched, cartons });
-    }
-    default:
-      return res.status(501).json({
-        error: "NOT_IMPLEMENTED",
-        message: `Report "${report}" chưa được cài trong /ext`,
-        available: ["stats_overview", "control_overview"],
-      });
+  const fn = REPORTS[report];
+  if (!fn) {
+    return res.status(501).json({ error: "NOT_IMPLEMENTED", message: `Report "${report}" chưa được cài trong /ext`, available: Object.keys(REPORTS) });
+  }
+  try {
+    const params = req.query as Record<string, string | undefined>;
+    res.json(await fn(params));
+  } catch (e: any) {
+    if (e?.code === "BAD_REQUEST") return res.status(400).json({ error: "BAD_REQUEST", message: e.message });
+    throw e;
   }
 });

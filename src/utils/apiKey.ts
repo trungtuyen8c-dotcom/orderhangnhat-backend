@@ -11,7 +11,13 @@ export const API_KEY_SCOPE_TO_PERMISSION: Record<string, string> = {
   "orders:read": "orders.list",
   "customers:read": "customers.list",
   "trackings:read": "trackings.list",
-  "reports:read": "stats.view",
+  "reports:stats": "stats.view",
+  "reports:control": "orders.read",
+  "reports:warehouse": "warehouse.weigh_vn",
+  "reports:admin": "users.list",
+  "reports:companycost": "companycost.view",
+  "reports:shipments": "shipments.list",
+  "reports:accounting": "accounting.reconcile",
 };
 
 export const API_KEY_ALLOWED_SCOPES = Object.keys(API_KEY_SCOPE_TO_PERMISSION) as [string, ...string[]];

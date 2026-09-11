@@ -174,11 +174,30 @@ const REPORTS: Record<string, (params: Record<string, string | undefined>) => Pr
   accounting_statement: reportsAccounting.accounting_statement,
 };
 
-extRouter.get("/reports", requireExtScope("reports:read"), async (req, res) => {
+// Mỗi report thuộc 1 scope riêng theo mảng (kế toán/kho VN/công ty phí/...) - để phân quyền được
+// theo nhân viên (vd Kho VN chỉ xin reports:warehouse, không xin được reports:accounting).
+const REPORT_SCOPE: Record<string, string> = {
+  stats_overview: "reports:stats", stats_alerts: "reports:stats",
+  control_overview: "reports:control", control_debt_config: "reports:control", control_overdue_debts: "reports:control", control_cartons: "reports:control", control_unmatched: "reports:control",
+  warehouse_vn_board: "reports:warehouse", warehouse_stored: "reports:warehouse", warehouse_history: "reports:warehouse", warehouse_recon: "reports:warehouse",
+  users_list: "reports:admin", roles_list: "reports:admin", permissions_list: "reports:admin", audit_log: "reports:admin",
+  companycost_report: "reports:companycost", companycost_settlement: "reports:companycost", companycost_reinforce_price: "reports:companycost", companycost_electronics_price: "reports:companycost",
+  shipments_tax_audit: "reports:shipments", shipments_invoice_checklist: "reports:shipments", shipments_tax_rows: "reports:shipments", shipments_documents: "reports:shipments",
+  accounting_debts: "reports:accounting", accounting_deposits: "reports:accounting", accounting_deposits_counts: "reports:accounting", accounting_opening_balances: "reports:accounting",
+  accounting_customer_summary: "reports:accounting", accounting_monthly_report: "reports:accounting", accounting_wallets: "reports:accounting", accounting_fund: "reports:accounting",
+  accounting_fund_counts: "reports:accounting", accounting_reconcile: "reports:accounting", accounting_statement: "reports:accounting",
+};
+
+extRouter.get("/reports", requireExtScope(""), async (req, res) => {
   const report = String(req.query.report ?? "");
   const fn = REPORTS[report];
   if (!fn) {
     return res.status(501).json({ error: "NOT_IMPLEMENTED", message: `Report "${report}" chưa được cài trong /ext`, available: Object.keys(REPORTS) });
+  }
+  const requiredScope = REPORT_SCOPE[report];
+  const key = res.locals.extKey as ExtKey;
+  if (requiredScope && !key.scopes.includes(requiredScope)) {
+    return res.status(403).json({ error: "FORBIDDEN", message: `Key thiếu scope: ${requiredScope}` });
   }
   try {
     const params = req.query as Record<string, string | undefined>;

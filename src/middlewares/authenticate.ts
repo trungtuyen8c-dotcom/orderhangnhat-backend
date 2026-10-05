@@ -1,8 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
 import { verifyAccess } from "../utils/jwt.js";
 import { hashApiKey } from "../utils/apiKey.js";
-import { prisma } from "../db.js";
-import { redis } from "../redis.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { redis } from "../infrastructure/redis.js";
 
 export interface AuthUser {
   id: string;

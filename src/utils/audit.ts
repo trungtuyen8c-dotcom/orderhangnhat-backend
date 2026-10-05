@@ -1,4 +1,4 @@
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 export async function logAudit(params: {
   actorId?: string | null;

@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { Prisma } from "@prisma/client";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 import { recomputeOrderTotals, trackingShipVnd } from "./orderTotals.js";
 import { deleteCartonIfEmpty } from "./cartons.js";
 import { bumpOrderStatus } from "./orderStatus.js";

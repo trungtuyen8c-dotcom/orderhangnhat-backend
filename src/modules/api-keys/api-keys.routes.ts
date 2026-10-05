@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { loadPermissions } from "../../middlewares/authorize.js";
 import { logAudit } from "../../utils/audit.js";

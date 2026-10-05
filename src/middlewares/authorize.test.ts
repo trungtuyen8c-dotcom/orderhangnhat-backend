@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../db.js", () => ({
+vi.mock("../infrastructure/prisma.js", () => ({
   prisma: { permission: { findMany: vi.fn() } },
 }));
-vi.mock("../redis.js", () => ({
+vi.mock("../infrastructure/redis.js", () => ({
   redis: { get: vi.fn(), set: vi.fn(), del: vi.fn() },
 }));
 vi.mock("../utils/audit.js", () => ({
@@ -11,8 +11,8 @@ vi.mock("../utils/audit.js", () => ({
 }));
 
 import { authorize, loadPermissions } from "./authorize.js";
-import { prisma } from "../db.js";
-import { redis } from "../redis.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { redis } from "../infrastructure/redis.js";
 import { logAudit } from "../utils/audit.js";
 
 const mockPrisma = prisma as unknown as { permission: { findMany: ReturnType<typeof vi.fn> } };

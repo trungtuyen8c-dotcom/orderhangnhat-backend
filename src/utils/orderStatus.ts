@@ -1,4 +1,4 @@
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 // Đúng thứ tự tiến trình vật lý của 1 đơn (đồng bộ enum OrderStatus trong schema.prisma).
 const STATUS_SEQUENCE = [

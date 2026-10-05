@@ -1,5 +1,5 @@
 // Report warehouse_* - copy logic từ warehouse.routes.ts (đọc-only, không import file đó).
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 import { dayKey, effKg, cartonWeightLocked } from "../helpers.js";
 
 export async function warehouse_vn_board(params: { customer?: string }) {

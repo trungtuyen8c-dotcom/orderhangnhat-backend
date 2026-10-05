@@ -1,9 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import { prisma } from "../../db.js";
-import { redis } from "../../redis.js";
-import { config } from "../../config.js";
+import { prisma } from "../../infrastructure/prisma.js";
+import { redis } from "../../infrastructure/redis.js";
+import { config } from "../../app/config.js";
 import { signAccess } from "../../utils/jwt.js";
 import { verifyPassword, hashPassword, sha256 } from "../../utils/password.js";
 import { logAudit } from "../../utils/audit.js";

@@ -1,5 +1,5 @@
-import { prisma } from "../db.js";
-import { logger } from "../logger.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { logger } from "../infrastructure/logger.js";
 
 type Meta = Record<string, unknown> | undefined;
 

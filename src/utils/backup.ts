@@ -2,8 +2,8 @@ import { exec as execCb, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, rm, stat, readdir, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { prisma } from "../db.js";
-import { minio, BUCKET } from "../minio.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { minio, BUCKET } from "../infrastructure/minio.js";
 
 const exec = promisify(execCb);
 const execFile = promisify(execFileCb);

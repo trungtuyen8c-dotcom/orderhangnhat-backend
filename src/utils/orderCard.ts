@@ -1,4 +1,4 @@
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 type Item = { unitPriceJpy: number | any; qty: number; shipJpy?: number | any | null; paymentMethod?: string | null; purchaseDate?: Date | string | null };
 type Client = typeof prisma | any;

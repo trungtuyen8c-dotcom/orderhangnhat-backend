@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
-vi.mock("../../db.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     tracking: { updateMany: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     order: { findUnique: vi.fn() },
@@ -26,7 +26,7 @@ vi.mock("../../utils/cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
 vi.mock("../../utils/trackingClaim.js", () => ({ claimOrCreateTracking: vi.fn() }));
 
 import { dayKey, effKg, cartonWeightLocked, warehouseRouter } from "./warehouse.routes.js";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { bumpOrderStatus } from "../../utils/orderStatus.js";
 import { syncCustomerOrders } from "../../utils/gsheets.js";
 

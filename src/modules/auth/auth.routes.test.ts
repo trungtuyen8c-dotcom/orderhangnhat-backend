@@ -3,7 +3,7 @@ import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
 
-vi.mock("../../db.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     user: { findUnique: vi.fn(), update: vi.fn() },
     refreshToken: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn() },
@@ -16,8 +16,8 @@ vi.mock("../../utils/password.js", async (importOriginal) => {
 });
 
 import { authRouter } from "./auth.routes.js";
-import { prisma } from "../../db.js";
-import { redis } from "../../redis.js";
+import { prisma } from "../../infrastructure/prisma.js";
+import { redis } from "../../infrastructure/redis.js";
 import { logAudit } from "../../utils/audit.js";
 import { verifyPassword } from "../../utils/password.js";
 import { signAccess } from "../../utils/jwt.js";

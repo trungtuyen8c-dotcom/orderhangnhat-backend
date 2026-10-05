@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 // Tiền ship 1 tracking = cân (kg) x đơn giá/kg (quy về VND).
 // Ưu tiên cân VN (thực tế); chưa cân VN thì tạm dùng cân JP (báo trước).

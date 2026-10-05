@@ -1,5 +1,5 @@
 // Report companycost_* - copy logic từ companycost.routes.ts (đọc-only, không import file đó).
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 import { vnMonthKey } from "../helpers.js";
 
 const KIND_LABEL: Record<string, string> = { chakubarai: "着払い (hàng trả sau)", weight: "Tiền cân tháng", other: "Khác" };

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../db.js", () => ({
+vi.mock("../infrastructure/prisma.js", () => ({
   prisma: {
     tracking: { count: vi.fn() },
     carton: { delete: vi.fn() },
@@ -8,7 +8,7 @@ vi.mock("../db.js", () => ({
 }));
 
 import { deleteCartonIfEmpty } from "./cartons.js";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   tracking: { count: ReturnType<typeof vi.fn> };

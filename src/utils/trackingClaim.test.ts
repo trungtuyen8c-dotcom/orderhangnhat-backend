@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../db.js", () => ({
+vi.mock("../infrastructure/prisma.js", () => ({
   prisma: {
     tracking: { findFirst: vi.fn(), update: vi.fn(), create: vi.fn() },
   },
 }));
 
 import { claimOrCreateTracking } from "./trackingClaim.js";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   tracking: { findFirst: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
-import { prisma } from "../db.js";
-import { redis } from "../redis.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { redis } from "../infrastructure/redis.js";
 import { logAudit } from "../utils/audit.js";
 import { cacheHits, cacheMisses } from "./metrics.js";
 

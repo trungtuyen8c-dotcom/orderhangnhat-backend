@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { prisma } from "../../db.js";
-import { redis } from "../../redis.js";
+import { prisma } from "../../infrastructure/prisma.js";
+import { redis } from "../../infrastructure/redis.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 

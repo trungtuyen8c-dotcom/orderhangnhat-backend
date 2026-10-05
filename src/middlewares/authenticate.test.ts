@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../db.js", () => ({
+vi.mock("../infrastructure/prisma.js", () => ({
   prisma: { user: { findUnique: vi.fn() }, apiKey: { findUnique: vi.fn(), update: vi.fn() } },
 }));
-vi.mock("../redis.js", () => ({
+vi.mock("../infrastructure/redis.js", () => ({
   redis: { get: vi.fn(), set: vi.fn() },
 }));
 vi.mock("../utils/jwt.js", () => ({
@@ -11,8 +11,8 @@ vi.mock("../utils/jwt.js", () => ({
 }));
 
 import { authenticate, authenticateApiKey, authenticateEither } from "./authenticate.js";
-import { prisma } from "../db.js";
-import { redis } from "../redis.js";
+import { prisma } from "../infrastructure/prisma.js";
+import { redis } from "../infrastructure/redis.js";
 import { verifyAccess } from "../utils/jwt.js";
 
 const mockPrisma = prisma as unknown as {

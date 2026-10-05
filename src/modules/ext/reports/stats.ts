@@ -1,6 +1,6 @@
 // Report stats_* - stats_overview đã có trực tiếp trong ext.routes.ts, đây là stats_alerts (đọc Redis cache).
-import { prisma } from "../../../db.js";
-import { redis } from "../../../redis.js";
+import { prisma } from "../../../infrastructure/prisma.js";
+import { redis } from "../../../infrastructure/redis.js";
 
 export async function stats_overview() {
   const [byStatus, customers, totalOrders] = await Promise.all([

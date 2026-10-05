@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 async function loadGsheets() {
-  vi.doMock("../db.js", () => ({ prisma: {} }));
+  vi.doMock("../infrastructure/prisma.js", () => ({ prisma: {} }));
   vi.doMock("./orderTotals.js", () => ({ recomputeOrderTotals: vi.fn(), trackingShipVnd: vi.fn() }));
   vi.doMock("./cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
   vi.doMock("./systemLog.js", () => ({ logWarn: vi.fn(), logError: vi.fn() }));

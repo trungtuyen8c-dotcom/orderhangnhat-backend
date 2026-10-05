@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import { config } from "../config.js";
+import { config } from "../app/config.js";
 
 export interface AccessPayload {
   user_id: string;

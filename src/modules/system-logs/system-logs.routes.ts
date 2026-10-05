@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import { Prisma } from "@prisma/client";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 

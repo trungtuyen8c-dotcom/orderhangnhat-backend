@@ -1,7 +1,7 @@
 // Report shipments_* - copy logic từ shipments.routes.ts (đọc-only, không import file đó).
 // Khác bản gốc: matchTaxRows ở đây KHÔNG ghi DB (bỏ 2 đoạn updateMany needsTax + taxRowNote.createMany
 // của bản gốc) - module ext chỉ đọc, không được có side-effect ẩn khi AI gọi 1 GET.
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 import { parseSheetId, readInvoiceTaxRows } from "../../../utils/gsheets.js";
 import { vnMonthRange } from "../helpers.js";
 

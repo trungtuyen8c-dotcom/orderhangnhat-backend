@@ -1,4 +1,4 @@
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 // Kiện hết sạch tracking (do gỡ/xóa tracking khỏi Kho VN) -> tự xóa luôn cho khỏi hiện kiện trống gây rối bảng Kho VN.
 // Không dùng cho "Tạo kiện" thủ công (kiện mới tạo chưa gán tracking) vì chỉ gọi hàm này SAU khi 1 tracking rời khỏi kiện.

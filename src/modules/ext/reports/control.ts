@@ -1,5 +1,5 @@
 // Report control_* - copy logic từ control.routes.ts (đọc-only, không import file đó).
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 import { effKg, summarizeOverdueDebts } from "../helpers.js";
 
 async function getDebtConfig() {

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { logAudit } from "../../utils/audit.js";
 

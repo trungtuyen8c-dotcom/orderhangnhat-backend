@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../db.js", () => ({
+vi.mock("../infrastructure/prisma.js", () => ({
   prisma: { order: { updateMany: vi.fn() } },
 }));
 
 import { bumpOrderStatus } from "./orderStatus.js";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as { order: { updateMany: ReturnType<typeof vi.fn> } };
 

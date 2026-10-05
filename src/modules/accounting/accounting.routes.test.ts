@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../../db.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     order: { findUnique: vi.fn() },
     debt: { findFirst: vi.fn(), update: vi.fn(), create: vi.fn() },
@@ -11,7 +11,7 @@ vi.mock("../../db.js", () => ({
 }));
 
 import { vnDayStart, vnDayEnd, recomputeDebt, applyFundTxn, reverseFundTxn } from "./accounting.routes.js";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   order: { findUnique: ReturnType<typeof vi.fn> };

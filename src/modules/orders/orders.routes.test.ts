@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
-vi.mock("../../db.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     order: { findUnique: vi.fn(), delete: vi.fn() },
     tracking: { deleteMany: vi.fn(), updateMany: vi.fn() },
@@ -23,7 +23,7 @@ vi.mock("../../utils/gsheets.js", () => ({ syncCustomerOrders: vi.fn() }));
 vi.mock("../../utils/trackingClaim.js", () => ({ claimOrCreateTracking: vi.fn() }));
 
 import { findWrongMarketplaceUrl, ordersRouter } from "./orders.routes.js";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { reverseOrderCardCharges } from "../../utils/orderCard.js";
 
 const mockPrisma = prisma as unknown as {

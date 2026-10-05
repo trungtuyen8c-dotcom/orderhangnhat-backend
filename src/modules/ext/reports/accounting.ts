@@ -1,5 +1,5 @@
 // Report accounting_* - copy logic từ accounting.routes.ts (đọc-only, không import file đó).
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 import { vnDayStart, vnMonthKey } from "../helpers.js";
 
 const vnDayEnd = (d: string) => new Date(`${d}T23:59:59.999+07:00`);

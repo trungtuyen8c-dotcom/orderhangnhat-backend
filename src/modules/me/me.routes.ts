@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { prisma } from "../../db.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { authenticate } from "../../middlewares/authenticate.js";
-import { redis } from "../../redis.js";
+import { redis } from "../../infrastructure/redis.js";
 
 export const meRouter = Router();
 

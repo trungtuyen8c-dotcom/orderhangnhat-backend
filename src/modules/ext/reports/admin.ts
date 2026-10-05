@@ -1,5 +1,5 @@
 // Report users_list/roles_list/permissions_list/audit_log - copy logic từ admin.routes.ts.
-import { prisma } from "../../../db.js";
+import { prisma } from "../../../infrastructure/prisma.js";
 
 export async function users_list() {
   const rows = await prisma.user.findMany({

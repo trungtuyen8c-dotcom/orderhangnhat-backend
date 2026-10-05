@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { prisma } from "../db.js";
+import { prisma } from "../infrastructure/prisma.js";
 
 // Mã có thể đã bị kho quét trước đó (tạo mồ côi chờ gắn đơn) -> claim lại đúng dòng đó thay vì tạo trùng
 // (giữ nguyên cân/kiện/ngày đóng đã có), tránh 1 mã tồn tại nhiều Tracking rác trong DB (đếm "dùng chung N đơn"

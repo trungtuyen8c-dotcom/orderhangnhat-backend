@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Prisma } from "@prisma/client";
 
-vi.mock("../infrastructure/prisma.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: { tracking: { create: vi.fn(), findFirst: vi.fn() } },
 }));
 
-import { createOrphanTrackingSafe } from "./gsheets.js";
-import { prisma } from "../infrastructure/prisma.js";
+import { createOrphanTrackingSafe } from "./orphanTracking.js";
+import { prisma } from "../../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   tracking: { create: ReturnType<typeof vi.fn>; findFirst: ReturnType<typeof vi.fn> };

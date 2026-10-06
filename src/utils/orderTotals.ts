@@ -80,7 +80,7 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
     && !rate;
 
   // Công (commissionPercent) KHÔNG cộng vào totalVnd - đây là tiền công nợ/kế toán thực thu,
-  // chỉ tính giá gốc. Công chỉ hiển thị/tính riêng cho file gửi khách (xem utils/gsheets.ts).
+  // chỉ tính giá gốc. Công chỉ hiển thị/tính riêng cho file gửi khách (xem modules/sheets/customerSheetSync.service.ts).
   const totalVnd = hasUnconverted
     ? null
     : subtotalJpy * rate

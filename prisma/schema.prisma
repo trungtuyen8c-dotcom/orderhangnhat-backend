@@ -130,19 +130,21 @@ model SystemLog {
 }
 
 model Customer {
-  id            String   @id @default(uuid()) @db.Uuid
-  code          String?
-  name          String
-  fbZalo        String?  @map("fb_zalo")
-  phone         String?
-  address       String?
-  note          String?
-  sheetId       String?  @map("sheet_id")
-  shipRatePerKg Decimal? @map("ship_rate_per_kg") @db.Decimal(14, 2)
+  id                    String            @id @default(uuid()) @db.Uuid
+  code                  String?
+  name                  String
+  fbZalo                String?           @map("fb_zalo")
+  phone                 String?
+  address               String?
+  note                  String?
+  sheetId               String?           @map("sheet_id")
+  shipRatePerKg         Decimal?          @map("ship_rate_per_kg") @db.Decimal(14, 2)
   // Khách chỉ lấy chứng từ/thuế, không cân ở Kho VN - đơn mới tạo cho khách này tự bật sẵn Order.skipVnWeighing.
-  skipVnWeighingDefault Boolean @default(false) @map("skip_vn_weighing_default")
-  createdAt     DateTime @default(now()) @map("created_at")
-  orders        Order[]
+  skipVnWeighingDefault Boolean           @default(false) @map("skip_vn_weighing_default")
+  createdAt             DateTime          @default(now()) @map("created_at")
+  orders                Order[]
+  deposits              CustomerDeposit[]
+  debts                 Debt[]
 
   @@map("customers")
 }
@@ -164,49 +166,54 @@ enum OrderStatus {
 }
 
 model Order {
-  id                     String      @id @default(uuid()) @db.Uuid
-  code                   String      @unique
-  customerId             String      @map("customer_id") @db.Uuid
-  status                 OrderStatus @default(draft)
-  saleId                 String?     @map("sale_id") @db.Uuid
-  totalQuote             Decimal?    @map("total_quote") @db.Decimal(14, 2)
-  exchangeRate           Decimal?    @map("exchange_rate") @db.Decimal(12, 4)
-  shipAmount             Decimal     @default(0) @map("ship_amount") @db.Decimal(14, 2)
-  shipCurrency           String      @default("JPY") @map("ship_currency")
-  surchargeAmount        Decimal     @default(0) @map("surcharge_amount") @db.Decimal(14, 2)
-  surchargeCurrency      String      @default("VND") @map("surcharge_currency")
-  discountAmount         Decimal     @default(0) @map("discount_amount") @db.Decimal(14, 2)
-  discountCurrency       String      @default("VND") @map("discount_currency")
-  serviceFeeAmount       Decimal     @default(0) @map("service_fee_amount") @db.Decimal(14, 2)
-  serviceFeeCurrency     String      @default("VND") @map("service_fee_currency")
-  jpDomesticShipAmount   Decimal     @default(0) @map("jp_domestic_ship_amount") @db.Decimal(14, 2)
-  jpDomesticShipCurrency String      @default("JPY") @map("jp_domestic_ship_currency")
-  intlShipAmount         Decimal     @default(0) @map("intl_ship_amount") @db.Decimal(14, 2)
-  intlShipCurrency       String      @default("VND") @map("intl_ship_currency")
+  id                     String        @id @default(uuid()) @db.Uuid
+  code                   String        @unique
+  customerId             String        @map("customer_id") @db.Uuid
+  status                 OrderStatus   @default(draft)
+  saleId                 String?       @map("sale_id") @db.Uuid
+  totalQuote             Decimal?      @map("total_quote") @db.Decimal(14, 2)
+  exchangeRate           Decimal?      @map("exchange_rate") @db.Decimal(12, 4)
+  shipAmount             Decimal       @default(0) @map("ship_amount") @db.Decimal(14, 2)
+  shipCurrency           String        @default("JPY") @map("ship_currency")
+  surchargeAmount        Decimal       @default(0) @map("surcharge_amount") @db.Decimal(14, 2)
+  surchargeCurrency      String        @default("VND") @map("surcharge_currency")
+  discountAmount         Decimal       @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  discountCurrency       String        @default("VND") @map("discount_currency")
+  serviceFeeAmount       Decimal       @default(0) @map("service_fee_amount") @db.Decimal(14, 2)
+  serviceFeeCurrency     String        @default("VND") @map("service_fee_currency")
+  jpDomesticShipAmount   Decimal       @default(0) @map("jp_domestic_ship_amount") @db.Decimal(14, 2)
+  jpDomesticShipCurrency String        @default("JPY") @map("jp_domestic_ship_currency")
+  intlShipAmount         Decimal       @default(0) @map("intl_ship_amount") @db.Decimal(14, 2)
+  intlShipCurrency       String        @default("VND") @map("intl_ship_currency")
   // % công tính trên tổng tiền JPY (món + ship món), cộng thêm vào totalVnd khi tính lại
-  commissionPercent      Decimal     @default(0) @map("commission_percent") @db.Decimal(5, 2)
-  totalVnd               Decimal?    @map("total_vnd") @db.Decimal(16, 2)
-  deposit                Decimal     @default(0) @db.Decimal(14, 2)
-  paidAt                 DateTime?   @map("paid_at")
-  needsCheck             Boolean     @default(false) @map("needs_check")
-  checkNote              String?     @map("check_note")
+  commissionPercent      Decimal       @default(0) @map("commission_percent") @db.Decimal(5, 2)
+  totalVnd               Decimal?      @map("total_vnd") @db.Decimal(16, 2)
+  deposit                Decimal       @default(0) @db.Decimal(14, 2)
+  paidAt                 DateTime?     @map("paid_at")
+  needsCheck             Boolean       @default(false) @map("needs_check")
+  checkNote              String?       @map("check_note")
   // Chỉ order hộ - hàng đóng về kho khác (không phải kho VN của mình) -> tracking loại khỏi board Kho VN
-  externalWarehouse      Boolean     @default(false) @map("external_warehouse")
+  externalWarehouse      Boolean       @default(false) @map("external_warehouse")
   // Khách chỉ nhận chứng từ, giao thẳng công ty - không cần cân ở Kho VN -> tracking loại khỏi board Kho VN (vẫn qua kho, khác externalWarehouse)
-  skipVnWeighing         Boolean     @default(false) @map("skip_vn_weighing")
-  publicToken            String      @unique @map("public_token")
-  orderDate              DateTime    @default(now()) @map("order_date")
-  source                 String      @default("normal")
+  skipVnWeighing         Boolean       @default(false) @map("skip_vn_weighing")
+  publicToken            String        @unique @map("public_token")
+  orderDate              DateTime      @default(now()) @map("order_date")
+  source                 String        @default("normal")
   nick                   String?
-  yahooPaidAt            DateTime?   @map("yahoo_paid_at")
-  fixRequest             String?     @map("fix_request")
-  fixRequestedAt         DateTime?   @map("fix_requested_at")
-  createdAt              DateTime    @default(now()) @map("created_at")
-  customer               Customer    @relation(fields: [customerId], references: [id])
+  yahooPaidAt            DateTime?     @map("yahoo_paid_at")
+  fixRequest             String?       @map("fix_request")
+  fixRequestedAt         DateTime?     @map("fix_requested_at")
+  createdAt              DateTime      @default(now()) @map("created_at")
+  customer               Customer      @relation(fields: [customerId], references: [id])
   items                  OrderItem[]
   trackings              Tracking[]
   payments               Payment[]
   logs                   OrderLog[]
+  debts                  Debt[]
+  documents              Document[]
+  expenses               Expense[]
+  weightRecons           WeightRecon[]
+  walletTxns             WalletTxn[]
 
   @@index([status])
   @@map("orders")
@@ -243,50 +250,51 @@ model OrderItem {
 }
 
 model Tracking {
-  id                String        @id @default(uuid()) @db.Uuid
-  orderId           String?       @map("order_id") @db.Uuid
-  code              String
-  jpName            String?       @map("jp_name")
-  jpPriceJpy        Decimal?      @map("jp_price_jpy") @db.Decimal(12, 2)
-  jpWeightKg        Decimal?      @map("jp_weight_kg") @db.Decimal(8, 3)
-  vnWeightKg        Decimal?      @map("vn_weight_kg") @db.Decimal(8, 3)
-  unitPriceVndPerKg Decimal?      @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
-  shipRateCurrency  String        @default("VND") @map("ship_rate_currency")
-  vnTrackingCode    String?       @map("vn_tracking_code")
+  id                 String        @id @default(uuid()) @db.Uuid
+  orderId            String?       @map("order_id") @db.Uuid
+  code               String
+  jpName             String?       @map("jp_name")
+  jpPriceJpy         Decimal?      @map("jp_price_jpy") @db.Decimal(12, 2)
+  jpWeightKg         Decimal?      @map("jp_weight_kg") @db.Decimal(8, 3)
+  vnWeightKg         Decimal?      @map("vn_weight_kg") @db.Decimal(8, 3)
+  unitPriceVndPerKg  Decimal?      @map("unit_price_vnd_per_kg") @db.Decimal(14, 2)
+  shipRateCurrency   String        @default("VND") @map("ship_rate_currency")
+  vnTrackingCode     String?       @map("vn_tracking_code")
   // Ngày điền Tracking VN (giao vận nội địa) lần đầu - hiện ở cột "Ngày giao cho khách hàng" trên sheet khách;
   // xóa Tracking VN thì tự về null, không phải ngày sync chạy mà là đúng ngày lúc kho thực sự điền.
-  deliveredAt       DateTime?     @map("delivered_at")
+  deliveredAt        DateTime?     @map("delivered_at")
   // Ngày bấm "Chuyển lưu kho" (status="stored") lần đầu - mốc đúng để tính tuổi tồn kho VN, KHÔNG dùng packedAt
   // (đó là ngày kho Nhật đóng gói, không phải ngày hàng thực nằm ở kho VN chờ ship).
-  storedAt          DateTime?     @map("stored_at")
+  storedAt           DateTime?     @map("stored_at")
   // Ngày xác nhận khách ĐÃ THỰC NHẬN hàng - khác deliveredAt (chỉ là ngày tạo mã vận đơn nội địa, không phải
   // ngày khách cầm được hàng). Set tay qua nút "Đã giao khách" sau khi có xác nhận thật.
-  customerReceivedAt DateTime?    @map("customer_received_at")
-  cartonId          String?       @map("carton_id") @db.Uuid
+  customerReceivedAt DateTime?     @map("customer_received_at")
+  cartonId           String?       @map("carton_id") @db.Uuid
   // true nếu người dùng tự gán/gỡ kiện tay trong app - sync sẽ KHÔNG tự đổi cartonId nữa (tránh đè thao tác thủ công)
-  cartonManual      Boolean       @default(false) @map("carton_manual")
-  review            String?
-  url               String?
-  packedAt          DateTime?     @map("packed_at")
+  cartonManual       Boolean       @default(false) @map("carton_manual")
+  review             String?
+  url                String?
+  packedAt           DateTime?     @map("packed_at")
   // Số dòng vật lý trong tab sheet lúc quét - để sắp xếp Kho VN đúng thứ tự vật lý (chọn liên tục nhiều dòng gán 1 kiện)
-  packRow           Int?          @map("pack_row")
+  packRow            Int?          @map("pack_row")
   // Tên khai hải quan - kho Nhật tự sửa trong sheet (cột F) để dễ thông quan; khác tên gốc thì giữ lại đây, dùng khi xuất hóa đơn
-  customsName       String?       @map("customs_name")
+  customsName        String?       @map("customs_name")
   // Quét vào đúng ngày đã "chốt" khai hải quan (PackDayLock) -> không gộp vào invoice ngày đó nữa, cần khai bổ sung riêng
-  lateAfterLock     Boolean       @default(false) @map("late_after_lock")
+  lateAfterLock      Boolean       @default(false) @map("late_after_lock")
   // true khi tracking này từng khớp 1 dòng tô vàng trên sheet "invoice test" - hàng cần lấy thuế từ khách.
   // Tự set true khi quét /shipments/tax-rows khớp được, không tự tắt lại (giữ lịch sử dù dòng hết vàng).
-  needsTax          Boolean       @default(false) @map("needs_tax")
+  needsTax           Boolean       @default(false) @map("needs_tax")
   // Tick khi đã lấy được thuế từ khách - đồng bộ hiển thị giữa trang Chứng từ và Orders/PayLaterOrders.
-  taxCollected      Boolean       @default(false) @map("tax_collected")
+  taxCollected       Boolean       @default(false) @map("tax_collected")
   // Tick thủ công ở "Soát theo tháng" khi đã bổ sung tracking này vào sheet nháp kho (đang chờ needsTax
   // tự bật ở lần quét sau) - ẩn khỏi danh sách "chưa lên thuế" dù needsTax vẫn false, tránh lặp lại việc đã xử lý.
-  taxAuditDismissed Boolean       @default(false) @map("tax_audit_dismissed")
-  status            String        @default("new")
-  createdAt         DateTime      @default(now()) @map("created_at")
-  order             Order?        @relation(fields: [orderId], references: [id])
-  carton            Carton?       @relation(fields: [cartonId], references: [id])
-  logs              TrackingLog[]
+  taxAuditDismissed  Boolean       @default(false) @map("tax_audit_dismissed")
+  status             String        @default("new")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  order              Order?        @relation(fields: [orderId], references: [id])
+  carton             Carton?       @relation(fields: [cartonId], references: [id])
+  logs               TrackingLog[]
+  companyCosts       CompanyCost[]
 
   @@index([code])
   @@map("trackings")
@@ -294,32 +302,32 @@ model Tracking {
 
 // Ngày đã "chốt" khai hải quan (nộp invoice) - mã tracking quét vào sau khi ngày này đã chốt sẽ bị đánh dấu lateAfterLock
 model PackDayLock {
-  date      DateTime @id @db.Date
-  lockedAt  DateTime @default(now()) @map("locked_at")
-  lockedBy  String?  @map("locked_by") @db.Uuid
+  date     DateTime @id @db.Date
+  lockedAt DateTime @default(now()) @map("locked_at")
+  lockedBy String?  @map("locked_by") @db.Uuid
 
   @@map("pack_day_locks")
 }
 
 // Kiện / carton: kho Nhật báo cân tổng; hệ thống cộng cân lẻ tracking để đối soát
 model Carton {
-  id                String     @id @default(uuid()) @db.Uuid
-  code              String
-  declaredWeightKg  Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
+  id                     String     @id @default(uuid()) @db.Uuid
+  code                   String
+  declaredWeightKg       Decimal?   @map("declared_weight_kg") @db.Decimal(8, 3)
   // Tổng cân VN do Kho VN tự nhập tay (khác actualKg tính tự động = tổng cân từng tracking) - dùng để
   // đối soát với declaredWeightKg TRƯỚC khi cho điền cân từng mã lẻ trong kiện. Xem logic khóa ở warehouse.routes.ts.
-  vnTotalWeightKg   Decimal?   @map("vn_total_weight_kg") @db.Decimal(8, 3)
+  vnTotalWeightKg        Decimal?   @map("vn_total_weight_kg") @db.Decimal(8, 3)
   // Sale/NV mua bấm xác nhận khi 2 tổng lệch >= 1kg nhưng đã hỏi kho Nhật xác nhận số đúng - mở khóa cân từng mã lẻ.
   // Sửa lại declaredWeightKg hoặc vnTotalWeightKg sau khi xác nhận thì reset về null (xác nhận cũ không còn hiệu lực).
-  weightConfirmedAt DateTime?  @map("weight_confirmed_at")
+  weightConfirmedAt      DateTime?  @map("weight_confirmed_at")
   // Số thiết bị điện tử công ty phụ thu (đếm/kiểm tra lại theo kiện) - nhân đơn giá cấu hình ở AppConfig electronics_price_vnd.
-  electronicsCount  Int?       @map("electronics_count")
+  electronicsCount       Int?       @map("electronics_count")
   // Kho VN bấm xác nhận sau khi đếm thực tế khớp electronicsCount. Sửa lại electronicsCount thì reset về null.
-  electronicsConfirmedAt DateTime? @map("electronics_confirmed_at")
-  packedDate        DateTime?  @map("packed_date")
-  note              String?
-  createdAt         DateTime   @default(now()) @map("created_at")
-  trackings         Tracking[]
+  electronicsConfirmedAt DateTime?  @map("electronics_confirmed_at")
+  packedDate             DateTime?  @map("packed_date")
+  note                   String?
+  createdAt              DateTime   @default(now()) @map("created_at")
+  trackings              Tracking[]
 
   @@map("cartons")
 }
@@ -346,7 +354,10 @@ model Document {
   invoiceDate DateTime? @map("invoice_date") @db.Date
   uploadedBy  String?   @map("uploaded_by") @db.Uuid
   createdAt   DateTime  @default(now()) @map("created_at")
+  // Chứng từ không phải sổ tiền -> xóa đơn thì giữ file, chỉ gỡ liên kết
+  order       Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
+  @@index([orderId])
   @@map("documents")
 }
 
@@ -376,6 +387,8 @@ model Debt {
   // Đơn chưa có tỉ giá (khách trả thẳng JPY) -> giữ nợ theo ¥, không ép quy đổi sai sang ₫
   currency   String   @default("VND")
   updatedAt  DateTime @updatedAt @map("updated_at")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  order      Order?   @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([customerId])
   @@index([orderId])
@@ -390,6 +403,8 @@ model Wallet {
   payments     Payment[]
   txns         WalletTxn[]
   dailyActuals WalletDailyActual[]
+  deposits     CustomerDeposit[]
+  fundTxns     FundTxn[]
 
   @@map("wallets")
 }
@@ -419,68 +434,81 @@ model Fund {
 
 // Giao dịch Quỹ tổng JPY: NV ghi -> CHỜ (chưa đụng số dư quỹ/thẻ), kế toán Xác nhận thì tiền mới thực sự thay đổi - giống luồng Cọc khách.
 model FundTxn {
-  id             String    @id @default(uuid()) @db.Uuid
+  id             String      @id @default(uuid()) @db.Uuid
   type           String // topup | allocate | set | cashback
-  amountYen      Decimal   @map("amount_yen") @db.Decimal(16, 2)
-  rate           Decimal?  @db.Decimal(12, 4)
-  walletId       String?   @map("wallet_id") @db.Uuid
+  amountYen      Decimal     @map("amount_yen") @db.Decimal(16, 2)
+  rate           Decimal?    @db.Decimal(12, 4)
+  walletId       String?     @map("wallet_id") @db.Uuid
   note           String?
-  createdAt      DateTime  @default(now()) @map("created_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
   // Số dư quỹ TRƯỚC lúc ghi - chỉ dùng cho type "set" (ghi đè tuyệt đối) để hoàn tác đúng khi hủy xác nhận
-  prevBalance    Decimal?  @map("prev_balance") @db.Decimal(16, 2)
-  confirmed      Boolean   @default(false)
-  recordedBy     String?   @map("recorded_by") @db.Uuid
-  confirmedBy    String?   @map("confirmed_by") @db.Uuid
-  confirmedAt    DateTime? @map("confirmed_at")
-  fixRequest     String?   @map("fix_request")
-  fixRequestedAt DateTime? @map("fix_requested_at")
+  prevBalance    Decimal?    @map("prev_balance") @db.Decimal(16, 2)
+  confirmed      Boolean     @default(false)
+  recordedBy     String?     @map("recorded_by") @db.Uuid
+  confirmedBy    String?     @map("confirmed_by") @db.Uuid
+  confirmedAt    DateTime?   @map("confirmed_at")
+  fixRequest     String?     @map("fix_request")
+  fixRequestedAt DateTime?   @map("fix_requested_at")
+  wallet         Wallet?     @relation(fields: [walletId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  walletTxns     WalletTxn[]
 
+  @@index([walletId])
   @@map("fund_txns")
 }
 
 model WalletTxn {
-  id           String   @id @default(uuid()) @db.Uuid
-  walletId     String   @map("wallet_id") @db.Uuid
-  amount       Decimal  @db.Decimal(16, 2)
+  id           String           @id @default(uuid()) @db.Uuid
+  walletId     String           @map("wallet_id") @db.Uuid
+  amount       Decimal          @db.Decimal(16, 2)
   type         String
   category     String?
   note         String?
-  transferRef  String?  @map("transfer_ref") @db.Uuid
-  refOrderId   String?  @map("ref_order_id") @db.Uuid
-  refDepositId String?  @map("ref_deposit_id") @db.Uuid
-  refFundTxnId String?  @map("ref_fund_txn_id") @db.Uuid
-  reconciled   Boolean  @default(false)
-  statementRef String?  @map("statement_ref")
-  createdAt    DateTime @default(now()) @map("created_at")
-  wallet       Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  transferRef  String?          @map("transfer_ref") @db.Uuid
+  refOrderId   String?          @map("ref_order_id") @db.Uuid
+  refDepositId String?          @map("ref_deposit_id") @db.Uuid
+  refFundTxnId String?          @map("ref_fund_txn_id") @db.Uuid
+  reconciled   Boolean          @default(false)
+  statementRef String?          @map("statement_ref")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  wallet       Wallet           @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  refOrder     Order?           @relation(fields: [refOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  refDeposit   CustomerDeposit? @relation(fields: [refDepositId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  refFundTxn   FundTxn?         @relation(fields: [refFundTxnId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  @@index([refOrderId])
+  @@index([refDepositId])
+  @@index([refFundTxnId])
   @@map("wallet_txns")
 }
 
 // Cọc cục theo khách (không gắn đơn) — khách nạp 15tr/25tr, clear theo tháng
 model CustomerDeposit {
-  id           String    @id @default(uuid()) @db.Uuid
-  customerId   String    @map("customer_id") @db.Uuid
-  amountVnd    Decimal   @map("amount_vnd") @db.Decimal(14, 2)
-  currency     String    @default("VND")
-  amountOrig   Decimal   @default(0) @map("amount_orig") @db.Decimal(14, 2)
-  exchangeRate Decimal?  @map("exchange_rate") @db.Decimal(12, 4)
-  payerName    String?   @map("payer_name")
-  method       String?
-  walletId     String?   @map("wallet_id") @db.Uuid
-  note         String?
-  paidAt       DateTime  @map("paid_at")
-  confirmed    Boolean   @default(false)
-  isOpening    Boolean   @default(false) @map("is_opening")
-  confirmedBy  String?   @map("confirmed_by") @db.Uuid
-  confirmedAt  DateTime? @map("confirmed_at")
-  recordedBy   String?   @map("recorded_by") @db.Uuid
-  fixRequest   String?   @map("fix_request")
-  fixRequestedAt DateTime? @map("fix_requested_at")
-  createdAt    DateTime  @default(now()) @map("created_at")
+  id             String      @id @default(uuid()) @db.Uuid
+  customerId     String      @map("customer_id") @db.Uuid
+  amountVnd      Decimal     @map("amount_vnd") @db.Decimal(14, 2)
+  currency       String      @default("VND")
+  amountOrig     Decimal     @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate   Decimal?    @map("exchange_rate") @db.Decimal(12, 4)
+  payerName      String?     @map("payer_name")
+  method         String?
+  walletId       String?     @map("wallet_id") @db.Uuid
+  note           String?
+  paidAt         DateTime    @map("paid_at")
+  confirmed      Boolean     @default(false)
+  isOpening      Boolean     @default(false) @map("is_opening")
+  confirmedBy    String?     @map("confirmed_by") @db.Uuid
+  confirmedAt    DateTime?   @map("confirmed_at")
+  recordedBy     String?     @map("recorded_by") @db.Uuid
+  fixRequest     String?     @map("fix_request")
+  fixRequestedAt DateTime?   @map("fix_requested_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  customer       Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  wallet         Wallet?     @relation(fields: [walletId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  walletTxns     WalletTxn[]
 
   @@index([customerId])
   @@index([confirmed])
+  @@index([walletId])
   @@map("customer_deposits")
 }
 
@@ -537,22 +565,25 @@ model BackupRun {
 
 // Chi phí phải trả kho/cty: chakubarai (착불) + gia cố + tiền cân tháng
 model CompanyCost {
-  id           String   @id @default(uuid()) @db.Uuid
-  kind         String // chakubarai | reinforce | weight | other
-  month        String // YYYY-MM
-  amountVnd    Decimal  @map("amount_vnd") @db.Decimal(14, 2)
-  currency     String   @default("VND")
-  amountOrig   Decimal  @default(0) @map("amount_orig") @db.Decimal(14, 2)
-  exchangeRate Decimal? @map("exchange_rate") @db.Decimal(12, 4)
-  refId        String?  @map("ref_id") @db.Uuid
-  note         String?
-  paid         Boolean  @default(false)
+  id            String    @id @default(uuid()) @db.Uuid
+  kind          String // chakubarai | reinforce | weight | other
+  month         String // YYYY-MM
+  amountVnd     Decimal   @map("amount_vnd") @db.Decimal(14, 2)
+  currency      String    @default("VND")
+  amountOrig    Decimal   @default(0) @map("amount_orig") @db.Decimal(14, 2)
+  exchangeRate  Decimal?  @map("exchange_rate") @db.Decimal(12, 4)
+  refId         String?   @map("ref_id") @db.Uuid
+  note          String?
+  paid          Boolean   @default(false)
   // Khoản nhập tay SAU khi ngày đóng hàng của tracking (refId) đã bị chốt hải quan - không tự vào invoice
   // ngày đó nữa, cần khai bổ sung thủ công. Tính 1 lần lúc tạo, không đổi lại sau đó.
-  lateAfterLock Boolean @default(false) @map("late_after_lock")
-  createdAt    DateTime @default(now()) @map("created_at")
+  lateAfterLock Boolean   @default(false) @map("late_after_lock")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  // refId luôn là trackings.id (chỉ set cho kind=chakubarai, xem companycost.routes.ts)
+  refTracking   Tracking? @relation(fields: [refId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([month])
+  @@index([refId])
   @@map("company_costs")
 }
 
@@ -569,6 +600,7 @@ model Expense {
   incurredAt   DateTime @map("incurred_at")
   recordedBy   String?  @map("recorded_by") @db.Uuid
   createdAt    DateTime @default(now()) @map("created_at")
+  order        Order?   @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([orderId])
   @@map("expenses")
@@ -598,6 +630,8 @@ model WeightRecon {
   diffKg    Decimal? @map("diff_kg") @db.Decimal(8, 3)
   note      String?
   createdAt DateTime @default(now()) @map("created_at")
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  @@index([orderId])
   @@map("weight_recon")
 }

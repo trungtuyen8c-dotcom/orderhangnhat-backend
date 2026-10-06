@@ -16,10 +16,10 @@ vi.mock("../../middlewares/authenticate.js", () => ({
 vi.mock("../../middlewares/authorize.js", () => ({
   authorize: () => (_req: any, _res: any, next: any) => next(),
 }));
-vi.mock("../../utils/audit.js", () => ({ logAudit: vi.fn(), logOrder: vi.fn() }));
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn(), logOrder: vi.fn() }));
 vi.mock("../../utils/orderTotals.js", () => ({ recomputeOrderTotals: vi.fn() }));
 vi.mock("../../utils/orderCard.js", () => ({ applyOrderCardCharges: vi.fn(), reverseOrderCardCharges: vi.fn() }));
-vi.mock("../../utils/gsheets.js", () => ({ syncCustomerOrders: vi.fn() }));
+vi.mock("../sheets/customerSheetSync.service.js", () => ({ syncCustomerOrders: vi.fn() }));
 vi.mock("../../utils/trackingClaim.js", () => ({ claimOrCreateTracking: vi.fn() }));
 
 import { findWrongMarketplaceUrl, ordersRouter } from "./orders.routes.js";

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// getToken() cache/refresh và apiSheet() retry logic không được export trực tiếp -> test gián tiếp qua
+// getAccessToken() cache/refresh (googleAuth) và sheetsApi() retry (googleSheets.client) -> test gián tiếp qua
 // readWarehousePackRows/syncTracking (đường đi thật của cả 2 hàm nội bộ này). Mock fetch + jsonwebtoken,
 // KHÔNG gọi API Google thật. Mỗi test tự set env + vi.resetModules() vì SA_EMAIL/SA_KEY/GSHEET_ID được
 // đọc 1 lần ở module scope lúc import.
@@ -23,12 +23,18 @@ afterEach(() => {
 });
 
 async function loadGsheets() {
-  vi.doMock("../infrastructure/prisma.js", () => ({ prisma: {} }));
-  vi.doMock("./orderTotals.js", () => ({ recomputeOrderTotals: vi.fn(), trackingShipVnd: vi.fn() }));
-  vi.doMock("./cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
-  vi.doMock("./systemLog.js", () => ({ logWarn: vi.fn(), logError: vi.fn() }));
+  vi.doMock("../../infrastructure/prisma.js", () => ({ prisma: {} }));
+  vi.doMock("../../utils/orderTotals.js", () => ({ recomputeOrderTotals: vi.fn(), trackingShipVnd: vi.fn() }));
+  vi.doMock("../../utils/cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
+  vi.doMock("../../infrastructure/systemLog.js", () => ({ logWarn: vi.fn(), logError: vi.fn() }));
   vi.doMock("jsonwebtoken", () => ({ default: { sign: vi.fn(() => "signed.jwt.token") } }));
-  return import("./gsheets.js");
+  const [reader, tracking, invoiceTax, warehouse] = await Promise.all([
+    import("./warehouseSheet.reader.js"),
+    import("./trackingSheetSync.service.js"),
+    import("./invoiceTaxSheet.service.js"),
+    import("./warehouseSheetSync.service.js"),
+  ]);
+  return { ...reader, ...tracking, ...invoiceTax, ...warehouse };
 }
 
 function oauthResponse() {

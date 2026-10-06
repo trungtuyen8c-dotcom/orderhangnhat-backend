@@ -1,28 +1,15 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
-import { prisma } from "../../infrastructure/prisma.js";
+import { handle, parseOr400 } from "../../app/http/legacyError.js";
 import { authenticate } from "../../middlewares/authenticate.js";
-import { loadPermissions } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { generateApiKey, API_KEY_ALLOWED_SCOPES, API_KEY_SCOPE_TO_PERMISSION } from "../../utils/apiKey.js";
+import { API_KEY_ALLOWED_SCOPES } from "./apiKey.js";
+import * as apiKeys from "./api-keys.service.js";
 
 export const apiKeysRouter = Router();
 // Luôn cần JWT thật (không cho API key tự tạo API key khác) - tự đăng nhập mới quản lý được key của mình.
 apiKeysRouter.use(authenticate);
 
-const select = {
-  id: true, name: true, keyPrefix: true, scopes: true, rateLimit: true,
-  lastUsedAt: true, expiresAt: true, revokedAt: true, createdAt: true,
-} as const;
-
-apiKeysRouter.get("/", async (req, res) => {
-  const keys = await prisma.apiKey.findMany({
-    where: { userId: req.user!.id },
-    select,
-    orderBy: { createdAt: "desc" },
-  });
-  res.json(keys);
-});
+const ctx = (req: Request) => ({ ip: req.ip, requestId: req.requestId });
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -31,54 +18,21 @@ const createSchema = z.object({
   rateLimit: z.number().int().positive().max(1000).optional(),
 });
 
-apiKeysRouter.post("/", async (req, res) => {
-  const parsed = createSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "BAD_REQUEST", detail: parsed.error.flatten() });
-  const { name, scopes, expiresInDays, rateLimit } = parsed.data;
+apiKeysRouter.get("/", handle(async (req, res) => {
+  res.json(await apiKeys.listKeys(req.user!.id));
+}));
 
-  // Không cho scope vượt quá quyền thật của user đang đăng nhập lúc tạo key
-  const userPerms = req.user!.roles.includes("super_admin") ? null : await loadPermissions(req.user!.id);
-  const overScope = userPerms ? scopes.find((s) => !userPerms.includes(API_KEY_SCOPE_TO_PERMISSION[s])) : undefined;
-  if (overScope) {
-    return res.status(403).json({ error: "FORBIDDEN", message: `Bạn không có quyền: ${API_KEY_SCOPE_TO_PERMISSION[overScope]}` });
-  }
+apiKeysRouter.post("/", handle(async (req, res) => {
+  const body = parseOr400(createSchema, req.body, true);
+  res.status(201).json(await apiKeys.createKey(req.user!, body, ctx(req)));
+}));
 
-  const { plain, prefix, hash } = generateApiKey();
-  const record = await prisma.apiKey.create({
-    data: {
-      userId: req.user!.id,
-      name,
-      keyPrefix: prefix,
-      keyHash: hash,
-      scopes,
-      expiresAt: expiresInDays ? new Date(Date.now() + expiresInDays * 86400_000) : null,
-      ...(rateLimit ? { rateLimit } : {}),
-    },
-    select,
-  });
-  await logAudit({ actorId: req.user!.id, action: "api_key.created", metadata: { apiKeyId: record.id, scopes }, ip: req.ip });
-
-  // Trả plaintext DUY NHẤT lần này - không lưu lại, không log ra ngoài audit metadata.
-  res.status(201).json({ ...record, key: plain });
-});
-
-apiKeysRouter.delete("/:id", async (req, res) => {
-  const key = await prisma.apiKey.findUnique({ where: { id: req.params.id } });
-  if (!key || key.userId !== req.user!.id) return res.status(404).json({ error: "NOT_FOUND" });
-  if (key.revokedAt) return res.json({ ok: true });
-
-  await prisma.apiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
-  await logAudit({ actorId: req.user!.id, action: "api_key.revoked", metadata: { apiKeyId: key.id }, ip: req.ip });
+apiKeysRouter.delete("/:id", handle(async (req, res) => {
+  await apiKeys.revokeKey(req.user!.id, req.params.id, ctx(req));
   res.json({ ok: true });
-});
+}));
 
-// Xoá hẳn khỏi bảng - chỉ cho key đã thu hồi, tránh xoá nhầm key đang hoạt động.
-apiKeysRouter.delete("/:id/purge", async (req, res) => {
-  const key = await prisma.apiKey.findUnique({ where: { id: req.params.id } });
-  if (!key || key.userId !== req.user!.id) return res.status(404).json({ error: "NOT_FOUND" });
-  if (!key.revokedAt) return res.status(400).json({ error: "NOT_REVOKED", message: "Chỉ xoá được key đã thu hồi" });
-
-  await prisma.apiKey.delete({ where: { id: key.id } });
-  await logAudit({ actorId: req.user!.id, action: "api_key.purged", metadata: { apiKeyId: key.id }, ip: req.ip });
+apiKeysRouter.delete("/:id/purge", handle(async (req, res) => {
+  await apiKeys.purgeKey(req.user!.id, req.params.id, ctx(req));
   res.json({ ok: true });
-});
+}));

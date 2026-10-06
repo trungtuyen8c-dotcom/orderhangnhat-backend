@@ -6,14 +6,14 @@ vi.mock("../infrastructure/prisma.js", () => ({
 vi.mock("../infrastructure/redis.js", () => ({
   redis: { get: vi.fn(), set: vi.fn() },
 }));
-vi.mock("../utils/jwt.js", () => ({
+vi.mock("../modules/auth/jwt.js", () => ({
   verifyAccess: vi.fn(),
 }));
 
 import { authenticate, authenticateApiKey, authenticateEither } from "./authenticate.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
-import { verifyAccess } from "../utils/jwt.js";
+import { verifyAccess } from "../modules/auth/jwt.js";
 
 const mockPrisma = prisma as unknown as {
   user: { findUnique: ReturnType<typeof vi.fn> };

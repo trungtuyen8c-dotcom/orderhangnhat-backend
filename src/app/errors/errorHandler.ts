@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
 import { Prisma } from "@prisma/client";
 import { AppError } from "./AppError.js";
-import { logError } from "../../utils/systemLog.js";
+import { logError } from "../../infrastructure/systemLog.js";
 
 // Body lỗi giữ dạng { error, message?, detail?, requestId } - frontend đang đọc `error` và `message`.
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {

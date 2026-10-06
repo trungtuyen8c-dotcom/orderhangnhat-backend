@@ -1,11 +1,12 @@
-import { exec as execCb, execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, rm, stat, readdir, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { prisma } from "../infrastructure/prisma.js";
-import { minio, BUCKET } from "../infrastructure/minio.js";
+import { prisma } from "../../infrastructure/prisma.js";
+import { minio, BUCKET } from "../../infrastructure/minio.js";
+import { logger } from "../../infrastructure/logger.js";
+import { logError } from "../../infrastructure/systemLog.js";
 
-const exec = promisify(execCb);
 const execFile = promisify(execFileCb);
 
 const REMOTE = "gdrive";
@@ -30,7 +31,8 @@ export async function setRcloneToken(tokenJson: string): Promise<void> {
 }
 
 export async function disconnectRclone(): Promise<void> {
-  try { await execFile("rclone", ["config", "delete", REMOTE]); } catch { /* ignore */ }
+  try { await execFile("rclone", ["config", "delete", REMOTE]); }
+  catch (e) { logger.warn({ err: (e as Error).message }, "rclone_disconnect_failed"); }
 }
 
 async function dirSize(dir: string): Promise<number> {
@@ -53,7 +55,7 @@ async function listMinioObjects(): Promise<string[]> {
   });
 }
 
-// Chạy 1 backup (async). Cập nhật BackupRun theo tiến trình.
+// Chạy 1 backup. Không throw - mọi lỗi ghi vào BackupRun (status=failed) nên job không retry.
 export async function runBackup(runId: string): Promise<void> {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -106,20 +108,23 @@ export async function runBackup(runId: string): Promise<void> {
       const dirs = stdout.split("\n").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean).sort();
       for (const d of dirs.slice(0, Math.max(0, dirs.length - KEEP))) {
         add(`purge old: ${d}`);
-        await execFile("rclone", ["purge", `${REMOTE}:${REMOTE_DIR}/${d}`]).catch(() => {});
+        await execFile("rclone", ["purge", `${REMOTE}:${REMOTE_DIR}/${d}`])
+          .catch((e) => logger.warn({ dir: d, err: (e as Error).message }, "backup_retention_purge_failed"));
       }
-    } catch { /* ignore retention errors */ }
+    } catch (e) { logger.warn({ err: (e as Error).message }, "backup_retention_list_failed"); }
 
     await prisma.backupRun.update({
       where: { id: runId },
       data: { status: "success", finishedAt: new Date(), sizeBytes: BigInt(size), remotePath: `${REMOTE_DIR}/${ts}`, logTail: log.join("\n").slice(-4000) },
     });
   } catch (e) {
+    logError({ run_id: runId, err: (e as Error).message }, "backup_failed");
     await prisma.backupRun.update({
       where: { id: runId },
       data: { status: "failed", finishedAt: new Date(), error: (e as Error).message.slice(0, 500), logTail: log.join("\n").slice(-4000) },
-    }).catch(() => {});
+    }).catch((err) => logError({ run_id: runId, err: (err as Error).message }, "backup_status_update_failed"));
   } finally {
-    await rm(stage, { recursive: true, force: true }).catch(() => {});
+    await rm(stage, { recursive: true, force: true })
+      .catch((e) => logger.warn({ stage, err: (e as Error).message }, "backup_stage_cleanup_failed"));
   }
 }

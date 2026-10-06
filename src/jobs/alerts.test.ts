@@ -6,7 +6,7 @@ vi.mock("../infrastructure/prisma.js", () => ({
 vi.mock("../infrastructure/redis.js", () => ({
   redis: { set: vi.fn() },
 }));
-vi.mock("../utils/systemLog.js", () => ({
+vi.mock("../infrastructure/systemLog.js", () => ({
   logWarn: vi.fn(),
   logError: vi.fn(),
 }));
@@ -14,7 +14,7 @@ vi.mock("../utils/systemLog.js", () => ({
 import { scanLateOrders } from "./alerts.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
-import { logWarn } from "../utils/systemLog.js";
+import { logWarn } from "../infrastructure/systemLog.js";
 
 const mockPrisma = prisma as unknown as { order: { findMany: ReturnType<typeof vi.fn> } };
 const mockRedis = redis as unknown as { set: ReturnType<typeof vi.fn> };

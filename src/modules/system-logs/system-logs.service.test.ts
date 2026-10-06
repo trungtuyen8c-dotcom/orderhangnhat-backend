@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { sinceFromRange, buildWhere, csvEscape } from "./system-logs.routes.js";
+import { sinceFromRange, buildWhere, csvEscape } from "./system-logs.service.js";
 
 describe("sinceFromRange", () => {
   const NOW = new Date("2026-03-15T00:00:00.000Z");
@@ -25,7 +25,7 @@ describe("sinceFromRange", () => {
 });
 
 function fakeReq(query: Record<string, unknown>): any {
-  return { query };
+  return query;
 }
 
 describe("buildWhere", () => {
@@ -64,6 +64,25 @@ describe("buildWhere", () => {
     const where = buildWhere(fakeReq({ range: "1d", q: malicious }));
     expect(where.sql).not.toContain("DROP TABLE");
     expect(where.values).toContain(`%${malicious}%`);
+  });
+});
+
+describe("buildWhere from/to", () => {
+  it("buildWhere_fromGiven_usesFromInsteadOfRangeAsLowerBound", () => {
+    const where = buildWhere(fakeReq({ range: "3m", from: "2026-01-01T00:00:00.000Z" }));
+    expect(where.values[0]).toEqual(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  it("buildWhere_toGiven_addsUpperBoundCondition", () => {
+    const where = buildWhere(fakeReq({ to: "2026-01-31T00:00:00.000Z" }));
+    expect(where.sql).toContain("created_at <= ?");
+    expect(where.values).toContainEqual(new Date("2026-01-31T00:00:00.000Z"));
+  });
+
+  it("buildWhere_invalidFromDate_fallsBackToRange", () => {
+    const where = buildWhere(fakeReq({ from: "not-a-date", to: "also-bad" }));
+    expect(where.sql).not.toContain("created_at <=");
+    expect(where.values).toHaveLength(1);
   });
 });
 

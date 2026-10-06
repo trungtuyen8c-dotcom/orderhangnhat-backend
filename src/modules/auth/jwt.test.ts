@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import jwt from "jsonwebtoken";
 import { signAccess, verifyAccess } from "./jwt.js";
-import { config } from "../app/config.js";
+import { config } from "../../app/config.js";
 
 const payload = { user_id: "u1", token_version: 1, jti: "j1" };
 

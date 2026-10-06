@@ -1,7 +1,7 @@
 import { Queue, Worker, type JobsOptions } from "bullmq";
 import { config } from "../app/config.js";
 import { logger } from "../infrastructure/logger.js";
-import { logError } from "../utils/systemLog.js";
+import { logError } from "../infrastructure/systemLog.js";
 
 // 1 queue chung cho side effect (sheet sync, backup, scrape, notification). Tên job phân biệt handler.
 export const JobNames = [
@@ -40,11 +40,11 @@ function getQueue(): Queue {
   return queue;
 }
 
-// jobId cố định -> gộp các yêu cầu trùng còn đang chờ (vd sync cùng 1 khách nhiều lần liên tiếp).
+// dedupeKey: gộp các yêu cầu trùng đang chờ (vd sync cùng 1 khách liên tiếp); job đang chạy thì giữ lại yêu cầu cuối.
 export async function enqueue(name: JobName, data: Record<string, unknown> = {}, opts: JobsOptions & { dedupeKey?: string } = {}) {
   const { dedupeKey, ...rest } = opts;
   try {
-    await getQueue().add(name, data, { ...defaultOpts, ...rest, ...(dedupeKey ? { jobId: `${name}:${dedupeKey}` } : {}) });
+    await getQueue().add(name, data, { ...defaultOpts, ...rest, ...(dedupeKey ? { deduplication: { id: `${name}__${dedupeKey}`, keepLastIfActive: true } } : {}) });
   } catch (e) {
     logError({ job: name, err: (e as Error).message }, "job_enqueue_failed");
   }

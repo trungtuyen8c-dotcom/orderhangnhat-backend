@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { prisma } from "../../infrastructure/prisma.js";
 import { redis } from "../../infrastructure/redis.js";
-import { hashApiKey } from "../../utils/apiKey.js";
+import { hashApiKey } from "../api-keys/apiKey.js";
 import * as reportsStats from "./reports/stats.js";
 import * as reportsControl from "./reports/control.js";
 import * as reportsWarehouse from "./reports/warehouse.js";

@@ -1,15 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../infrastructure/prisma.js", () => ({
+vi.mock("./prisma.js", () => ({
   prisma: { systemLog: { create: vi.fn() } },
 }));
-vi.mock("../infrastructure/logger.js", () => ({
+vi.mock("./logger.js", () => ({
   logger: { warn: vi.fn(), error: vi.fn() },
 }));
 
 import { logWarn, logError } from "./systemLog.js";
-import { prisma } from "../infrastructure/prisma.js";
-import { logger } from "../infrastructure/logger.js";
+import { prisma } from "./prisma.js";
+import { logger } from "./logger.js";
 
 const mockCreate = (prisma as unknown as { systemLog: { create: ReturnType<typeof vi.fn> } }).systemLog.create;
 const mockLoggerWarn = logger.warn as ReturnType<typeof vi.fn>;

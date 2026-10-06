@@ -4,8 +4,9 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { parseSheetId, syncCustomerOrders } from "../../utils/gsheets.js";
+import { logAudit } from "../../app/audit.js";
+import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
 
 export const customersRouter = Router();
 customersRouter.use(authenticateEither);

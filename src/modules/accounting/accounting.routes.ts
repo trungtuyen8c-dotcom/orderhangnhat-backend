@@ -4,8 +4,8 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { logAudit } from "../../app/audit.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
 import { computeDebtBalance } from "../../utils/orderTotals.js";
 import { vnDayStart, vnDayEnd, vnMonthKey } from "../../utils/vnTime.js";
 

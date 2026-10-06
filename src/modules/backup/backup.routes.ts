@@ -1,53 +1,34 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
-import { v4 as uuid } from "uuid";
-import { prisma } from "../../infrastructure/prisma.js";
+import { handle, parseOr400 } from "../../app/http/legacyError.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { rcloneConnected, setRcloneToken, disconnectRclone, runBackup } from "../../utils/backup.js";
+import * as backup from "./backup.service.js";
 
 export const backupRouter = Router();
 backupRouter.use(authenticate);
 
-const serialize = (r: any) => ({ ...r, sizeBytes: Number(r.sizeBytes ?? 0) });
-
-backupRouter.get("/status", authorize("system.manage_settings"), async (_req, res) => {
-  const connected = await rcloneConnected();
-  const last = await prisma.backupRun.findFirst({ orderBy: { startedAt: "desc" } });
-  const running = await prisma.backupRun.count({ where: { status: { in: ["pending", "running"] } } });
-  res.json({ connected, running: running > 0, last: last ? serialize(last) : null });
-});
-
-backupRouter.get("/runs", authorize("system.manage_settings"), async (_req, res) => {
-  const runs = await prisma.backupRun.findMany({ orderBy: { startedAt: "desc" }, take: 30 });
-  res.json(runs.map(serialize));
-});
-
+const actor = (req: Request) => ({ id: req.user!.id, requestId: req.requestId });
 const tokenSchema = z.object({ token: z.string().min(10) });
-backupRouter.put("/rclone-token", authorize("system.manage_settings"), async (req, res) => {
-  const p = tokenSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  try {
-    await setRcloneToken(p.data.token.trim());
-    await logAudit({ actorId: req.user!.id, action: "backup.connect_drive" });
-    res.json({ connected: await rcloneConnected() });
-  } catch {
-    res.status(400).json({ error: "BAD_TOKEN", message: "Token không hợp lệ" });
-  }
-});
+const canManage = authorize("system.manage_settings");
 
-backupRouter.post("/disconnect", authorize("system.manage_settings"), async (req, res) => {
-  await disconnectRclone();
-  await logAudit({ actorId: req.user!.id, action: "backup.disconnect_drive" });
-  res.json({ connected: false });
-});
+backupRouter.get("/status", canManage, handle(async (_req, res) => {
+  res.json(await backup.getStatus());
+}));
 
-backupRouter.post("/run", authorize("system.manage_settings"), async (req, res) => {
-  const busy = await prisma.backupRun.count({ where: { status: { in: ["pending", "running"] } } });
-  if (busy > 0) return res.status(409).json({ error: "BUSY", message: "Đang có bản backup chạy" });
-  const run = await prisma.backupRun.create({ data: { id: uuid(), kind: "manual", status: "pending", triggeredBy: req.user!.id } });
-  void runBackup(run.id);
-  await logAudit({ actorId: req.user!.id, targetId: run.id, action: "backup.run" });
-  res.status(201).json(serialize(run));
-});
+backupRouter.get("/runs", canManage, handle(async (_req, res) => {
+  res.json(await backup.listRuns());
+}));
+
+backupRouter.put("/rclone-token", canManage, handle(async (req, res) => {
+  const { token } = parseOr400(tokenSchema, req.body);
+  res.json(await backup.connectDrive(token.trim(), actor(req)));
+}));
+
+backupRouter.post("/disconnect", canManage, handle(async (req, res) => {
+  res.json(await backup.disconnectDrive(actor(req)));
+}));
+
+backupRouter.post("/run", canManage, handle(async (req, res) => {
+  res.status(201).json(await backup.startManualBackup(actor(req)));
+}));

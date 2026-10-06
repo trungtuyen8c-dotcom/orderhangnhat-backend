@@ -1,13 +1,14 @@
-import { prisma } from "../infrastructure/prisma.js";
-import { logger } from "../infrastructure/logger.js";
+import { prisma } from "./prisma.js";
+import { logger } from "./logger.js";
 
 type Meta = Record<string, unknown> | undefined;
 
 async function persist(level: "warn" | "error", message: string, meta: Meta): Promise<void> {
   try {
     await prisma.systemLog.create({ data: { level, message, meta: meta as object | undefined } });
-  } catch {
-    // ghi log DB thất bại không được làm chết request, giống logAudit
+  } catch (e) {
+    // Ghi DB lỗi không được làm chết request - vẫn còn bản ghi stdout ở trên.
+    logger.warn({ err: (e as Error).message }, "system_log_persist_failed");
   }
 }
 

@@ -6,8 +6,9 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { minio, BUCKET } from "../../infrastructure/minio.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { parseSheetId, readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../../utils/gsheets.js";
+import { logAudit } from "../../app/audit.js";
+import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
+import { readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../sheets/invoiceTaxSheet.service.js";
 import { vnMonthRange } from "../../utils/vnTime.js";
 
 export const shipmentsRouter = Router();

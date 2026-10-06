@@ -1,0 +1,23 @@
+name: CI Backend
+
+# Chan loi truoc khi build image: typecheck + test + build. Khong deploy.
+on:
+  push:
+    branches: [main, rewrite]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx prisma generate
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

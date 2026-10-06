@@ -4,8 +4,12 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize, loadPermissions } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
-import { syncTracking, syncPackedFromWarehouse, syncPackedOne, parseSheetId, syncCustomerOrders, setDayLockFromTab, clearWarehouseRow } from "../../utils/gsheets.js";
+import { logAudit } from "../../app/audit.js";
+import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
+import { syncTracking } from "../sheets/trackingSheetSync.service.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
+import { syncPackedFromWarehouse, setDayLockFromTab, clearWarehouseRow } from "../sheets/warehouseSheetSync.service.js";
+import { syncPackedOne } from "../sheets/warehousePackedOne.service.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
@@ -351,7 +355,7 @@ warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), async (r
 });
 
 // "Chốt ngày" khai hải quan: mã tracking quét vào SAU khi ngày đã chốt sẽ bị đánh dấu lateAfterLock,
-// không gộp vào invoice ngày đó nữa (xem gsheets.ts syncPackedOne/syncPackedFromWarehouse).
+// không gộp vào invoice ngày đó nữa (xem modules/sheets syncPackedOne/syncPackedFromWarehouse).
 // Đọc (không sửa) - mở cho shipments.list dùng để lọc "Cần lấy thuế" theo ngày chuyến/chốt hải quan.
 warehouseRouter.get("/day-locks", authorize("shipments.list"), async (_req, res) => {
   const rows = await prisma.packDayLock.findMany({ orderBy: { date: "desc" }, take: 60 });

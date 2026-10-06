@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { sha256 } from "./password.js";
+import { sha256 } from "../auth/password.js";
 
 const PREFIX = "oak_";
 

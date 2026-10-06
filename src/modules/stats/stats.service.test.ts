@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isOrderComplete } from "./stats.routes.js";
+import { isOrderComplete } from "./stats.service.js";
 
 const packedTracking = { packedAt: new Date(), needsTax: false, taxCollected: false, jpWeightKg: "1", vnWeightKg: "1" };
 const baseOrder = {

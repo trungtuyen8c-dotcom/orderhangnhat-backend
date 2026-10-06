@@ -17,18 +17,21 @@ vi.mock("../../middlewares/authorize.js", () => ({
 }));
 vi.mock("../../utils/orderStatus.js", () => ({ bumpOrderStatus: vi.fn() }));
 vi.mock("../../utils/orderTotals.js", () => ({ recomputeOrderTotals: vi.fn() }));
-vi.mock("../../utils/audit.js", () => ({ logAudit: vi.fn() }));
-vi.mock("../../utils/gsheets.js", () => ({
-  syncTracking: vi.fn(), syncPackedFromWarehouse: vi.fn(), syncPackedOne: vi.fn(),
-  parseSheetId: vi.fn(), syncCustomerOrders: vi.fn(), setDayLockFromTab: vi.fn(), clearWarehouseRow: vi.fn(),
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn() }));
+vi.mock("../../integrations/google/googleSheets.client.js", () => ({ parseSheetId: vi.fn() }));
+vi.mock("../sheets/trackingSheetSync.service.js", () => ({ syncTracking: vi.fn() }));
+vi.mock("../sheets/customerSheetSync.service.js", () => ({ syncCustomerOrders: vi.fn() }));
+vi.mock("../sheets/warehouseSheetSync.service.js", () => ({
+  syncPackedFromWarehouse: vi.fn(), setDayLockFromTab: vi.fn(), clearWarehouseRow: vi.fn(),
 }));
+vi.mock("../sheets/warehousePackedOne.service.js", () => ({ syncPackedOne: vi.fn() }));
 vi.mock("../../utils/cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
 vi.mock("../../utils/trackingClaim.js", () => ({ claimOrCreateTracking: vi.fn() }));
 
 import { dayKey, effKg, cartonWeightLocked, warehouseRouter } from "./warehouse.routes.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { bumpOrderStatus } from "../../utils/orderStatus.js";
-import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
 
 const mockPrisma = prisma as unknown as {
   tracking: {

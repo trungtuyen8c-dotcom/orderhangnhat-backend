@@ -1,0 +1,17 @@
+import { prisma } from "../../infrastructure/prisma.js";
+import { LegacyError } from "../../app/http/legacyError.js";
+
+// Khách tra cứu trạng thái đơn (read-only) - select whitelist, KHÔNG lộ giá vốn/ví.
+export async function getPublicOrder(token: string) {
+  const order = await prisma.order.findUnique({
+    where: { publicToken: token },
+    select: {
+      code: true, status: true, createdAt: true,
+      customer: { select: { name: true } },
+      items: { select: { name: true, qty: true } },
+      trackings: { select: { code: true, status: true } },
+    },
+  });
+  if (!order) throw new LegacyError(404, "NOT_FOUND");
+  return order;
+}

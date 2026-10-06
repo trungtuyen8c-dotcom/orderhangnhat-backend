@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { BusinessEvent, BusinessEventName } from "./businessEvents.js";
-import { logError } from "../../utils/systemLog.js";
+import { logError } from "../../infrastructure/systemLog.js";
 
 type Handler = (e: BusinessEvent) => void | Promise<void>;
 

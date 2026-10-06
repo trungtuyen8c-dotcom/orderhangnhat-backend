@@ -4,8 +4,10 @@ import { prisma } from "./infrastructure/prisma.js";
 import { ensureBucket } from "./infrastructure/minio.js";
 import { startJobs } from "./jobs/alerts.js";
 import { startWorkers, stopWorkers } from "./jobs/queues.js";
+import "./modules/backup/backup.jobs.js";
+import "./modules/sheets/sheet.jobs.js";
 import { logger } from "./infrastructure/logger.js";
-import { logError } from "./utils/systemLog.js";
+import { logError } from "./infrastructure/systemLog.js";
 
 const app = createApp();
 

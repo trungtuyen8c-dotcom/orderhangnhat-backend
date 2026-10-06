@@ -1,24 +1,42 @@
 import { prisma } from "../infrastructure/prisma.js";
+import { logger } from "../infrastructure/logger.js";
 
-export async function logAudit(params: {
+export type AuditParams = {
   actorId?: string | null;
   targetId?: string | null;
   action: string;
   metadata?: Record<string, unknown>;
   ip?: string | null;
-}): Promise<void> {
+  requestId?: string;
+  entity?: string;
+  before?: unknown;
+  after?: unknown;
+};
+
+// requestId/entity/before/after nằm trong metadata JSON (không đổi schema access_audit).
+export function buildAuditMetadata(p: AuditParams): Record<string, unknown> | undefined {
+  const meta: Record<string, unknown> = { ...(p.metadata ?? {}) };
+  if (p.requestId) meta.requestId = p.requestId;
+  if (p.entity) meta.entity = p.entity;
+  if (p.before !== undefined) meta.before = p.before;
+  if (p.after !== undefined) meta.after = p.after;
+  return Object.keys(meta).length ? meta : p.metadata;
+}
+
+// Không bao giờ throw - audit lỗi không được làm chết request.
+export async function logAudit(params: AuditParams): Promise<void> {
   try {
     await prisma.accessAudit.create({
       data: {
         actorId: params.actorId ?? null,
         targetId: params.targetId ?? null,
         action: params.action,
-        metadata: params.metadata as object | undefined,
+        metadata: buildAuditMetadata(params) as object | undefined,
         ipAddress: params.ip ?? null,
       },
     });
-  } catch {
-    // audit không được làm chết request
+  } catch (e) {
+    logger.warn({ action: params.action, request_id: params.requestId, err: (e as Error).message }, "audit_write_failed");
   }
 }
 
@@ -44,7 +62,7 @@ export async function logOrder(params: {
         changes: (params.changes ?? undefined) as object | undefined,
       },
     });
-  } catch {
-    // không làm chết request
+  } catch (e) {
+    logger.warn({ order_id: params.orderId, action: params.action, err: (e as Error).message }, "order_log_write_failed");
   }
 }

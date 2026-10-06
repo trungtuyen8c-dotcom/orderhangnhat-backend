@@ -4,9 +4,9 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
+import { logAudit } from "../../app/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
-import { syncCustomerOrders } from "../../utils/gsheets.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
 import { vnMonthKey } from "../../utils/vnTime.js";
 
 // 着払い gắn tracking -> đơn/khách -> gọi sau khi tạo/xóa khoản để công nợ + sheet khách cập nhật/trừ lại ngay.

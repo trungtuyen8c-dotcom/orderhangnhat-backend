@@ -4,10 +4,12 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../utils/audit.js";
+import { logAudit } from "../../app/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
-import { scrapeItem, isAllowedUrl } from "../../utils/scrape.js";
-import { syncTracking, removeTrackingRow, syncCustomerOrders, createOrphanTrackingSafe } from "../../utils/gsheets.js";
+import { scrapeItem, isAllowedUrl } from "../../integrations/marketplace/scrape.js";
+import { syncTracking, removeTrackingRow } from "../sheets/trackingSheetSync.service.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
+import { createOrphanTrackingSafe } from "../sheets/orphanTracking.js";
 import { deleteCartonIfEmpty } from "../../utils/cartons.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 

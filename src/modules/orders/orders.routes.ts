@@ -4,11 +4,11 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit, logOrder } from "../../utils/audit.js";
+import { logAudit, logOrder } from "../../app/audit.js";
 import { recomputeOrderTotals } from "../../utils/orderTotals.js";
 import { applyOrderCardCharges, reverseOrderCardCharges } from "../../utils/orderCard.js";
-import { syncCustomerOrders } from "../../utils/gsheets.js";
-import { detectMarketplace } from "../../utils/scrape.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
+import { detectMarketplace } from "../../integrations/marketplace/scrape.js";
 import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
 
 export const ordersRouter = Router();

@@ -1,8 +1,14 @@
 import type { Request, Response, NextFunction } from "express";
-import { verifyAccess } from "../utils/jwt.js";
-import { hashApiKey } from "../utils/apiKey.js";
+import { verifyAccess } from "../modules/auth/jwt.js";
+import { hashApiKey } from "../modules/api-keys/apiKey.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
+import { logger } from "../infrastructure/logger.js";
+
+// Side effect không chặn request (heartbeat online, lastUsedAt) - lỗi chỉ log, không làm hỏng request.
+function background(p: unknown, msg: string, meta: Record<string, unknown>) {
+  Promise.resolve(p).catch((e) => logger.warn({ ...meta, err: (e as Error).message }, msg));
+}
 
 export interface AuthUser {
   id: string;
@@ -25,7 +31,16 @@ declare global {
   }
 }
 
+// Express 4 không tự bắt Promise reject -> lỗi Redis/DB phải chuyển cho errorHandler bằng next(err).
 export async function authenticate(req: Request, res: Response, next: NextFunction) {
+  try {
+    return await authenticateJwt(req, res, next);
+  } catch (e) {
+    next(e);
+  }
+}
+
+async function authenticateJwt(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
     return res.status(401).json({ error: "UNAUTHORIZED" });
@@ -63,13 +78,21 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     exp: payload.exp,
     roles: user.roles.map((ur) => ur.role.key),
   };
-  void redis.set(`online:${user.id}`, "1", "EX", 90);
+  background(redis.set(`online:${user.id}`, "1", "EX", 90), "online_heartbeat_failed", { user_id: user.id });
   next();
 }
 
 // Xác thực bằng header X-API-Key (dùng cho tích hợp ngoài như MCP server) - không đụng JTI/online
 // vì key không phải phiên đăng nhập. req.apiKeyScopes được set để authorize() ép giao quyền.
 export async function authenticateApiKey(req: Request, res: Response, next: NextFunction) {
+  try {
+    return await authenticateByApiKey(req, res, next);
+  } catch (e) {
+    next(e);
+  }
+}
+
+async function authenticateByApiKey(req: Request, res: Response, next: NextFunction) {
   const header = req.headers["x-api-key"];
   const key = typeof header === "string" ? header : Array.isArray(header) ? header[0] : undefined;
   if (!key) return res.status(401).json({ error: "UNAUTHORIZED" });
@@ -91,7 +114,11 @@ export async function authenticateApiKey(req: Request, res: Response, next: Next
     roles: record.user.roles.map((ur) => ur.role.key),
   };
   req.apiKeyScopes = record.scopes;
-  void prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } }).catch(() => {});
+  background(
+    prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } }),
+    "api_key_last_used_update_failed",
+    { api_key_id: record.id },
+  );
   next();
 }
 

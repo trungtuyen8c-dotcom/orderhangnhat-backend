@@ -6,14 +6,14 @@ vi.mock("../infrastructure/prisma.js", () => ({
 vi.mock("../infrastructure/redis.js", () => ({
   redis: { get: vi.fn(), set: vi.fn(), del: vi.fn() },
 }));
-vi.mock("../utils/audit.js", () => ({
+vi.mock("../app/audit.js", () => ({
   logAudit: vi.fn(),
 }));
 
 import { authorize, loadPermissions } from "./authorize.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
-import { logAudit } from "../utils/audit.js";
+import { logAudit } from "../app/audit.js";
 
 const mockPrisma = prisma as unknown as { permission: { findMany: ReturnType<typeof vi.fn> } };
 const mockRedis = redis as unknown as { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> };

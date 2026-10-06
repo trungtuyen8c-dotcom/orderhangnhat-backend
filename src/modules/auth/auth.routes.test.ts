@@ -3,24 +3,27 @@ import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
 
-vi.mock("../../infrastructure/prisma.js", () => ({
-  prisma: {
+vi.mock("../../infrastructure/prisma.js", () => {
+  const p: any = {
     user: { findUnique: vi.fn(), update: vi.fn() },
     refreshToken: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn() },
-  },
-}));
-vi.mock("../../utils/audit.js", () => ({ logAudit: vi.fn(), logOrder: vi.fn() }));
-vi.mock("../../utils/password.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../utils/password.js")>();
+  };
+  // Interactive transaction chạy callback trên chính mock -> assert được từng lệnh bên trong.
+  p.$transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(p));
+  return { prisma: p };
+});
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn(), logOrder: vi.fn() }));
+vi.mock("./password.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./password.js")>();
   return { ...actual, verifyPassword: vi.fn(), hashPassword: vi.fn() };
 });
 
 import { authRouter } from "./auth.routes.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { redis } from "../../infrastructure/redis.js";
-import { logAudit } from "../../utils/audit.js";
-import { verifyPassword } from "../../utils/password.js";
-import { signAccess } from "../../utils/jwt.js";
+import { logAudit } from "../../app/audit.js";
+import { verifyPassword } from "./password.js";
+import { signAccess } from "./jwt.js";
 
 const mockPrisma = prisma as unknown as {
   user: { findUnique: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
@@ -200,5 +203,55 @@ describe("POST /api/auth/logout", () => {
     expect(res.status).toBe(200);
     expect(mockRedis.set).toHaveBeenCalled();
     expect(mockPrisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/auth/change-password and /logout-all", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function authed() {
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ id: "u1", isActive: true, tokenVersion: 0, roles: [] });
+    mockRedis.get.mockResolvedValue(null);
+    return `Bearer ${signAccess({ user_id: "u1", token_version: 0, jti: "jti-2" })}`;
+  }
+
+  it("changePassword_wrongOldPassword_returns400WrongOldPasswordAndKeepsSessions", async () => {
+    const auth = authed();
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ id: "u1", passwordHash: "hash" });
+    mockVerifyPassword.mockResolvedValue(false);
+    const res = await request(buildApp()).post("/api/auth/change-password").set("Authorization", auth)
+      .send({ oldPassword: "bad", newPassword: "newpass1" });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "WRONG_OLD_PASSWORD" });
+    expect(mockPrisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("changePassword_newPasswordTooShort_returns400BadRequest", async () => {
+    const res = await request(buildApp()).post("/api/auth/change-password").set("Authorization", authed())
+      .send({ oldPassword: "x", newPassword: "123" });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "BAD_REQUEST" });
+  });
+
+  it("changePassword_correctOldPassword_revokesAllSessionsBumpsTokenVersionAndClearsCookie", async () => {
+    const auth = authed();
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ id: "u1", passwordHash: "hash" });
+    mockVerifyPassword.mockResolvedValue(true);
+    const res = await request(buildApp()).post("/api/auth/change-password").set("Authorization", auth)
+      .send({ oldPassword: "old", newPassword: "newpass1" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(mockPrisma.refreshToken.deleteMany).toHaveBeenCalledWith({ where: { userId: "u1" } });
+    expect(mockPrisma.user.update).toHaveBeenCalledWith({
+      where: { id: "u1" }, data: expect.objectContaining({ tokenVersion: { increment: 1 } }),
+    });
+    expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "auth.password_changed" }));
+  });
+
+  it("logoutAll_validToken_deletesAllRefreshTokensAndBumpsTokenVersion", async () => {
+    const res = await request(buildApp()).post("/api/auth/logout-all").set("Authorization", authed());
+    expect(res.status).toBe(200);
+    expect(mockPrisma.refreshToken.deleteMany).toHaveBeenCalledWith({ where: { userId: "u1" } });
+    expect(mockPrisma.user.update).toHaveBeenCalledWith({ where: { id: "u1" }, data: { tokenVersion: { increment: 1 } } });
   });
 });

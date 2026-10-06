@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
-import { logAudit } from "../utils/audit.js";
+import { logAudit } from "../app/audit.js";
 import { cacheHits, cacheMisses } from "./metrics.js";
 
 const PERM_TTL = 300; // 5 phút
@@ -30,28 +30,36 @@ export async function invalidatePermissions(userId: string): Promise<void> {
 // cho route đọc để API key không bao giờ vô tình mở khóa route ghi cùng permission.
 export function authorize(required: string, apiKeyScope?: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    const user = req.user;
-    if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
-
-    // API key luôn bị ép giao với scopes đã cấp lúc tạo key, kể cả khi user sở hữu là super_admin
-    const scope = apiKeyScope ?? required;
-    if (req.apiKeyScopes && !req.apiKeyScopes.includes(scope)) {
-      await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: scope, via: "api_key_scope" }, ip: req.ip });
-      return res.status(403).json({ error: "FORBIDDEN", message: `API key thiếu scope: ${scope}` });
+    try {
+      return await check(required, apiKeyScope, req, res, next);
+    } catch (e) {
+      next(e);
     }
-
-    if (user.roles.includes("super_admin")) {
-      if (required.startsWith("system.") || required.includes("refund")) {
-        await logAudit({ actorId: user.id, action: "permission.checked.allowed", metadata: { permission: required, via: "super_admin" }, ip: req.ip });
-      }
-      return next();
-    }
-
-    const perms = await loadPermissions(user.id);
-    if (!perms.includes(required)) {
-      await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: required }, ip: req.ip });
-      return res.status(403).json({ error: "FORBIDDEN", message: `Thiếu quyền: ${required}` });
-    }
-    next();
   };
+}
+
+async function check(required: string, apiKeyScope: string | undefined, req: Request, res: Response, next: NextFunction) {
+  const user = req.user;
+  if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+  // API key luôn bị ép giao với scopes đã cấp lúc tạo key, kể cả khi user sở hữu là super_admin
+  const scope = apiKeyScope ?? required;
+  if (req.apiKeyScopes && !req.apiKeyScopes.includes(scope)) {
+    await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: scope, via: "api_key_scope" }, ip: req.ip, requestId: req.requestId });
+    return res.status(403).json({ error: "FORBIDDEN", message: `API key thiếu scope: ${scope}` });
+  }
+
+  if (user.roles.includes("super_admin")) {
+    if (required.startsWith("system.") || required.includes("refund")) {
+      await logAudit({ actorId: user.id, action: "permission.checked.allowed", metadata: { permission: required, via: "super_admin" }, ip: req.ip, requestId: req.requestId });
+    }
+    return next();
+  }
+
+  const perms = await loadPermissions(user.id);
+  if (!perms.includes(required)) {
+    await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: required }, ip: req.ip, requestId: req.requestId });
+    return res.status(403).json({ error: "FORBIDDEN", message: `Thiếu quyền: ${required}` });
+  }
+  next();
 }

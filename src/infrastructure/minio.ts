@@ -1,5 +1,5 @@
 import { Client } from "minio";
-import { logError } from "../utils/systemLog.js";
+import { logError } from "./systemLog.js";
 
 export const BUCKET = process.env.MINIO_BUCKET ?? "orderhn";
 

@@ -27,8 +27,9 @@ async function checkKey(scope: string, req: Request, res: Response, next: NextFu
   const raw = readRawKey(req);
   if (!raw) return res.status(401).json({ error: "UNAUTHORIZED", message: "Thiếu API key" });
 
-  const key = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(raw) } });
-  if (!key || key.revokedAt || (key.expiresAt && key.expiresAt < new Date())) {
+  const key = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(raw) }, include: { user: { select: { isActive: true } } } });
+  // Chủ key bị khoá thì key cũng mất hiệu lực, giống luồng API key ở authenticate.ts
+  if (!key || key.revokedAt || (key.expiresAt && key.expiresAt < new Date()) || !key.user?.isActive) {
     return res.status(401).json({ error: "UNAUTHORIZED", message: "API key không hợp lệ" });
   }
   if (scope && !key.scopes.includes(scope)) {

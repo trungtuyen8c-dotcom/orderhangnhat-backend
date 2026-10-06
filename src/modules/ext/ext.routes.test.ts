@@ -40,7 +40,7 @@ function buildApp() {
 
 const RAW = "ak_test_key";
 function keyRow(over: Record<string, unknown> = {}) {
-  return { id: "k1", name: "mcp", scopes: [] as string[], rateLimit: 60, revokedAt: null, expiresAt: null, ...over };
+  return { id: "k1", name: "mcp", scopes: [] as string[], rateLimit: 60, revokedAt: null, expiresAt: null, user: { isActive: true }, ...over };
 }
 function withKey(scopes: string[], over: Record<string, unknown> = {}) {
   mp.apiKey.findUnique.mockResolvedValue(keyRow({ scopes, ...over }));
@@ -64,7 +64,14 @@ describe("ext auth (requireExtScope)", () => {
   it("auth_bearerKey_looksUpByHashNotPlaintext", async () => {
     withKey([]);
     await request(buildApp()).get("/api/ext/me").set("Authorization", `Bearer ${RAW}`);
-    expect(mp.apiKey.findUnique).toHaveBeenCalledWith({ where: { keyHash: hashApiKey(RAW) } });
+    expect(mp.apiKey.findUnique).toHaveBeenCalledWith({ where: { keyHash: hashApiKey(RAW) }, include: { user: { select: { isActive: true } } } });
+  });
+
+  it("auth_keyOwnerDeactivated_returns401", async () => {
+    withKey([], { user: { isActive: false } });
+    const res = await request(buildApp()).get("/api/ext/me").set("Authorization", `Bearer ${RAW}`);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "UNAUTHORIZED", message: "API key không hợp lệ" });
   });
 
   it("auth_xApiKeyHeader_isAcceptedAsAlternative", async () => {

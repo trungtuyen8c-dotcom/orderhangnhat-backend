@@ -16,7 +16,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:baseline": "prisma migrate resolve --applied 0_init",
     "db:seed": "tsx prisma/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

@@ -3,7 +3,7 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { LegacyError } from "../../app/http/legacyError.js";
 import { eventBus } from "../../app/events/EventBus.js";
-import { vnDayEnd, vnDayStart } from "../../utils/vnTime.js";
+import { vnDayEnd, vnDayStart } from "../../app/vnTime.js";
 import { queueAccountingSheetSync } from "../sheets/sheet.jobs.js";
 import { lockCustomer, lockDeposit, writeAudit, type Actor } from "./accounting.repository.js";
 import { adjustDepositWalletTxn, postWalletTxn, reverseWalletTxns } from "./wallet.service.js";

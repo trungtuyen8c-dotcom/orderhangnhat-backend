@@ -1,3 +1,4 @@
+import { effKg } from "../tracking/tracking.weight.js";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
@@ -6,8 +7,7 @@ import { eventBus } from "../../app/events/EventBus.js";
 
 export type Actor = { id: string; requestId?: string };
 
-export const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
-  t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
+export { effKg };
 
 // ===== Kiện / carton: đối soát cân =====
 

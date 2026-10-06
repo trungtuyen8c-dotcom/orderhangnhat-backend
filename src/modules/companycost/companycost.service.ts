@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { LegacyError } from "../../app/http/legacyError.js";
-import { vnMonthKey } from "../../utils/vnTime.js";
+import { vnMonthKey } from "../../app/vnTime.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { lockOrder, writeAudit } from "../accounting/accounting.repository.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";

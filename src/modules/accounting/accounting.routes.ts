@@ -3,7 +3,7 @@ import { z, type ZodTypeAny } from "zod";
 import { handle, LegacyError, parseOr400 } from "../../app/http/legacyError.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { vnDayStart, vnDayEnd } from "../../utils/vnTime.js";
+import { vnDayStart, vnDayEnd } from "../../app/vnTime.js";
 import type { Actor } from "./accounting.repository.js";
 import * as payments from "./payment.service.js";
 import * as deposits from "./deposit.service.js";

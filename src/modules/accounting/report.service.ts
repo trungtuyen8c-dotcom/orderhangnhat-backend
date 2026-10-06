@@ -1,6 +1,6 @@
 import { prisma } from "../../infrastructure/prisma.js";
 import { LegacyError } from "../../app/http/legacyError.js";
-import { vnDayEnd, vnDayStart, vnMonthKey } from "../../utils/vnTime.js";
+import { vnDayEnd, vnDayStart, vnMonthKey } from "../../app/vnTime.js";
 
 // Báo cáo chỉ đọc. Mốc ngày/tháng luôn theo giờ VN (vnMonthKey / vnDayStart / vnDayEnd).
 

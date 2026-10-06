@@ -2,7 +2,7 @@
 import { prisma } from "../../../infrastructure/prisma.js";
 import { vnDayStart, vnMonthKey } from "../helpers.js";
 
-const vnDayEnd = (d: string) => new Date(`${d}T23:59:59.999+07:00`);
+import { vnDayEnd } from "../../../app/vnTime.js";
 const OPENING_CUTOFF = new Date("2026-06-30T00:00:00.000Z");
 void OPENING_CUTOFF; // giữ tham chiếu comment gốc - opening balance nhận diện qua isOpening, không cần lọc theo mốc này ở đây
 

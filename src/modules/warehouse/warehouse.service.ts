@@ -1,3 +1,4 @@
+import { effKg } from "../tracking/tracking.weight.js";
 import { createHash, timingSafeEqual } from "crypto";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
@@ -88,8 +89,7 @@ export async function syncPackNow(actor: Actor) {
 // ===== Bảng kho VN: tracking đóng từ Nhật, chia theo NGÀY > KIỆN > tracking =====
 
 export const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
-export const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
-  t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
+export { effKg };
 
 const NO_DAY = "0000-00-00";
 

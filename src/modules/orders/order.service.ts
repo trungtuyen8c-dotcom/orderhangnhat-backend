@@ -8,6 +8,7 @@ import { eventBus } from "../../app/events/EventBus.js";
 import type { BusinessEventName } from "../../app/events/businessEvents.js";
 import { detectMarketplace } from "../../integrations/marketplace/scrape.js";
 import { applyOrderCardCharges, reverseOrderCardCharges } from "../accounting/orderCard.js";
+import { reversePaymentWallets } from "../accounting/wallet.service.js";
 import { claimOrCreateTracking } from "../tracking/tracking.repository.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import { recomputeOrderTotals } from "./order.totals.js";
@@ -340,14 +341,11 @@ export async function deleteOrder(id: string, force: boolean, actor: Actor) {
     if (!actor.roles.some((r) => ["super_admin", "admin"].includes(r)))
       throw new LegacyError(403, "FORBIDDEN", "Chỉ Admin được xóa đơn đã có giao dịch");
     await prisma.$transaction(async (tx) => {
-      for (const p of order.payments) {
-        if (p.walletId) {
-          const sign = p.type === "refund" ? -1 : 1;
-          await tx.wallet.update({ where: { id: p.walletId }, data: { balance: { decrement: sign * Number(p.amountOrig) } } });
-        }
-      }
+      await reversePaymentWallets(tx, order.payments);
       await reverseOrderCardCharges(tx, order.id);
-      await tx.walletTxn.deleteMany({ where: { refOrderId: order.id } });
+      // Chỉ xoá dòng sổ của phiếu thu/chi vừa hoàn số dư. Giao dịch thẻ nhập tay gắn đơn được giữ (gỡ liên kết
+      // trong detachAndDeleteOrder) - trước đây bị xoá mà không hoàn số dư, làm lệch ví.
+      await tx.walletTxn.deleteMany({ where: { refOrderId: order.id, type: { in: ["deposit", "final", "refund"] } } });
       await tx.payment.deleteMany({ where: { orderId: order.id } });
       await repo.detachAndDeleteOrder(tx, order.id);
     });

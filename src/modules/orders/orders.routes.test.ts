@@ -192,7 +192,7 @@ describe("DELETE /orders/:id", () => {
 
     expect(tx.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { balance: { decrement: 500000 } } });
     expect(mockReverseOrderCardCharges).toHaveBeenCalledWith(tx, ORDER_ID);
-    expect(tx.walletTxn.deleteMany).toHaveBeenCalledWith({ where: { refOrderId: ORDER_ID } });
+    expect(tx.walletTxn.deleteMany).toHaveBeenCalledWith({ where: { refOrderId: ORDER_ID, type: { in: ["deposit", "final", "refund"] } } });
     expect(tx.payment.deleteMany).toHaveBeenCalledWith({ where: { orderId: ORDER_ID } });
     expect(tx.debt.deleteMany).toHaveBeenCalledWith({ where: { orderId: ORDER_ID } });
     expect(tx.order.delete).toHaveBeenCalledWith({ where: { id: ORDER_ID } });
@@ -209,7 +209,7 @@ describe("DELETE /orders/:id", () => {
     await request(buildApp()).delete(`/api/orders/${ORDER_ID}?force=1`).expect(200);
 
     // refund đảo dấu: xóa 1 khoản refund phải TRỪ NGƯỢC lại (cộng tiền vào ví) - decrement âm = tăng số dư.
-    expect(tx.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { balance: { decrement: -200000 } } });
+    expect(tx.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { balance: { increment: 200000 } } });
   });
 });
 

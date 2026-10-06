@@ -5,11 +5,12 @@ vi.mock("../../infrastructure/prisma.js", () => ({
 }));
 
 import {
-  bumpOrderStatus, canTransition, assertTransition, systemSourcesFor, isEditable,
-  ORDER_STATUSES, INITIAL_STATUS,
+  bumpOrderStatus, canTransition, assertUserTransition, systemSourcesFor, isEditable, allowedActions,
+  checkTransitionPrerequisites, findTransitionTo, ORDER_ACTIONS, ORDER_STATUSES, INITIAL_STATUS, USER_TRANSITIONS,
+  ACTION_LABEL, type OrderAction,
 } from "./order.state.js";
 import { prisma } from "../../infrastructure/prisma.js";
-import { AppError } from "../../app/errors/AppError.js";
+import { LegacyError } from "../../app/http/legacyError.js";
 
 const mockPrisma = prisma as unknown as { order: { updateMany: ReturnType<typeof vi.fn> } };
 
@@ -80,17 +81,103 @@ describe("systemSourcesFor", () => {
   });
 });
 
-describe("canTransition", () => {
-  it("canTransition_manualAnyPair_allowed_freeSelectionLikeToday", () => {
-    for (const from of ORDER_STATUSES) for (const to of ORDER_STATUSES) expect(canTransition(from, to, "manual")).toBe(true);
+const EXPECTED_TABLE: [string, OrderAction, string][] = [
+  ["draft", "quote", "quoted"],
+  ["quoted", "deposit", "deposited"],
+  ["quoted", "start-purchasing", "purchasing"],
+  ["deposited", "start-purchasing", "purchasing"],
+  ["purchasing", "mark-purchased", "purchased"],
+  ["purchased", "receive-jp", "jp_warehouse"],
+  ["jp_warehouse", "start-customs", "customs"],
+  ["customs", "complete-tax", "tax_done"],
+  ["tax_done", "receive-vn", "vn_warehouse"],
+  ["vn_warehouse", "deliver", "delivered"],
+  ["delivered", "complete", "completed"],
+  ["completed", "close", "closed"],
+  ["quoted", "cancel", "cancelled"],
+  ["deposited", "cancel", "cancelled"],
+];
+
+describe("USER_TRANSITIONS table", () => {
+  it("table_givenOwnerDecision_whenListed_thenExactlyMatchesTheApprovedRows", () => {
+    expect(USER_TRANSITIONS.map((t) => [t.from, t.action, t.to])).toEqual(EXPECTED_TABLE);
   });
 
-  it("canTransition_manualBackwardsFromDelivered_allowed", () => {
-    expect(canTransition("delivered", "quoted", "manual")).toBe(true);
+  it("table_givenEveryAction_whenLookedUp_thenUsedAtLeastOnceAndHasVietnameseLabel", () => {
+    for (const a of ORDER_ACTIONS) {
+      expect(USER_TRANSITIONS.some((t) => t.action === a)).toBe(true);
+      expect(ACTION_LABEL[a]).toBeTruthy();
+    }
   });
 
-  it("canTransition_manualUnknownTarget_rejected", () => {
-    expect(canTransition("quoted", "shipped" as any, "manual")).toBe(false);
+  it("table_givenTerminalStatuses_whenAskingActions_thenNone", () => {
+    expect(allowedActions("closed")).toEqual([]);
+    expect(allowedActions("cancelled")).toEqual([]);
+  });
+
+  it("table_givenEveryStatusExceptTerminal_whenAskingActions_thenAtLeastOne", () => {
+    for (const s of ORDER_STATUSES) {
+      if (s === "closed" || s === "cancelled") continue;
+      expect(allowedActions(s).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("allowedActions_givenQuoted_whenAsked_thenDepositStartPurchasingCancelWithLabels", () => {
+    expect(allowedActions("quoted")).toEqual([
+      { action: "deposit", to: "deposited", label: "Xác nhận đã cọc" },
+      { action: "start-purchasing", to: "purchasing", label: "Bắt đầu mua" },
+      { action: "cancel", to: "cancelled", label: "Hủy đơn" },
+    ]);
+  });
+});
+
+describe("assertUserTransition", () => {
+  it.each(EXPECTED_TABLE)("assertUserTransition_given%s_when%s_thenReturns%s", (from, action, to) => {
+    expect(assertUserTransition(from as any, action).to).toBe(to);
+  });
+
+  const invalid: [string, OrderAction][] = [
+    ["quoted", "mark-purchased"], // nhảy cóc
+    ["draft", "deliver"], // nhảy cóc
+    ["purchased", "start-purchasing"], // lùi
+    ["delivered", "receive-vn"], // lùi
+    ["closed", "close"], ["closed", "quote"], ["cancelled", "quote"], ["cancelled", "cancel"], // từ trạng thái cuối
+    ["purchasing", "cancel"], ["purchased", "cancel"], ["jp_warehouse", "cancel"], ["delivered", "cancel"], ["draft", "cancel"],
+  ];
+  it.each(invalid)("assertUserTransition_given%s_when%s_thenThrows409StateInvalidTransition", (from, action) => {
+    try {
+      assertUserTransition(from as any, action);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(LegacyError);
+      expect((e as LegacyError).status).toBe(409);
+      expect((e as LegacyError).toBody()).toMatchObject({ error: "STATE_INVALID_TRANSITION", detail: { from, action } });
+    }
+  });
+});
+
+describe("checkTransitionPrerequisites", () => {
+  it("prerequisites_givenOrderAtFrom_whenChecked_thenNoBusinessRuleBlocks", () => {
+    const t = assertUserTransition("quoted", "deposit");
+    expect(() => checkTransitionPrerequisites({ status: "quoted" }, t)).not.toThrow();
+  });
+
+  it("prerequisites_givenOrderNotAtFrom_whenChecked_thenThrows409", () => {
+    const t = assertUserTransition("quoted", "deposit");
+    expect(() => checkTransitionPrerequisites({ status: "purchasing" }, t)).toThrow(LegacyError);
+  });
+});
+
+describe("canTransition / findTransitionTo", () => {
+  it("canTransition_givenUserModeTableRow_thenAllowed_otherwiseRejected", () => {
+    expect(canTransition("quoted", "purchasing", "user")).toBe(true);
+    expect(canTransition("delivered", "quoted", "user")).toBe(false);
+    expect(canTransition("cancelled", "quoted", "user")).toBe(false);
+  });
+
+  it("canTransition_givenCorrectionMode_thenAnyValidStatusAllowed", () => {
+    for (const from of ORDER_STATUSES) for (const to of ORDER_STATUSES) expect(canTransition(from, to, "correction")).toBe(true);
+    expect(canTransition("quoted", "shipped" as any, "correction")).toBe(false);
   });
 
   it("canTransition_systemForward_allowed", () => {
@@ -109,22 +196,10 @@ describe("canTransition", () => {
   it("canTransition_systemSameStatus_rejected", () => {
     expect(canTransition("jp_warehouse", "jp_warehouse", "system")).toBe(false);
   });
-});
 
-describe("assertTransition", () => {
-  it("assertTransition_invalidSystemTransition_throwsStateInvalid409", () => {
-    try {
-      assertTransition("delivered", "jp_warehouse", "system");
-      expect.unreachable();
-    } catch (e) {
-      expect(e).toBeInstanceOf(AppError);
-      expect((e as AppError).status).toBe(409);
-      expect((e as AppError).code).toBe("STATE_INVALID_TRANSITION");
-    }
-  });
-
-  it("assertTransition_validManual_doesNotThrow", () => {
-    expect(() => assertTransition("closed", "quoted", "manual")).not.toThrow();
+  it("findTransitionTo_givenNextStatus_thenReturnsAction_givenSkip_thenUndefined", () => {
+    expect(findTransitionTo("deposited", "purchasing")?.action).toBe("start-purchasing");
+    expect(findTransitionTo("quoted", "purchased")).toBeUndefined();
   });
 });
 

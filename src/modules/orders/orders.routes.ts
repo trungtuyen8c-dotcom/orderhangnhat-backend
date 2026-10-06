@@ -2,10 +2,11 @@ import { Router, type Request } from "express";
 import { handle, parseOr400 } from "../../app/http/legacyError.js";
 import { readPage } from "../../app/http/pagination.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
-import { authorize } from "../../middlewares/authorize.js";
+import { authorize, hasPermission } from "../../middlewares/authorize.js";
 import * as orders from "./order.service.js";
 import { parseOrderListQuery } from "./order.listFilter.js";
-import { consignSchema, createSchema, editSchema, fixSchema, paySchema, statusSchema } from "./order.validation.js";
+import { ORDER_ACTIONS, type OrderAction } from "./order.state.js";
+import { consignSchema, correctionSchema, createSchema, editSchema, fixSchema, paySchema, statusSchema } from "./order.validation.js";
 
 export { findWrongMarketplaceUrl } from "./order.service.js";
 
@@ -14,6 +15,7 @@ ordersRouter.use(authenticateEither);
 
 const actor = (req: Request): orders.Actor => ({ id: req.user!.id, roles: req.user!.roles, requestId: req.requestId });
 const q = (v: unknown) => String(v ?? "").trim();
+const canUpdateStatus = (req: Request) => hasPermission(req, "orders.update_status");
 
 // ?page=&pageSize= opt-in -> { items, pagination }; không có page -> mảng như cũ nhưng tối đa 500 đơn mới nhất.
 // Lọc (cả 2 chế độ): source|exclude, q, status, excludeStatus, nick, paymentMethod (__empty__ = chưa có),
@@ -22,7 +24,7 @@ const q = (v: unknown) => String(v ?? "").trim();
 ordersRouter.get("/", authorize("orders.list"), handle(async (req, res) => {
   const { filter, sort } = parseOrderListQuery(req.query);
   const withSummary = req.query.summary === "1" || req.query.summary === "true";
-  res.json(await orders.listOrders(filter, sort, readPage(req), { withSummary }));
+  res.json(await orders.listOrders(filter, sort, readPage(req), { withSummary, canUpdateStatus: await canUpdateStatus(req) }));
 }));
 
 // Giá trị cho ô lọc Nick / PTTT (thay cho việc FE tự gom từ toàn bộ đơn).
@@ -43,6 +45,11 @@ ordersRouter.get("/lookup-code", authorize("orders.list"), handle(async (req, re
 // Cảnh báo trùng link sản phẩm / mã tracking với đơn khác - để sale tự xác nhận trước khi lưu, không tự chặn.
 ordersRouter.get("/check-duplicate", authorize("orders.list"), handle(async (req, res) => {
   res.json(await orders.checkDuplicate(q(req.query.url), q(req.query.code), q(req.query.excludeOrderId)));
+}));
+
+// Bước được bấm từ trạng thái hiện tại (lọc theo quyền người gọi) + canCorrect cho admin.
+ordersRouter.get("/:id/transitions", authorize("orders.read"), handle(async (req, res) => {
+  res.json(await orders.getTransitions(req.params.id, await canUpdateStatus(req), actor(req)));
 }));
 
 ordersRouter.get("/:id", authorize("orders.read"), handle(async (req, res) => {
@@ -96,4 +103,18 @@ ordersRouter.delete("/:id", authorize("orders.delete"), handle(async (req, res) 
   const force = req.query.force === "1" || req.query.force === "true";
   await orders.deleteOrder(req.params.id, force, actor(req));
   res.json({ ok: true });
+}));
+
+// Admin/super_admin sửa sai trạng thái (bất kỳ trạng thái) - bắt buộc lý do, có audit.
+ordersRouter.post("/:id/status-correction", authorize("orders.update_status"), handle(async (req, res) => {
+  const p = correctionSchema.safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST", message: "Chọn trạng thái và nhập lý do (tối thiểu 5 ký tự)" });
+  res.json(await orders.correctOrderStatus(req.params.id, p.data.status, p.data.reason, actor(req)));
+}));
+
+// Chuyển bước theo bảng trạng thái. Đăng ký SAU mọi route POST /:id/... khác; param bị khoá vào đúng danh sách
+// bước nên không bao giờ nuốt /:id/pay, /:id/unpay, /:id/request-fix, /:id/resolve-fix, /:id/status-correction.
+const ACTION_PATH = `/:id/:action(${ORDER_ACTIONS.join("|")})`;
+ordersRouter.post(ACTION_PATH, authorize("orders.update_status"), handle(async (req, res) => {
+  res.json(await orders.transitionOrder(req.params.id, req.params.action as OrderAction, actor(req)));
 }));

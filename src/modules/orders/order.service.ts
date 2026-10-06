@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import type { Order, OrderStatus, Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
-import { logAudit, logOrder } from "../../app/audit.js";
+import { logAudit, logAuditTx, logOrder } from "../../app/audit.js";
 import { LegacyError } from "../../app/http/legacyError.js";
 import { paged, type PageParams } from "../../app/http/pagination.js";
 import { eventBus } from "../../app/events/EventBus.js";
@@ -12,7 +12,10 @@ import { reversePaymentWallets } from "../accounting/wallet.service.js";
 import { claimOrCreateTracking } from "../tracking/tracking.repository.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import { recomputeOrderTotals } from "./order.totals.js";
-import { assertTransition, INITIAL_STATUS, isEditable } from "./order.state.js";
+import {
+  allowedActions, assertUserTransition, checkTransitionPrerequisites, findTransitionTo, INITIAL_STATUS, invalidTransition,
+  isEditable, type AllowedAction, type OrderAction,
+} from "./order.state.js";
 import * as repo from "./order.repository.js";
 import { scopeWhere, toOrderBy, toOrderSql, toOrderWhere, type OrderListFilter, type OrderSort } from "./order.listFilter.js";
 import {
@@ -67,7 +70,16 @@ export function buildListWhere(source: string, exclude: string): { where: Prisma
   return { where: scopeWhere(source, excludeList), payLater: isPayLater(source) };
 }
 
-export type ListOrdersOptions = { withSummary?: boolean };
+export type ListOrdersOptions = { withSummary?: boolean; canUpdateStatus?: boolean };
+
+const isAdmin = (roles: string[]) => roles.some((r) => ["super_admin", "admin"].includes(r));
+
+// Bước được bấm, đã lọc theo quyền người gọi (thiếu orders.update_status -> rỗng).
+export const actionsFor = (status: OrderStatus, canUpdateStatus: boolean): AllowedAction[] =>
+  canUpdateStatus ? allowedActions(status) : [];
+
+const withActions = <T extends { status: OrderStatus }>(rows: T[], canUpdateStatus: boolean) =>
+  rows.map((r) => ({ ...r, allowedActions: actionsFor(r.status, canUpdateStatus) }));
 
 // Không có `page` -> mảng như cũ (tối đa 500 đơn mới nhất); có `page` -> { items, pagination }
 // (+ `summary` khi withSummary: tổng/tháng trên TOÀN BỘ tập đã lọc, không theo trang/tháng đang xem).
@@ -75,10 +87,12 @@ export type ListOrdersOptions = { withSummary?: boolean };
 export async function listOrders(filter: OrderListFilter, sort: OrderSort, page: PageParams | null, opts: ListOrdersOptions = {}) {
   const payLater = isPayLater(filter.source);
   const orderBy = toOrderBy(sort);
+  const can = opts.canUpdateStatus ?? false;
   if (!page || !opts.withSummary) {
     const month = filter.month === "latest" ? undefined : filter.month;
     const r = await repo.listOrders(toOrderWhere(filter, month), payLater, page, orderBy);
-    return page ? paged(r.rows, r.total!, page) : r.rows;
+    const rows = withActions(r.rows, can);
+    return page ? paged(rows, r.total!, page) : rows;
   }
   const [months, pending] = await Promise.all([
     repo.monthBuckets(toOrderSql(filter)),
@@ -93,7 +107,7 @@ export async function listOrders(filter: OrderListFilter, sort: OrderSort, page:
     month: month ?? null,
     ...(pending !== undefined ? { pendingJpy: pending } : {}),
   };
-  return { ...paged(r.rows, r.total!, page), summary };
+  return { ...paged(withActions(r.rows, can), r.total!, page), summary };
 }
 
 export async function listFacets(source: string, exclude: string) {
@@ -201,17 +215,82 @@ export async function createConsignment(d: ConsignmentInput, actor: Actor) {
   return { ...order, ...totals };
 }
 
-// ---- Status (chọn tay) ----
+// ---- Status (state machine) ----
 
-export async function changeStatus(id: string, to: OrderStatus, actor: Actor) {
+type StatusChange = {
+  auditAction: "order.status_changed" | "order.status_corrected";
+  auditMeta: Record<string, unknown>;
+  eventMeta: Record<string, unknown>;
+  logChanges: unknown;
+};
+
+async function loadForStatus(id: string) {
   const order = await prisma.order.findUnique({ where: { id } });
   if (!order) throw notFound();
-  assertTransition(order.status, to, "manual");
-  const updated = await prisma.order.update({ where: { id: order.id }, data: { status: to } });
-  await audit(actor, order.id, "order.status_changed", { from: order.status, to });
-  await logOrder({ orderId: order.id, actorId: actor.id, action: "status_changed", changes: [{ field: "status", old: order.status, new: to }] });
-  publish("order.status_changed", actor, order.id, { from: order.status, to, mode: "manual" });
+  return order;
+}
+
+// Ghi status có điều kiện + audit trong 1 transaction; lịch sử/event/sheet chỉ chạy SAU commit.
+async function commitStatusChange(order: Order, to: OrderStatus, actor: Actor, c: StatusChange) {
+  const from = order.status;
+  const updated = await prisma.$transaction(async (tx) => {
+    // WHERE status = from: 2 request song song / bấm 2 lần -> request sau count 0 -> 409, không ghi đè.
+    const r = await tx.order.updateMany({ where: { id: order.id, status: from }, data: { status: to } });
+    if (r.count === 0) {
+      throw new LegacyError(409, "STATE_CONFLICT", "Đơn vừa được đổi trạng thái bởi thao tác khác - tải lại để xem trạng thái mới", { from, to });
+    }
+    await logAuditTx(tx, {
+      actorId: actor.id, targetId: order.id, action: c.auditAction, entity: "order", requestId: actor.requestId,
+      before: { status: from }, after: { status: to }, metadata: c.auditMeta,
+    });
+    return tx.order.findUnique({ where: { id: order.id } });
+  });
+  await logOrder({ orderId: order.id, actorId: actor.id, action: "status_changed", changes: c.logChanges });
+  // Giữ như bản cũ: đổi trạng thái không đồng bộ sheet khách (chưa có quyết định nghiệp vụ - xem open question).
+  publish("order.status_changed", actor, order.id, { from, to, ...c.eventMeta });
   return updated;
+}
+
+function applyTransition(order: Order, action: OrderAction, to: OrderStatus, actor: Actor) {
+  return commitStatusChange(order, to, actor, {
+    auditAction: "order.status_changed",
+    auditMeta: { transition: action },
+    eventMeta: { action },
+    logChanges: [{ field: "status", old: order.status, new: to, action }],
+  });
+}
+
+export async function transitionOrder(id: string, action: OrderAction, actor: Actor) {
+  const order = await loadForStatus(id);
+  const t = assertUserTransition(order.status, action);
+  checkTransitionPrerequisites(order, t);
+  return applyTransition(order, t.action, t.to, actor);
+}
+
+// PATCH /:id/status { status } - tương thích ngược, vẫn bắt buộc đi đúng 1 bước trong bảng.
+export async function changeStatus(id: string, to: OrderStatus, actor: Actor) {
+  const order = await loadForStatus(id);
+  const t = findTransitionTo(order.status, to);
+  if (!t) throw invalidTransition(order.status, to, null);
+  checkTransitionPrerequisites(order, t);
+  return applyTransition(order, t.action, t.to, actor);
+}
+
+// Admin sửa sai: đặt bất kỳ trạng thái, bắt buộc lý do (validate ở route), audit before/after + lý do.
+export async function correctOrderStatus(id: string, to: OrderStatus, reason: string, actor: Actor) {
+  if (!isAdmin(actor.roles)) throw new LegacyError(403, "FORBIDDEN", "Chỉ Admin được sửa trạng thái đơn");
+  const order = await loadForStatus(id);
+  return commitStatusChange(order, to, actor, {
+    auditAction: "order.status_corrected",
+    auditMeta: { reason },
+    eventMeta: { correction: true, reason },
+    logChanges: [{ field: "status", old: order.status, new: to, correction: true, reason }],
+  });
+}
+
+export async function getTransitions(id: string, canUpdateStatus: boolean, actor: Actor) {
+  const order = await loadForStatus(id);
+  return { status: order.status, actions: actionsFor(order.status, canUpdateStatus), canCorrect: canUpdateStatus && isAdmin(actor.roles) };
 }
 
 // ---- Edit ----
@@ -363,7 +442,7 @@ export async function deleteOrder(id: string, force: boolean, actor: Actor) {
   if (order.payments.length > 0) {
     if (!force) throw new LegacyError(409, "HAS_PAYMENTS", "Đơn đã có giao dịch, không xóa được");
     // Force chỉ cho admin/super_admin: xóa cả giao dịch + hoàn lại số dư ví
-    if (!actor.roles.some((r) => ["super_admin", "admin"].includes(r)))
+    if (!isAdmin(actor.roles))
       throw new LegacyError(403, "FORBIDDEN", "Chỉ Admin được xóa đơn đã có giao dịch");
     await prisma.$transaction(async (tx) => {
       await reversePaymentWallets(tx, order.payments);

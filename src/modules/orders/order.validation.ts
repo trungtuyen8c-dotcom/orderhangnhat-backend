@@ -97,3 +97,9 @@ export const paySchema = z.object({ walletId: z.string().uuid(), paidAt: z.coerc
 
 // Kế toán yêu cầu sale sửa đơn (khi giao dịch/tiền sai)
 export const fixSchema = z.object({ note: z.string().min(1) });
+
+// Admin sửa trạng thái: bắt buộc lý do.
+export const correctionSchema = z.object({
+  status: z.enum(ORDER_STATUSES),
+  reason: z.string().trim().min(5),
+});

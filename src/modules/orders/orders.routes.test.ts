@@ -25,10 +25,14 @@ let currentUser: { id: string; roles: string[] } = { id: "actor1", roles: ["staf
 vi.mock("../../middlewares/authenticate.js", () => ({
   authenticateEither: (req: any, _res: any, next: any) => { req.user = currentUser; next(); },
 }));
+// null = mọi quyền (như trước); mảng = chỉ các quyền này (để test 403 / lọc allowedActions).
+let currentPerms: string[] | null = null;
 vi.mock("../../middlewares/authorize.js", () => ({
-  authorize: () => (_req: any, _res: any, next: any) => next(),
+  authorize: (perm: string) => (_req: any, res: any, next: any) =>
+    currentPerms && !currentPerms.includes(perm) ? res.status(403).json({ error: "FORBIDDEN", message: `Thiếu quyền: ${perm}` }) : next(),
+  hasPermission: async (_req: any, perm: string) => !currentPerms || currentPerms.includes(perm),
 }));
-vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn(), logOrder: vi.fn() }));
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn(), logAuditTx: vi.fn(), logOrder: vi.fn() }));
 vi.mock("./order.totals.js", () => ({ recomputeOrderTotals: vi.fn() }));
 vi.mock("../accounting/orderCard.js", () => ({ applyOrderCardCharges: vi.fn(), reverseOrderCardCharges: vi.fn() }));
 vi.mock("../sheets/sheet.jobs.js", () => ({ queueCustomerSheetSync: vi.fn() }));
@@ -60,6 +64,7 @@ const WALLET_ID = "33333333-3333-3333-3333-333333333333";
 beforeEach(() => {
   vi.clearAllMocks();
   currentUser = { id: "actor1", roles: ["staff"] };
+  currentPerms = null;
   // Mặc định transaction chạy callback trên chính mock prisma
   mockPrisma.$transaction.mockImplementation(async (cb: any) => cb(mockPrisma));
   mockPrisma.companyCost.findMany.mockResolvedValue([]);
@@ -220,7 +225,7 @@ describe("GET /orders", () => {
 
     const res = await request(buildApp()).get("/api/orders?exclude=yahoo,mercari").expect(200);
 
-    expect(res.body).toEqual([{ id: "o1" }]);
+    expect(res.body).toEqual([{ id: "o1", allowedActions: [] }]);
     const args = mockPrisma.order.findMany.mock.calls[0][0];
     expect(args.where).toEqual({ source: { notIn: ["yahoo", "mercari"] } });
     expect(args.skip).toBeUndefined();
@@ -257,7 +262,7 @@ describe("GET /orders", () => {
     const res = await request(buildApp()).get("/api/orders?exclude=yahoo,mercari&page=1&pageSize=20&summary=1&month=latest").expect(200);
 
     expect(res.body).toEqual({
-      items: [{ id: "o1" }],
+      items: [{ id: "o1", allowedActions: [] }],
       pagination: { page: 1, pageSize: 20, total: 2, totalPages: 1 },
       summary: {
         count: 5, totalVnd: 1000000.5, month: "2026-08",
@@ -311,7 +316,7 @@ describe("GET /orders", () => {
 
     const res = await request(buildApp()).get("/api/orders?page=2&pageSize=3").expect(200);
 
-    expect(res.body).toEqual({ items: [{ id: "o3" }], pagination: { page: 2, pageSize: 3, total: 7, totalPages: 3 } });
+    expect(res.body).toEqual({ items: [{ id: "o3", allowedActions: [] }], pagination: { page: 2, pageSize: 3, total: 7, totalPages: 3 } });
     const args = mockPrisma.order.findMany.mock.calls[0][0];
     expect(args.skip).toBe(3);
     expect(args.take).toBe(3);
@@ -338,15 +343,35 @@ describe("PATCH /orders/:id/status", () => {
     expect(res.body).toEqual({ error: "BAD_REQUEST" });
   });
 
-  it("ordersStatus_backwardsManualChange_allowedAndLogged", async () => {
+  it("ordersStatus_givenDelivered_whenPatchBackToQuoted_then409InvalidTransitionAndNoWrite", async () => {
     mockPrisma.order.findUnique.mockResolvedValue({ id: ORDER_ID, status: "delivered" });
-    mockPrisma.order.update.mockResolvedValue({ id: ORDER_ID, status: "quoted" });
 
-    const res = await request(buildApp()).patch(`/api/orders/${ORDER_ID}/status`).send({ status: "quoted" }).expect(200);
+    const res = await request(buildApp()).patch(`/api/orders/${ORDER_ID}/status`).send({ status: "quoted" }).expect(409);
 
-    expect(res.body).toEqual({ id: ORDER_ID, status: "quoted" });
-    expect(mockPrisma.order.update).toHaveBeenCalledWith({ where: { id: ORDER_ID }, data: { status: "quoted" } });
-    expect(logOrder).toHaveBeenCalledWith(expect.objectContaining({ action: "status_changed", changes: [{ field: "status", old: "delivered", new: "quoted" }] }));
+    expect(res.body).toMatchObject({ error: "STATE_INVALID_TRANSITION", detail: { from: "delivered", to: "quoted", action: null } });
+    expect(mockPrisma.order.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.order.update).not.toHaveBeenCalled();
+  });
+
+  it("ordersStatus_givenDeposited_whenPatchToPurchasing_thenRoutedThroughTableAsStartPurchasing", async () => {
+    mockPrisma.order.findUnique
+      .mockResolvedValueOnce({ id: ORDER_ID, status: "deposited", customerId: CUSTOMER_ID })
+      .mockResolvedValueOnce({ id: ORDER_ID, status: "purchasing" });
+    mockPrisma.order.updateMany.mockResolvedValue({ count: 1 });
+
+    const res = await request(buildApp()).patch(`/api/orders/${ORDER_ID}/status`).send({ status: "purchasing" }).expect(200);
+
+    expect(res.body).toEqual({ id: ORDER_ID, status: "purchasing" });
+    expect(mockPrisma.order.updateMany).toHaveBeenCalledWith({ where: { id: ORDER_ID, status: "deposited" }, data: { status: "purchasing" } });
+    expect(logOrder).toHaveBeenCalledWith(expect.objectContaining({
+      action: "status_changed", changes: [{ field: "status", old: "deposited", new: "purchasing", action: "start-purchasing" }],
+    }));
+  });
+
+  it("ordersStatus_givenNoUpdateStatusPermission_whenPatch_then403", async () => {
+    currentPerms = ["orders.list"];
+    await request(buildApp()).patch(`/api/orders/${ORDER_ID}/status`).send({ status: "deposited" }).expect(403);
+    expect(mockPrisma.order.findUnique).not.toHaveBeenCalled();
   });
 
   it("ordersStatus_orderMissing_returns404", async () => {

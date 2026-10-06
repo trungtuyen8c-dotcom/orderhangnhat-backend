@@ -25,6 +25,16 @@ export async function invalidatePermissions(userId: string): Promise<void> {
   await redis.del(`perms:${userId}`);
 }
 
+// Kiểm tra quyền không chặn request (không audit) - dùng để lọc dữ liệu UX theo quyền người gọi,
+// cùng luật với authorize: scope API key -> super_admin -> permission của role.
+export async function hasPermission(req: Request, required: string): Promise<boolean> {
+  const user = req.user;
+  if (!user) return false;
+  if (req.apiKeyScopes && !req.apiKeyScopes.includes(required)) return false;
+  if (user.roles.includes("super_admin")) return true;
+  return (await loadPermissions(user.id)).includes(required);
+}
+
 // apiKeyScope: tag riêng cho API key, mặc định trùng `required`. Dùng khi `required` là 1 permission
 // dùng chung cho cả route đọc lẫn route ghi (vd. accounting.reconcile, warehouse.weigh_vn) - đặt tag khác
 // cho route đọc để API key không bao giờ vô tình mở khóa route ghi cùng permission.

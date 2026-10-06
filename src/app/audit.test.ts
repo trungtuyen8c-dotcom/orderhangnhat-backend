@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../infrastructure/prisma.js", () => ({ prisma: { accessAudit: { create: vi.fn() } } }));
 vi.mock("../infrastructure/logger.js", () => ({ logger: { warn: vi.fn() } }));
 
-import { buildAuditMetadata, logAudit } from "./audit.js";
+import { buildAuditMetadata, logAudit, logAuditTx } from "./audit.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { logger } from "../infrastructure/logger.js";
 
@@ -37,5 +37,21 @@ describe("logAudit", () => {
     mockCreate.mockResolvedValue({});
     await logAudit({ action: "a" });
     expect(mockCreate).toHaveBeenCalledWith({ data: { actorId: null, targetId: null, action: "a", metadata: undefined, ipAddress: null } });
+  });
+});
+
+describe("logAuditTx", () => {
+  it("logAuditTx_givenTx_whenCalled_thenWritesThroughTxWithBeforeAfterRequestId", async () => {
+    const tx: any = { accessAudit: { create: vi.fn().mockResolvedValue({}) } };
+    await logAuditTx(tx, { actorId: "u1", targetId: "o1", action: "order.status_changed", requestId: "r1", entity: "order", before: { status: "a" }, after: { status: "b" } });
+    expect(tx.accessAudit.create).toHaveBeenCalledWith({ data: {
+      actorId: "u1", targetId: "o1", action: "order.status_changed", ipAddress: null,
+      metadata: { requestId: "r1", entity: "order", before: { status: "a" }, after: { status: "b" } },
+    } });
+  });
+
+  it("logAuditTx_givenWriteFails_whenCalled_thenThrowsSoTransactionRollsBack", async () => {
+    const tx: any = { accessAudit: { create: vi.fn().mockRejectedValue(new Error("x")) } };
+    await expect(logAuditTx(tx, { action: "a" })).rejects.toThrow("x");
   });
 });

@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../infrastructure/prisma.js";
 import { logger } from "../infrastructure/logger.js";
 
@@ -38,6 +39,19 @@ export async function logAudit(params: AuditParams): Promise<void> {
   } catch (e) {
     logger.warn({ action: params.action, request_id: params.requestId, err: (e as Error).message }, "audit_write_failed");
   }
+}
+
+// Ghi audit TRONG transaction nghiệp vụ: lỗi ghi audit -> rollback cả thao tác (khác logAudit, không nuốt lỗi).
+export async function logAuditTx(tx: Prisma.TransactionClient, params: AuditParams): Promise<void> {
+  await tx.accessAudit.create({
+    data: {
+      actorId: params.actorId ?? null,
+      targetId: params.targetId ?? null,
+      action: params.action,
+      metadata: buildAuditMetadata(params) as object | undefined,
+      ipAddress: params.ip ?? null,
+    },
+  });
 }
 
 // Lịch sử đơn (kiểu Google Sheet): lưu diff từng lần sửa + tên người sửa

@@ -25,10 +25,10 @@ export async function queueOrderCustomerSync(orderId: string): Promise<void> {
   if (customerId) void queueCustomerSheetSync(customerId);
 }
 
-export async function listTrackings(q: { orderId?: string; stock?: boolean; customer?: string }, page: PageParams | null) {
+export async function listTrackings(q: repo.TrackingListQuery, page: PageParams | null, sort?: repo.TrackingSort) {
   const where = repo.trackingListWhere(q);
-  if (!page) return repo.listTrackings(where, { skip: 0, take: LIST_DEFAULT_LIMIT });
-  const [items, total] = await Promise.all([repo.listTrackings(where, page), repo.countTrackings(where)]);
+  if (!page) return repo.listTrackings(where, { skip: 0, take: LIST_DEFAULT_LIMIT }, sort);
+  const [items, total] = await Promise.all([repo.listTrackings(where, page, sort), repo.countTrackings(where)]);
   return paged(items, total, page);
 }
 

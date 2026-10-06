@@ -374,9 +374,3 @@ export function syncCustomerOrders(customerId: string): Promise<void> {
   void next.finally(() => { if (syncLocks.get(customerId) === next) syncLocks.delete(customerId); });
   return next;
 }
-
-// Sync sheet của khách sở hữu đơn (bỏ qua nếu đơn không còn).
-export async function syncCustomerOrdersByOrderId(orderId: string): Promise<void> {
-  const o = await prisma.order.findUnique({ where: { id: orderId }, select: { customerId: true } });
-  if (o) await syncCustomerOrders(o.customerId);
-}

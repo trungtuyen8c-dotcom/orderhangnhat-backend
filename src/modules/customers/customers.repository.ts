@@ -3,11 +3,36 @@ import { prisma } from "../../infrastructure/prisma.js";
 
 type Tx = Prisma.TransactionClient;
 
-export function listCustomers(page?: { skip: number; take: number }) {
-  return prisma.customer.findMany({ orderBy: { createdAt: "desc" }, skip: page?.skip, take: page?.take ?? 500 });
+export type CustomerSortField = "createdAt" | "name" | "code";
+export type CustomerListQuery = { q?: string; sort?: CustomerSortField; dir?: "asc" | "desc" };
+
+// Tìm theo tên / SĐT / mã KH / FB-Zalo (không phân biệt hoa thường).
+export function customerListWhere(q?: string): Prisma.CustomerWhereInput | undefined {
+  if (!q) return undefined;
+  const c = { contains: q, mode: "insensitive" as const };
+  return { OR: [{ name: c }, { phone: c }, { code: c }, { fbZalo: c }] };
 }
 
-export const countCustomers = () => prisma.customer.count();
+// name/code mặc định A-Z; createdAt mặc định mới nhất trước (như cũ).
+const customerOrderBy = (lq: CustomerListQuery): Prisma.CustomerOrderByWithRelationInput | Prisma.CustomerOrderByWithRelationInput[] => {
+  if (!lq.sort || lq.sort === "createdAt") return { createdAt: lq.dir ?? "desc" };
+  return [{ [lq.sort]: lq.dir ?? "asc" }, { createdAt: "desc" }];
+};
+
+// Không phân trang -> tối đa 500 khách mới nhất (contract cũ).
+export function listCustomers(page?: { skip: number; take: number }, lq: CustomerListQuery = {}) {
+  return prisma.customer.findMany({ where: customerListWhere(lq.q), orderBy: customerOrderBy(lq), skip: page?.skip, take: page?.take ?? 500 });
+}
+
+// Bản gọn cho ô chọn khách (search-as-you-type): không gộp doanh số/công nợ.
+export function listCustomerOptions(page: { skip: number; take: number }, lq: CustomerListQuery = {}) {
+  return prisma.customer.findMany({
+    where: customerListWhere(lq.q), orderBy: customerOrderBy(lq), skip: page.skip, take: page.take,
+    select: { id: true, code: true, name: true },
+  });
+}
+
+export const countCustomers = (q?: string) => prisma.customer.count({ where: customerListWhere(q) });
 
 // Số liệu thô để tính doanh số + công nợ theo khách. ids = chỉ lấy cho các khách đó (trang hiện tại);
 // không truyền = toàn bộ (hành vi cũ của GET /customers).

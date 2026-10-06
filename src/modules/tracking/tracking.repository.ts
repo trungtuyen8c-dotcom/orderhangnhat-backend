@@ -22,17 +22,31 @@ export const TRACKING_LIST_INCLUDE = {
   order: { select: { code: true, needsCheck: true, checkNote: true, exchangeRate: true, customer: { select: { name: true } }, items: { select: { url: true } } } },
 } satisfies Prisma.TrackingInclude;
 
-export function trackingListWhere(q: { orderId?: string; stock?: boolean; customer?: string }): Prisma.TrackingWhereInput {
+export type TrackingListQuery = { orderId?: string; stock?: boolean; customer?: string; q?: string; status?: string[] };
+export type TrackingSort = { field: "createdAt" | "code"; dir: "asc" | "desc" };
+
+export function trackingListWhere(q: TrackingListQuery): Prisma.TrackingWhereInput {
   const where: Prisma.TrackingWhereInput = {};
+  const and: Prisma.TrackingWhereInput[] = [];
   if (q.orderId) where.orderId = q.orderId;
   // Tồn kho = đã về kho (packedAt) nhưng chưa có tracking VN (chưa đóng đi VN)
   if (q.stock) { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
   if (q.customer) where.order = { customer: { name: { contains: q.customer, mode: "insensitive" } } };
+  if (q.status?.length) where.status = { in: q.status };
+  // Tìm mã tracking / tên JP / mã đơn / tên khách
+  if (q.q) {
+    const c = { contains: q.q, mode: "insensitive" as const };
+    and.push({ OR: [{ code: c }, { jpName: c }, { order: { code: c } }, { order: { customer: { name: c } } }] });
+  }
+  if (and.length) where.AND = and;
   return where;
 }
 
-export function listTrackings(where: Prisma.TrackingWhereInput, page: { skip: number; take: number }) {
-  return prisma.tracking.findMany({ where, orderBy: { createdAt: "desc" }, skip: page.skip, take: page.take, include: TRACKING_LIST_INCLUDE });
+export function listTrackings(where: Prisma.TrackingWhereInput, page: { skip: number; take: number }, sort?: TrackingSort) {
+  const orderBy: Prisma.TrackingOrderByWithRelationInput[] = sort?.field === "code"
+    ? [{ code: sort.dir }, { createdAt: "desc" }]
+    : [{ createdAt: sort?.dir ?? "desc" }];
+  return prisma.tracking.findMany({ where, orderBy, skip: page.skip, take: page.take, include: TRACKING_LIST_INCLUDE });
 }
 
 export function countTrackings(where: Prisma.TrackingWhereInput) {

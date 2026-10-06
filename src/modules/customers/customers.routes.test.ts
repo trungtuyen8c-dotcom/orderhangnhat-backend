@@ -79,6 +79,36 @@ describe("GET /customers", () => {
     expect(mp.order.groupBy.mock.calls[0][0].where).toEqual({ customerId: { in: ["c3"] } });
     expect(mp.payment.findMany.mock.calls[0][0].where).toEqual({ order: { customerId: { in: ["c3"] } } });
   });
+
+  it("list_searchAndSort_appliesWhereToListAndCountInBothModes", async () => {
+    mp.customer.findMany.mockResolvedValue([]);
+    mp.customer.count.mockResolvedValue(0);
+    const where = { OR: ["name", "phone", "code", "fbZalo"].map((k) => ({ [k]: { contains: "an", mode: "insensitive" } })) };
+
+    await request(buildApp()).get("/api/customers?q=%20an%20&sort=name").expect(200);
+    expect(mp.customer.findMany.mock.calls[0][0]).toMatchObject({ where, orderBy: [{ name: "asc" }, { createdAt: "desc" }], take: 500 });
+
+    await request(buildApp()).get("/api/customers?q=an&page=1&pageSize=20&sort=code&order=desc").expect(200);
+    expect(mp.customer.findMany.mock.calls[1][0]).toMatchObject({ where, orderBy: [{ code: "desc" }, { createdAt: "desc" }], skip: 0, take: 20 });
+    expect(mp.customer.count).toHaveBeenCalledWith({ where });
+  });
+
+  it("list_liteWithPage_returnsOnlyIdCodeNameWithoutAggregates", async () => {
+    mp.customer.findMany.mockResolvedValue([{ id: "c1", code: "KH-0001", name: "An" }]);
+    mp.customer.count.mockResolvedValue(1);
+
+    const res = await request(buildApp()).get("/api/customers?page=1&pageSize=20&lite=1&q=an").expect(200);
+
+    expect(res.body).toEqual({ items: [{ id: "c1", code: "KH-0001", name: "An" }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+    expect(mp.customer.findMany.mock.calls[0][0].select).toEqual({ id: true, code: true, name: true });
+    expect(mp.order.groupBy).not.toHaveBeenCalled();
+    expect(mp.payment.findMany).not.toHaveBeenCalled();
+  });
+
+  it("list_invalidSort_returns400", async () => {
+    await request(buildApp()).get("/api/customers?sort=debt").expect(400);
+    expect(mp.customer.findMany).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /customers", () => {

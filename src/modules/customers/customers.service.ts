@@ -11,6 +11,7 @@ import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import * as repo from "./customers.repository.js";
 
 export type Actor = { id: string; requestId?: string };
+export type { CustomerSortField } from "./customers.repository.js";
 
 export type CustomerInput = {
   name?: string;
@@ -51,12 +52,17 @@ export function withBalances<C extends { id: string }>(rows: C[], [revenue, debt
 }
 
 // Không có page -> mảng (contract cũ, tối đa 500). Có page -> { items, pagination }, chỉ gộp số liệu cho trang đó.
-export async function listCustomers(page: PageParams | null) {
+// lite (chỉ khi có page) -> items chỉ { id, code, name } cho ô chọn khách, không tính doanh số/công nợ.
+export async function listCustomers(page: PageParams | null, lq: repo.CustomerListQuery = {}, opts: { lite?: boolean } = {}) {
   if (!page) {
-    const [rows, aggs] = await Promise.all([repo.listCustomers(), repo.customerMoneyAggregates()]);
+    const [rows, aggs] = await Promise.all([repo.listCustomers(undefined, lq), repo.customerMoneyAggregates()]);
     return withBalances(rows, aggs);
   }
-  const [rows, total] = await Promise.all([repo.listCustomers(page), repo.countCustomers()]);
+  if (opts.lite) {
+    const [rows, total] = await Promise.all([repo.listCustomerOptions(page, lq), repo.countCustomers(lq.q)]);
+    return paged(rows, total, page);
+  }
+  const [rows, total] = await Promise.all([repo.listCustomers(page, lq), repo.countCustomers(lq.q)]);
   const aggs = await repo.customerMoneyAggregates(rows.map((r) => r.id));
   return paged(withBalances(rows, aggs), total, page);
 }

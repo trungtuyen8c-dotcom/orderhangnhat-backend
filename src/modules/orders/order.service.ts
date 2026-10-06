@@ -14,6 +14,7 @@ import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import { recomputeOrderTotals } from "./order.totals.js";
 import { assertTransition, INITIAL_STATUS, isEditable } from "./order.state.js";
 import * as repo from "./order.repository.js";
+import { scopeWhere, toOrderBy, toOrderSql, toOrderWhere, type OrderListFilter, type OrderSort } from "./order.listFilter.js";
 import {
   isPayLater, PRICING_FIELDS,
   type ConsignmentInput, type CreateOrderInput, type EditOrderInput,
@@ -63,16 +64,40 @@ async function createWithNextCode<T>(run: (tx: Tx, code: string) => Promise<T>):
 
 export function buildListWhere(source: string, exclude: string): { where: Prisma.OrderWhereInput | undefined; payLater: boolean } {
   const excludeList = exclude.split(",").map((s) => s.trim()).filter(Boolean);
-  const payLater = isPayLater(source);
-  const where = payLater ? { source } : excludeList.length ? { source: { notIn: excludeList } } : undefined;
-  return { where, payLater };
+  return { where: scopeWhere(source, excludeList), payLater: isPayLater(source) };
 }
 
-// Không có `page` -> trả mảng như cũ; có `page` -> { items, pagination }.
-export async function listOrders(q: { source: string; exclude: string }, page: PageParams | null) {
-  const { where, payLater } = buildListWhere(q.source, q.exclude);
-  const r = await repo.listOrders(where, payLater, page);
-  return page ? paged(r.rows, r.total!, page) : r.rows;
+export type ListOrdersOptions = { withSummary?: boolean };
+
+// Không có `page` -> mảng như cũ (tối đa 500 đơn mới nhất); có `page` -> { items, pagination }
+// (+ `summary` khi withSummary: tổng/tháng trên TOÀN BỘ tập đã lọc, không theo trang/tháng đang xem).
+// month="latest" chỉ có nghĩa khi có summary: resolve thành tháng mới nhất có đơn, trả lại ở summary.month.
+export async function listOrders(filter: OrderListFilter, sort: OrderSort, page: PageParams | null, opts: ListOrdersOptions = {}) {
+  const payLater = isPayLater(filter.source);
+  const orderBy = toOrderBy(sort);
+  if (!page || !opts.withSummary) {
+    const month = filter.month === "latest" ? undefined : filter.month;
+    const r = await repo.listOrders(toOrderWhere(filter, month), payLater, page, orderBy);
+    return page ? paged(r.rows, r.total!, page) : r.rows;
+  }
+  const [months, pending] = await Promise.all([
+    repo.monthBuckets(toOrderSql(filter)),
+    payLater ? repo.pendingJpy(filter.source) : Promise.resolve(undefined),
+  ]);
+  const month = filter.month === "latest" ? months[0]?.month : filter.month;
+  const r = await repo.listOrders(toOrderWhere(filter, month), payLater, page, orderBy);
+  const summary = {
+    count: months.reduce((s, m) => s + m.count, 0),
+    totalVnd: months.reduce((s, m) => s + m.totalVnd, 0),
+    months,
+    month: month ?? null,
+    ...(pending !== undefined ? { pendingJpy: pending } : {}),
+  };
+  return { ...paged(r.rows, r.total!, page), summary };
+}
+
+export async function listFacets(source: string, exclude: string) {
+  return repo.listFacets(buildListWhere(source, exclude).where);
 }
 
 export async function listFixRequests() {

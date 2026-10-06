@@ -4,8 +4,8 @@ import express from "express";
 
 vi.mock("../../infrastructure/prisma.js", () => {
   const p: any = {
-    order: { findUnique: vi.fn(), findMany: vi.fn(), count: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn() },
-    orderItem: { deleteMany: vi.fn(), updateMany: vi.fn() },
+    order: { findUnique: vi.fn(), findMany: vi.fn(), count: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), groupBy: vi.fn() },
+    orderItem: { deleteMany: vi.fn(), updateMany: vi.fn(), groupBy: vi.fn() },
     tracking: { create: vi.fn(), update: vi.fn(), deleteMany: vi.fn(), updateMany: vi.fn() },
     trackingLog: { deleteMany: vi.fn() },
     companyCost: { findMany: vi.fn() },
@@ -17,6 +17,7 @@ vi.mock("../../infrastructure/prisma.js", () => {
     weightRecon: { deleteMany: vi.fn() },
     customer: { findUnique: vi.fn() },
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
   };
   return { prisma: p };
 });
@@ -223,7 +224,75 @@ describe("GET /orders", () => {
     const args = mockPrisma.order.findMany.mock.calls[0][0];
     expect(args.where).toEqual({ source: { notIn: ["yahoo", "mercari"] } });
     expect(args.skip).toBeUndefined();
+    expect(args.take).toBe(500);
     expect(mockPrisma.order.count).not.toHaveBeenCalled();
+  });
+
+  it("ordersList_noPageWithFilters_appliesSameWhereAndSortInLegacyMode", async () => {
+    mockPrisma.order.findMany.mockResolvedValue([]);
+
+    await request(buildApp()).get("/api/orders?exclude=yahoo&status=draft&q=JA1&sort=code&order=asc").expect(200);
+
+    const args = mockPrisma.order.findMany.mock.calls[0][0];
+    expect(args.where.AND[0]).toEqual({ source: { notIn: ["yahoo"] } });
+    expect(args.where.AND).toContainEqual({ status: { in: ["draft"] } });
+    expect(args.orderBy).toEqual([{ code: "asc" }]);
+    expect(args.take).toBe(500);
+  });
+
+  it("ordersList_invalidStatusFilter_returns400", async () => {
+    const res = await request(buildApp()).get("/api/orders?status=shipped").expect(400);
+    expect(res.body.error).toBe("BAD_REQUEST");
+    expect(mockPrisma.order.findMany).not.toHaveBeenCalled();
+  });
+
+  it("ordersList_pageWithSummaryAndLatestMonth_resolvesNewestMonthAndReturnsTotalsOverWholeSet", async () => {
+    mockPrisma.$queryRaw.mockResolvedValueOnce([
+      { month: "2026-08", count: 2, total: "300000.00" },
+      { month: "2026-07", count: 3, total: "700000.50" },
+    ]);
+    mockPrisma.order.findMany.mockResolvedValue([{ id: "o1" }]);
+    mockPrisma.order.count.mockResolvedValue(2);
+
+    const res = await request(buildApp()).get("/api/orders?exclude=yahoo,mercari&page=1&pageSize=20&summary=1&month=latest").expect(200);
+
+    expect(res.body).toEqual({
+      items: [{ id: "o1" }],
+      pagination: { page: 1, pageSize: 20, total: 2, totalPages: 1 },
+      summary: {
+        count: 5, totalVnd: 1000000.5, month: "2026-08",
+        months: [{ month: "2026-08", count: 2, totalVnd: 300000 }, { month: "2026-07", count: 3, totalVnd: 700000.5 }],
+      },
+    });
+    const where = mockPrisma.order.findMany.mock.calls[0][0].where;
+    // trang chỉ lấy đơn của tháng mới nhất (lịch VN), đếm cùng where
+    expect(where.AND[1]).toEqual({ orderDate: { gte: new Date("2026-07-31T17:00:00.000Z"), lt: new Date("2026-08-31T17:00:00.000Z") } });
+    expect(mockPrisma.order.count).toHaveBeenCalledWith({ where });
+  });
+
+  it("ordersList_payLaterWithSummary_addsPendingJpyFromUnpaidOrders", async () => {
+    mockPrisma.$queryRaw
+      .mockResolvedValueOnce([{ month: "2026-08", count: 1, total: "100" }])
+      .mockResolvedValueOnce([{ total: "12345.00" }]);
+    mockPrisma.order.findMany.mockResolvedValue([]);
+    mockPrisma.order.count.mockResolvedValue(0);
+
+    const res = await request(buildApp()).get("/api/orders?source=yahoo&paid=no&page=1&summary=1&month=2026-08").expect(200);
+
+    expect(res.body.summary).toMatchObject({ count: 1, totalVnd: 100, month: "2026-08", pendingJpy: 12345 });
+    const pendingSql = mockPrisma.$queryRaw.mock.calls[1];
+    expect(pendingSql[0].join("?")).toContain("o.yahoo_paid_at IS NULL");
+    expect(pendingSql.slice(1)).toEqual(["yahoo"]);
+  });
+
+  it("ordersList_summaryNoMatches_monthNullAndZeroTotals", async () => {
+    mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+    mockPrisma.order.findMany.mockResolvedValue([]);
+    mockPrisma.order.count.mockResolvedValue(0);
+
+    const res = await request(buildApp()).get("/api/orders?page=1&summary=1&month=latest&q=zzz").expect(200);
+
+    expect(res.body.summary).toEqual({ count: 0, totalVnd: 0, months: [], month: null });
   });
 
   it("ordersList_payLaterSource_filtersBySourceAndSelectsItemPrices", async () => {
@@ -247,6 +316,19 @@ describe("GET /orders", () => {
     expect(args.skip).toBe(3);
     expect(args.take).toBe(3);
     expect(mockPrisma.order.count).toHaveBeenCalledWith({ where: undefined });
+  });
+});
+
+describe("GET /orders/facets", () => {
+  it("facets_returnsDistinctNicksAndPaymentMethodsWithinPageScope", async () => {
+    mockPrisma.order.groupBy.mockResolvedValue([{ nick: "a" }, { nick: "b" }]);
+    mockPrisma.orderItem.groupBy.mockResolvedValue([{ paymentMethod: "Visa" }]);
+
+    const res = await request(buildApp()).get("/api/orders/facets?source=mercari").expect(200);
+
+    expect(res.body).toEqual({ nicks: ["a", "b"], paymentMethods: ["Visa"] });
+    expect(mockPrisma.order.groupBy.mock.calls[0][0].where.AND[0]).toEqual({ source: "mercari" });
+    expect(mockPrisma.orderItem.groupBy.mock.calls[0][0].where.AND).toContainEqual({ order: { source: "mercari" } });
   });
 });
 

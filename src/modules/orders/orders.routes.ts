@@ -4,6 +4,7 @@ import { readPage } from "../../app/http/pagination.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import * as orders from "./order.service.js";
+import { parseOrderListQuery } from "./order.listFilter.js";
 import { consignSchema, createSchema, editSchema, fixSchema, paySchema, statusSchema } from "./order.validation.js";
 
 export { findWrongMarketplaceUrl } from "./order.service.js";
@@ -14,9 +15,19 @@ ordersRouter.use(authenticateEither);
 const actor = (req: Request): orders.Actor => ({ id: req.user!.id, roles: req.user!.roles, requestId: req.requestId });
 const q = (v: unknown) => String(v ?? "").trim();
 
-// ?page=&pageSize= opt-in -> { items, pagination }; không có page -> mảng như cũ.
+// ?page=&pageSize= opt-in -> { items, pagination }; không có page -> mảng như cũ nhưng tối đa 500 đơn mới nhất.
+// Lọc (cả 2 chế độ): source|exclude, q, status, excludeStatus, nick, paymentMethod (__empty__ = chưa có),
+// tracking=has|none, paid=yes|no, customerId, from/to (YYYY-MM-DD, giờ VN), month=YYYY-MM|latest,
+// sort=orderDate|code|totalVnd|createdAt + order=asc|desc. summary=1 (khi có page) -> thêm `summary`.
 ordersRouter.get("/", authorize("orders.list"), handle(async (req, res) => {
-  res.json(await orders.listOrders({ source: String(req.query.source ?? ""), exclude: String(req.query.exclude ?? "") }, readPage(req)));
+  const { filter, sort } = parseOrderListQuery(req.query);
+  const withSummary = req.query.summary === "1" || req.query.summary === "true";
+  res.json(await orders.listOrders(filter, sort, readPage(req), { withSummary }));
+}));
+
+// Giá trị cho ô lọc Nick / PTTT (thay cho việc FE tự gom từ toàn bộ đơn).
+ordersRouter.get("/facets", authorize("orders.list"), handle(async (req, res) => {
+  res.json(await orders.listFacets(String(req.query.source ?? ""), String(req.query.exclude ?? "")));
 }));
 
 // Đơn bị kế toán yêu cầu sửa, chưa xử lý xong -> hiện chuông thông báo cho sale

@@ -26,6 +26,9 @@ export const config = {
   corsOrigins: list("CORS_ORIGINS"),
   // Mặc định bật ở prod; tắt tạm bằng COOKIE_SECURE=false khi chưa có HTTPS.
   cookieSecure: (process.env.COOKIE_SECURE ?? (isProd ? "true" : "false")) === "true",
-  // Tắt worker trong process API (vd khi chạy worker riêng hoặc test).
+  // false = process API không chạy worker BullMQ lẫn cron (deploy kèm process worker riêng: npm run start:worker).
+  // Process worker (src/worker.ts) bỏ qua biến này.
   workersEnabled: (process.env.WORKERS_ENABLED ?? "true") === "true",
+  // Lịch backup tự động (cú pháp node-cron, giờ Asia/Ho_Chi_Minh). Đặt rỗng để tắt.
+  backupCron: process.env.BACKUP_CRON ?? "0 2 * * *",
 };

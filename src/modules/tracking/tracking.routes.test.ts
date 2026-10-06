@@ -62,7 +62,27 @@ describe("GET /trackings", () => {
     db.tracking.count.mockResolvedValue(21);
     const r = await request(buildApp()).get("/api/trackings?page=2&pageSize=10").expect(200);
     expect(r.body).toEqual({ items: [{ id: "t3" }], pagination: { page: 2, pageSize: 10, total: 21, totalPages: 3 } });
-    expect(db.tracking.findMany.mock.calls[0][0]).toMatchObject({ skip: 10, take: 10 });
+    expect(db.tracking.findMany.mock.calls[0][0]).toMatchObject({ skip: 10, take: 10, orderBy: [{ createdAt: "desc" }] });
+  });
+
+  it("listTrackings_searchStatusAndSort_appliedToListAndCount", async () => {
+    db.tracking.findMany.mockResolvedValue([]);
+    db.tracking.count.mockResolvedValue(0);
+    await request(buildApp()).get("/api/trackings?stock=1&q=ab&status=new,weighed&sort=code&order=asc&page=1&pageSize=50").expect(200);
+    const arg = db.tracking.findMany.mock.calls[0][0];
+    const c = { contains: "ab", mode: "insensitive" };
+    expect(arg.where).toEqual({
+      packedAt: { not: null }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }],
+      status: { in: ["new", "weighed"] },
+      AND: [{ OR: [{ code: c }, { jpName: c }, { order: { code: c } }, { order: { customer: { name: c } } }] }],
+    });
+    expect(arg.orderBy).toEqual([{ code: "asc" }, { createdAt: "desc" }]);
+    expect(db.tracking.count).toHaveBeenCalledWith({ where: arg.where });
+  });
+
+  it("listTrackings_invalidSort_returns400", async () => {
+    await request(buildApp()).get("/api/trackings?sort=weight").expect(400);
+    expect(db.tracking.findMany).not.toHaveBeenCalled();
   });
 });
 

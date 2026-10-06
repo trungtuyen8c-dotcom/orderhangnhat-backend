@@ -3,14 +3,13 @@ import { config } from "../app/config.js";
 import { logger } from "../infrastructure/logger.js";
 import { logError } from "../infrastructure/systemLog.js";
 
-// 1 queue chung cho side effect (sheet sync, backup, scrape, notification). Tên job phân biệt handler.
+// 1 queue chung cho side effect (sheet sync, backup, notification). Tên job phân biệt handler.
+// Mỗi tên phải có registerJob tương ứng (scrape chạy đồng bộ trong request nên không có job).
 export const JobNames = [
   "sheet.sync.customer",
-  "sheet.sync.order",
   "sheet.sync.accounting",
   "sheet.sync.warehouse",
   "backup.create",
-  "marketplace.scrape",
   "notification.send",
 ] as const;
 export type JobName = (typeof JobNames)[number];
@@ -50,8 +49,9 @@ export async function enqueue(name: JobName, data: Record<string, unknown> = {},
   }
 }
 
-export function startWorkers() {
-  if (worker || !config.workersEnabled) return;
+// force: process worker riêng (src/worker.ts) chạy bất kể WORKERS_ENABLED.
+export function startWorkers(opts: { force?: boolean } = {}) {
+  if (worker || (!opts.force && !config.workersEnabled)) return;
   worker = new Worker(
     QUEUE,
     async (job) => {

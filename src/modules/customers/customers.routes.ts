@@ -11,9 +11,19 @@ customersRouter.use(authenticateEither);
 
 const actor = (req: Request): svc.Actor => ({ id: req.user!.id, requestId: req.requestId });
 
-// Không gửi ?page= -> mảng như cũ; có ?page=&pageSize= -> { items, pagination }.
+// Không gửi ?page= -> mảng như cũ (tối đa 500); có ?page=&pageSize= -> { items, pagination }.
+// q = tìm tên/SĐT/mã KH/FB-Zalo; sort=createdAt|name|code + order=asc|desc; lite=1 -> chỉ { id, code, name }.
 customersRouter.get("/", authorize("customers.list"), handle(async (req, res) => {
-  res.json(await svc.listCustomers(readPage(req)));
+  const sort = String(req.query.sort ?? "");
+  const order = String(req.query.order ?? "");
+  if (sort && !["createdAt", "name", "code"].includes(sort)) return res.status(400).json({ error: "BAD_REQUEST", message: "sort không hợp lệ" });
+  if (order && !["asc", "desc"].includes(order)) return res.status(400).json({ error: "BAD_REQUEST", message: "order không hợp lệ" });
+  const lq = {
+    q: String(req.query.q ?? "").trim() || undefined,
+    sort: (sort || undefined) as svc.CustomerSortField | undefined,
+    dir: (order || undefined) as "asc" | "desc" | undefined,
+  };
+  res.json(await svc.listCustomers(readPage(req), lq, { lite: req.query.lite === "1" || req.query.lite === "true" }));
 }));
 
 const schema = z.object({

@@ -5,10 +5,17 @@ import type { PageParams } from "../../app/http/pagination.js";
 type Tx = Prisma.TransactionClient;
 
 // GET /orders - trackings luôn cùng select; pay-later (Yahoo/Mercari) cần thêm giá món để hiện tổng ở bảng.
-export async function listOrders(where: Prisma.OrderWhereInput | undefined, payLater: boolean, page: PageParams | null) {
+// Không phân trang -> tối đa LIST_LEGACY_LIMIT đơn mới nhất (như /customers, /trackings).
+export const LIST_LEGACY_LIMIT = 500;
+const DEFAULT_ORDER_BY: Prisma.OrderOrderByWithRelationInput[] = [{ orderDate: "desc" }, { createdAt: "desc" }];
+
+export async function listOrders(
+  where: Prisma.OrderWhereInput | undefined, payLater: boolean, page: PageParams | null,
+  orderBy: Prisma.OrderOrderByWithRelationInput[] = DEFAULT_ORDER_BY,
+) {
   const args = {
     where,
-    orderBy: [{ orderDate: "desc" as const }, { createdAt: "desc" as const }],
+    orderBy,
     include: {
       customer: { select: { name: true } },
       trackings: {
@@ -20,12 +27,46 @@ export async function listOrders(where: Prisma.OrderWhereInput | undefined, payL
         : { select: { url: true, paymentMethod: true } },
     },
   };
-  if (!page) return { rows: await prisma.order.findMany(args) };
+  if (!page) return { rows: await prisma.order.findMany({ ...args, take: LIST_LEGACY_LIMIT }) };
   const [rows, total] = await Promise.all([
     prisma.order.findMany({ ...args, skip: page.skip, take: page.take }),
     prisma.order.count({ where }),
   ]);
   return { rows, total };
+}
+
+export type MonthBucket = { month: string; count: number; totalVnd: number };
+
+// Gom theo tháng lịch VN (order_date lưu UTC) trên toàn bộ tập đã lọc - 1 query GROUP BY.
+export async function monthBuckets(filterSql: Prisma.Sql): Promise<MonthBucket[]> {
+  const rows = await prisma.$queryRaw<{ month: string; count: number; total: string }[]>`
+    SELECT to_char(o.order_date + interval '7 hours', 'YYYY-MM') AS month,
+           COUNT(*)::int AS count, COALESCE(SUM(o.total_vnd), 0)::text AS total
+    FROM orders o WHERE ${filterSql}
+    GROUP BY 1 ORDER BY 1 DESC`;
+  return rows.map((r) => ({ month: r.month, count: Number(r.count), totalVnd: Number(r.total) }));
+}
+
+// "Đang nợ" Yahoo/Mercari: tổng ¥ (giá x SL + ship món) các đơn chưa bấm Đã thanh toán, không theo bộ lọc.
+export async function pendingJpy(source: string): Promise<number> {
+  const [r] = await prisma.$queryRaw<{ total: string }[]>`
+    SELECT COALESCE(SUM(i.unit_price_jpy * i.qty + COALESCE(i.ship_jpy, 0)), 0)::text AS total
+    FROM order_items i JOIN orders o ON o.id = i.order_id
+    WHERE o.source = ${source} AND o.yahoo_paid_at IS NULL`;
+  return Number(r?.total ?? 0);
+}
+
+// Giá trị cho ô lọc Nick / PTTT trong phạm vi trang (GROUP BY, không tải đơn).
+export async function listFacets(scope: Prisma.OrderWhereInput | undefined) {
+  const [nicks, methods] = await Promise.all([
+    prisma.order.groupBy({ by: ["nick"], where: { AND: [scope ?? {}, { nick: { not: null } }, { nick: { not: "" } }] }, orderBy: { nick: "asc" } }),
+    prisma.orderItem.groupBy({
+      by: ["paymentMethod"],
+      where: { AND: [{ paymentMethod: { not: null } }, { paymentMethod: { not: "" } }, ...(scope ? [{ order: scope }] : [])] },
+      orderBy: { paymentMethod: "asc" },
+    }),
+  ]);
+  return { nicks: nicks.map((n) => n.nick!), paymentMethods: methods.map((m) => m.paymentMethod!) };
 }
 
 export function listFixRequests() {

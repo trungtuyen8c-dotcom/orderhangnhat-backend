@@ -60,12 +60,21 @@ trackingRouter.get("/scrape", authorize("trackings.create"), handle(async (req, 
 }));
 
 // Mặc định trả mảng (tối đa 500); gửi ?page= thì trả { items, pagination }.
+// Lọc: orderId, stock=1, customer (tên khách), q (mã/tên JP/mã đơn/tên khách), status (a,b);
+// sort=createdAt|code + order=asc|desc (mặc định createdAt desc).
 trackingRouter.get("/", authorize("trackings.list"), handle(async (req, res) => {
+  const sortField = String(req.query.sort ?? "") || "createdAt";
+  const dir = String(req.query.order ?? "") || "desc";
+  if (!["createdAt", "code"].includes(sortField) || !["asc", "desc"].includes(dir))
+    return res.status(400).json({ error: "BAD_REQUEST", message: "sort/order không hợp lệ" });
+  const status = String(req.query.status ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   res.json(await svc.listTrackings({
     orderId: req.query.orderId ? String(req.query.orderId) : undefined,
     stock: req.query.stock === "1",
     customer: String(req.query.customer ?? "").trim() || undefined,
-  }, readPage(req, 100, 500)));
+    q: String(req.query.q ?? "").trim() || undefined,
+    status: status.length ? status : undefined,
+  }, readPage(req, 100, 500), { field: sortField as "createdAt" | "code", dir: dir as "asc" | "desc" }));
 }));
 
 trackingRouter.get("/lookup-code", authorize("trackings.create"), handle(async (req, res) => {

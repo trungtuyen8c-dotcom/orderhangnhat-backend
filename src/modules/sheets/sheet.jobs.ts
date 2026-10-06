@@ -1,7 +1,7 @@
 import type { JobsOptions } from "bullmq";
 import { prisma } from "../../infrastructure/prisma.js";
 import { enqueue, registerJob, type JobName } from "../../jobs/queues.js";
-import { syncCustomerOrders, syncCustomerOrdersByOrderId } from "./customerSheetSync.service.js";
+import { syncCustomerOrders } from "./customerSheetSync.service.js";
 import { removeTrackingRow, syncTracking } from "./trackingSheetSync.service.js";
 import { clearWarehouseRow, syncPackedFromWarehouse } from "./warehouseSheetSync.service.js";
 import { syncPackedOne } from "./warehousePackedOne.service.js";
@@ -29,8 +29,8 @@ async function handleWarehouseJob(d: WarehouseSheetJob): Promise<unknown> {
   }
 }
 
+// Sheet khách chứa mọi đơn của khách -> đổi 1 đơn cũng sync cả khách (queueCustomerSheetSync), không có job theo đơn.
 registerJob("sheet.sync.customer", (d: { customerId: string }) => syncCustomerOrders(d.customerId));
-registerJob("sheet.sync.order", (d: { orderId: string }) => syncCustomerOrdersByOrderId(d.orderId));
 // Sổ cọc/thanh toán nằm trong file sheet của khách -> cùng 1 lượt sync khách.
 registerJob("sheet.sync.accounting", (d: { customerId: string }) => syncCustomerOrders(d.customerId));
 registerJob("sheet.sync.warehouse", (d: WarehouseSheetJob) => handleWarehouseJob(d));
@@ -44,7 +44,6 @@ function dedupe(id: string): JobsOptions {
 const enqueueDeduped = (name: JobName, data: Record<string, unknown>, key: string) => enqueue(name, data, dedupe(`${name}:${key}`));
 
 export const queueCustomerSheetSync = (customerId: string) => enqueueDeduped("sheet.sync.customer", { customerId }, customerId);
-export const queueOrderSheetSync = (orderId: string) => enqueueDeduped("sheet.sync.order", { orderId }, orderId);
 export const queueAccountingSheetSync = (customerId: string) => enqueueDeduped("sheet.sync.accounting", { customerId }, customerId);
 
 export const queueWarehouseSheetSync = (opts?: { recentDays?: number }) =>

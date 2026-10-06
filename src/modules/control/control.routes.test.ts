@@ -16,9 +16,12 @@ vi.mock("../../infrastructure/prisma.js", () => {
   return { prisma: p };
 });
 vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn() }));
+vi.mock("../../app/events/EventBus.js", () => ({ eventBus: { publish: vi.fn() } }));
 
 import { controlRouter } from "./control.routes.js";
 import { prisma } from "../../infrastructure/prisma.js";
+import { eventBus } from "../../app/events/EventBus.js";
+import { logAudit } from "../../app/audit.js";
 
 const mp = prisma as any;
 
@@ -32,6 +35,20 @@ function buildApp() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("control routes", () => {
+  it("postCarton_valid_createsViaCartonServiceEmitsEventAndReturnsSameBody", async () => {
+    // Given
+    const row = { id: "k9", code: "BILL1", declaredWeightKg: 10, electronicsCount: null, packedDate: null, note: null };
+    mp.carton.create.mockResolvedValue(row);
+    // When
+    const res = await request(buildApp()).post("/api/control/cartons").send({ code: "BILL1", declaredWeightKg: 10 });
+    // Then
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(row);
+    expect(mp.carton.create.mock.calls[0][0].data).toMatchObject({ code: "BILL1", declaredWeightKg: 10, electronicsCount: null, packedDate: null, note: null });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ actorId: "u1", targetId: "k9", action: "carton.created" }));
+    expect(eventBus.publish).toHaveBeenCalledWith(expect.objectContaining({ eventName: "carton.created", entityId: "k9", metadata: { code: "BILL1" } }));
+  });
+
   it("deleteCarton_detachesTrackingsAsManualThenDeletesInOneTransaction", async () => {
     const res = await request(buildApp()).delete("/api/control/cartons/k1");
     expect(res.body).toEqual({ ok: true });

@@ -1,9 +1,8 @@
 import { effKg } from "../tracking/tracking.weight.js";
-import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { LegacyError } from "../../app/http/legacyError.js";
-import { eventBus } from "../../app/events/EventBus.js";
+import * as cartonService from "../cartons/carton.service.js";
 
 export type Actor = { id: string; requestId?: string };
 
@@ -30,14 +29,9 @@ export async function listCartons() {
 
 export type CartonInput = { code: string; declaredWeightKg?: number; electronicsCount?: number; packedDate?: string; note?: string };
 
-export async function createCarton(input: CartonInput, actor: Actor) {
-  const c = await prisma.carton.create({ data: {
-    id: uuid(), code: input.code, declaredWeightKg: input.declaredWeightKg ?? null, electronicsCount: input.electronicsCount ?? null,
-    packedDate: input.packedDate ? new Date(input.packedDate) : null, note: input.note ?? null,
-  } });
-  await logAudit({ actorId: actor.id, targetId: c.id, action: "carton.created", requestId: actor.requestId });
-  eventBus.publish({ eventName: "carton.created", actorId: actor.id, entityType: "carton", entityId: c.id, metadata: { code: c.code } });
-  return c;
+// Dùng chung cartons/carton.service (audit + event carton.created) - response giữ nguyên bản ghi Carton.
+export function createCarton(input: CartonInput, actor: Actor) {
+  return cartonService.createCarton(input, actor);
 }
 
 export function updateCarton(id: string, input: Partial<CartonInput>) {

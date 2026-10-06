@@ -4,6 +4,8 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { LegacyError } from "../../app/http/legacyError.js";
 import { enqueue } from "../../jobs/queues.js";
+import { logger } from "../../infrastructure/logger.js";
+import { logWarn } from "../../infrastructure/systemLog.js";
 import { rcloneConnected, setRcloneToken, disconnectRclone } from "./backup.runner.js";
 
 type Actor = { id: string; requestId?: string };
@@ -43,11 +45,46 @@ export async function disconnectDrive(actor: Actor) {
 }
 
 // Tạo BackupRun pending rồi đẩy job 'backup.create' - worker chạy runBackup (xem backup.jobs.ts).
-export async function startManualBackup(actor: Actor) {
-  if ((await prisma.backupRun.count({ where: ACTIVE })) > 0) throw new LegacyError(409, "BUSY", "Đang có bản backup chạy");
-  const run = await prisma.backupRun.create({ data: { id: uuid(), kind: "manual", status: "pending", triggeredBy: actor.id } });
+// Trả null nếu đang có run pending/running (guard BUSY dùng chung cho manual + scheduled).
+async function createAndEnqueueRun(kind: "manual" | "scheduled", triggeredBy: string | null) {
+  if ((await prisma.backupRun.count({ where: ACTIVE })) > 0) return null;
+  const run = await prisma.backupRun.create({ data: { id: uuid(), kind, status: "pending", triggeredBy } });
   // attempts: 1 - runBackup tự ghi failed vào BackupRun, chạy lại cùng runId không có ý nghĩa.
   await enqueue("backup.create", { runId: run.id }, { attempts: 1 });
+  return run;
+}
+
+export async function startManualBackup(actor: Actor) {
+  const run = await createAndEnqueueRun("manual", actor.id);
+  if (!run) throw new LegacyError(409, "BUSY", "Đang có bản backup chạy");
   await logAudit({ actorId: actor.id, targetId: run.id, action: "backup.run", requestId: actor.requestId, entity: "backup_run" });
   return serializeRun(run);
+}
+
+// Cron BACKUP_CRON gọi. Chưa nối Drive hoặc đang có run -> bỏ qua lượt này (log), không tạo run failed mỗi ngày.
+export async function startScheduledBackup(): Promise<{ started: boolean; reason?: string; runId?: string }> {
+  if (!(await rcloneConnected())) {
+    logger.warn({ kind: "scheduled" }, "backup_scheduled_skipped_not_connected");
+    return { started: false, reason: "NOT_CONNECTED" };
+  }
+  const run = await createAndEnqueueRun("scheduled", null);
+  if (!run) {
+    logger.warn({ kind: "scheduled" }, "backup_scheduled_skipped_busy");
+    return { started: false, reason: "BUSY" };
+  }
+  logger.info({ run_id: run.id, kind: "scheduled" }, "backup_scheduled_enqueued");
+  return { started: true, runId: run.id };
+}
+
+export const STUCK_RUN_MAX_AGE_MS = 6 * 3600 * 1000;
+
+// Run kẹt pending/running quá lâu (worker chết giữa chừng, job mất) chặn mọi run mới vì guard BUSY -> đánh failed.
+export async function failStuckRuns(maxAgeMs = STUCK_RUN_MAX_AGE_MS, now = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - maxAgeMs);
+  const { count } = await prisma.backupRun.updateMany({
+    where: { ...ACTIVE, startedAt: { lt: cutoff } },
+    data: { status: "failed", finishedAt: now, error: "Kẹt pending/running quá lâu - đánh failed khi worker khởi động" },
+  });
+  if (count) logWarn({ count, cutoff: cutoff.toISOString() }, "backup_stuck_runs_failed");
+  return count;
 }

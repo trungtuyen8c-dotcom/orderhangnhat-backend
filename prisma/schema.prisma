@@ -216,6 +216,10 @@ model Order {
   walletTxns             WalletTxn[]
 
   @@index([status])
+  // Danh sách đơn phân trang: ORDER BY order_date, created_at + lọc theo nguồn (Yahoo/Mercari) / khách
+  @@index([orderDate, createdAt])
+  @@index([source, orderDate])
+  @@index([customerId])
   @@map("orders")
 }
 
@@ -246,6 +250,7 @@ model OrderItem {
   note          String?
   order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  @@index([orderId])
   @@map("order_items")
 }
 
@@ -297,6 +302,8 @@ model Tracking {
   companyCosts       CompanyCost[]
 
   @@index([code])
+  @@index([orderId])
+  @@index([createdAt])
   @@map("trackings")
 }
 

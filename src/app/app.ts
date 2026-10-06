@@ -15,6 +15,7 @@ import { ordersRouter } from "../modules/orders/orders.routes.js";
 import { customersRouter } from "../modules/customers/customers.routes.js";
 import { statsRouter } from "../modules/stats/stats.routes.js";
 import { trackingRouter } from "../modules/tracking/tracking.routes.js";
+import { invoicesRouter } from "../modules/invoices/invoice.routes.js";
 import { shipmentsRouter } from "../modules/shipments/shipments.routes.js";
 import { accountingRouter } from "../modules/accounting/accounting.routes.js";
 import { warehouseRouter } from "../modules/warehouse/warehouse.routes.js";
@@ -60,6 +61,7 @@ export function createApp() {
   app.use("/api/customers", customersRouter);
   app.use("/api/stats", statsRouter);
   app.use("/api/trackings", trackingRouter);
+  app.use("/api/invoices", invoicesRouter);
   app.use("/api/shipments", shipmentsRouter);
   app.use("/api/accounting", accountingRouter);
   app.use("/api/warehouse", warehouseRouter);

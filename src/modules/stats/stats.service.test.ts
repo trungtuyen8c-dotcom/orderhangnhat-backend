@@ -42,3 +42,29 @@ describe("isOrderComplete", () => {
     expect(isOrderComplete(baseOrder)).toBe(true);
   });
 });
+
+import { lastMonthKeys, parseMonthsParam } from "./stats.service.js";
+
+describe("lastMonthKeys", () => {
+  it("lastMonthKeys_acrossYearBoundary_returnsContiguousAscending", () => {
+    expect(lastMonthKeys(3, new Date("2026-02-10T00:00:00Z"))).toEqual(["2025-12", "2026-01", "2026-02"]);
+  });
+
+  it("lastMonthKeys_utcLateNightIsNextVnMonth_endsAtVnMonth", () => {
+    // 2026-03-31 18:00 UTC = 2026-04-01 01:00 giờ VN
+    expect(lastMonthKeys(1, new Date("2026-03-31T18:00:00Z"))).toEqual(["2026-04"]);
+  });
+});
+
+describe("parseMonthsParam", () => {
+  it("parseMonthsParam_missingOrInvalid_defaults12", () => {
+    expect(parseMonthsParam(undefined)).toBe(12);
+    expect(parseMonthsParam("abc")).toBe(12);
+  });
+
+  it("parseMonthsParam_outOfRange_clampsTo1And24", () => {
+    expect(parseMonthsParam("0")).toBe(1);
+    expect(parseMonthsParam("99")).toBe(24);
+    expect(parseMonthsParam("6")).toBe(6);
+  });
+});

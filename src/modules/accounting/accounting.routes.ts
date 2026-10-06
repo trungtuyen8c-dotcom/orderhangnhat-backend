@@ -13,6 +13,13 @@ import * as fund from "./fund.service.js";
 import * as wallets from "./wallet.service.js";
 import * as cards from "./card.service.js";
 import * as reports from "./report.service.js";
+import * as statementImports from "./statementImport.service.js";
+import { MAX_ROWS, mappingSchema } from "./statementImport.parse.js";
+import { MAX_TOLERANCE_DAYS } from "./statementImport.match.js";
+import { readFile } from "fs/promises";
+import {
+  STATEMENT_KINDS, checkFile, decodeOriginalName, documentUpload, fileExt, readHead, removeTempFile, sanitizeFilename,
+} from "../shipments/documentUpload.js";
 
 // Route mỏng: quyền + validate + gọi service. Mọi thao tác tiền nằm trong service (1 transaction/thao tác).
 export const accountingRouter = Router();
@@ -347,4 +354,56 @@ const reconcileSchema = z.object({ statementRef: z.string().optional() });
 accountingRouter.post("/wallet-txns/:id/reconcile", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
   const p = parseOr400(reconcileSchema, req.body);
   res.json(await cards.reconcileTxn(req.params.id, p.statementRef, actor(req)));
+}));
+
+// ===== Import sao kê để đối soát tự động (M9-2) =====
+const uuidParam = (v: unknown) => parseOr400(z.string().uuid(), v);
+
+accountingRouter.get("/statement-imports", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  const walletId = req.query.walletId ? uuidParam(req.query.walletId) : undefined;
+  res.json(await statementImports.listImports(walletId));
+}));
+
+accountingRouter.get("/wallets/:id/statement-mapping", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  res.json({ mapping: await statementImports.getWalletMapping(uuidParam(req.params.id)) });
+}));
+
+// Upload file sao kê (CSV/XLSX) cho 1 ví -> bản nháp + bảng ô thô để chọn cột.
+accountingRouter.post("/statement-imports", authorize("accounting.reconcile"), documentUpload, asyncHandler(async (req, res) => {
+  const file = req.file;
+  try {
+    const walletId = uuidParam((req.body as { walletId?: string }).walletId);
+    if (!file) throw new AppError("BAD_REQUEST", 400);
+    const safeName = sanitizeFilename(decodeOriginalName(file.originalname));
+    const check = checkFile(safeName, await readHead(file.path), file.size, STATEMENT_KINDS);
+    if (!check.ok) {
+      throw check.reason === "SIZE"
+        ? new AppError("FILE_TOO_LARGE", 413, `File quá lớn (tối đa ${Math.round((check.maxBytes ?? 0) / 1024 / 1024)}MB)`)
+        : new AppError("BAD_FILE", 400, "Chỉ nhận file CSV hoặc XLSX");
+    }
+    const out = await statementImports.createImport(walletId, { buffer: await readFile(file.path), ext: fileExt(safeName), fileName: safeName }, actor(req));
+    res.status(out.resumed ? 200 : 201).json(out);
+  } finally {
+    await removeTempFile(file?.path);
+  }
+}));
+
+accountingRouter.get("/statement-imports/:id", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  res.json(await statementImports.getImport(uuidParam(req.params.id)));
+}));
+
+const previewSchema = z.object({ mapping: mappingSchema, toleranceDays: z.number().int().min(0).max(MAX_TOLERANCE_DAYS).optional() });
+accountingRouter.post("/statement-imports/:id/preview", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  const body = parseOr400(previewSchema, req.body, true);
+  res.json(await statementImports.previewMatches(uuidParam(req.params.id), body, actor(req)));
+}));
+
+const commitSchema = z.object({ matches: z.array(z.object({ rowIndex: z.number().int().min(0), txnId: z.string().uuid() })).max(MAX_ROWS) });
+accountingRouter.post("/statement-imports/:id/commit", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  const body = parseOr400(commitSchema, req.body);
+  res.json(await statementImports.commitImport(uuidParam(req.params.id), body, actor(req)));
+}));
+
+accountingRouter.delete("/statement-imports/:id", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  res.json(await statementImports.deleteImport(uuidParam(req.params.id), actor(req)));
 }));

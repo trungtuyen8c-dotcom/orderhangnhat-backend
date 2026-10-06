@@ -53,8 +53,8 @@ export function countTrackings(where: Prisma.TrackingWhereInput) {
   return prisma.tracking.count({ where });
 }
 
-export function findTrackingsForInvoice(ids: string[]) {
-  return prisma.tracking.findMany({ where: { id: { in: ids } }, include: { order: { include: { items: true, customer: true } } } });
+export function findTrackingsForInvoice(ids: string[], db: Db = prisma) {
+  return db.tracking.findMany({ where: { id: { in: ids } }, include: { order: { include: { items: true, customer: true } } } });
 }
 
 export async function customerIdOfOrder(orderId: string): Promise<string | null> {

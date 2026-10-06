@@ -30,7 +30,7 @@ const createSchema = z.object({
   cartonId: z.string().uuid().optional(),
 });
 const bulkSchema = z.object({ items: z.array(z.object({ orderCode: z.string().min(1), code: z.string().min(1) })).min(1) });
-const invSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
+const invSchema = z.object({ ids: z.array(z.string().uuid()).min(1), note: z.string().max(200).optional() });
 // Kho Nhật: quét ra tên + giá + cân
 const updateSchema = z.object({
   code: z.string().optional(),
@@ -99,7 +99,7 @@ trackingRouter.post("/bulk", authorize("trackings.update"), asyncHandler(async (
 
 trackingRouter.post("/invoice", authorize("trackings.list"), asyncHandler(async (req, res) => {
   const body = parseOr400(invSchema, req.body);
-  res.json(await svc.buildInvoice(body.ids));
+  res.json(await svc.buildInvoice(body.ids, actor(req), body.note));
 }));
 
 trackingRouter.post("/", authorize("trackings.create"), asyncHandler(async (req, res) => {

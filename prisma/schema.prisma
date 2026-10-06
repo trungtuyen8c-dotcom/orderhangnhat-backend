@@ -300,6 +300,8 @@ model Tracking {
   carton             Carton?       @relation(fields: [cartonId], references: [id])
   logs               TrackingLog[]
   companyCosts       CompanyCost[]
+  invoiceItems       InvoiceItem[]
+  documents          Document[]
 
   @@index([code])
   @@index([orderId])
@@ -360,11 +362,15 @@ model Document {
   // Ngày hóa đơn hải quan (chỉ dùng khi type = "tax") - mốc tham chiếu lô hàng, không dùng để lọc dòng vàng trên sheet
   invoiceDate DateTime? @map("invoice_date") @db.Date
   uploadedBy  String?   @map("uploaded_by") @db.Uuid
+  // Hóa đơn mua đính theo 1 tracking (M7-1). Xóa tracking thì giữ file, chỉ gỡ liên kết (như orderId).
+  trackingId  String?   @map("tracking_id") @db.Uuid
   createdAt   DateTime  @default(now()) @map("created_at")
   // Chứng từ không phải sổ tiền -> xóa đơn thì giữ file, chỉ gỡ liên kết
   order       Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  tracking    Tracking? @relation(fields: [trackingId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([orderId])
+  @@index([trackingId])
   @@map("documents")
 }
 
@@ -403,15 +409,17 @@ model Debt {
 }
 
 model Wallet {
-  id           String              @id @default(uuid()) @db.Uuid
-  name         String              @unique
-  currency     String              @default("VND")
-  balance      Decimal             @default(0) @db.Decimal(16, 2)
-  payments     Payment[]
-  txns         WalletTxn[]
-  dailyActuals WalletDailyActual[]
-  deposits     CustomerDeposit[]
-  fundTxns     FundTxn[]
+  id               String                  @id @default(uuid()) @db.Uuid
+  name             String                  @unique
+  currency         String                  @default("VND")
+  balance          Decimal                 @default(0) @db.Decimal(16, 2)
+  payments         Payment[]
+  txns             WalletTxn[]
+  dailyActuals     WalletDailyActual[]
+  deposits         CustomerDeposit[]
+  fundTxns         FundTxn[]
+  statementImports StatementImport[]
+  statementMapping WalletStatementMapping?
 
   @@map("wallets")
 }
@@ -464,23 +472,24 @@ model FundTxn {
 }
 
 model WalletTxn {
-  id           String           @id @default(uuid()) @db.Uuid
-  walletId     String           @map("wallet_id") @db.Uuid
-  amount       Decimal          @db.Decimal(16, 2)
-  type         String
-  category     String?
-  note         String?
-  transferRef  String?          @map("transfer_ref") @db.Uuid
-  refOrderId   String?          @map("ref_order_id") @db.Uuid
-  refDepositId String?          @map("ref_deposit_id") @db.Uuid
-  refFundTxnId String?          @map("ref_fund_txn_id") @db.Uuid
-  reconciled   Boolean          @default(false)
-  statementRef String?          @map("statement_ref")
-  createdAt    DateTime         @default(now()) @map("created_at")
-  wallet       Wallet           @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  refOrder     Order?           @relation(fields: [refOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  refDeposit   CustomerDeposit? @relation(fields: [refDepositId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  refFundTxn   FundTxn?         @relation(fields: [refFundTxnId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  id            String               @id @default(uuid()) @db.Uuid
+  walletId      String               @map("wallet_id") @db.Uuid
+  amount        Decimal              @db.Decimal(16, 2)
+  type          String
+  category      String?
+  note          String?
+  transferRef   String?              @map("transfer_ref") @db.Uuid
+  refOrderId    String?              @map("ref_order_id") @db.Uuid
+  refDepositId  String?              @map("ref_deposit_id") @db.Uuid
+  refFundTxnId  String?              @map("ref_fund_txn_id") @db.Uuid
+  reconciled    Boolean              @default(false)
+  statementRef  String?              @map("statement_ref")
+  createdAt     DateTime             @default(now()) @map("created_at")
+  wallet        Wallet               @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  refOrder      Order?               @relation(fields: [refOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  refDeposit    CustomerDeposit?     @relation(fields: [refDepositId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  refFundTxn    FundTxn?             @relation(fields: [refFundTxnId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  statementRows StatementImportRow[]
 
   @@index([refOrderId])
   @@index([refDepositId])
@@ -641,4 +650,92 @@ model WeightRecon {
 
   @@index([orderId])
   @@map("weight_recon")
+}
+
+// ===== Import sao kê để đối soát tự động (M9-2) =====
+
+// Cách đọc file sao kê của 1 ví (chọn cột 1 lần, lần sau dùng lại). Cấu trúc JSON: xem statementImport.parse.ts.
+model WalletStatementMapping {
+  walletId  String   @id @map("wallet_id") @db.Uuid
+  mapping   Json
+  updatedBy String?  @map("updated_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("wallet_statement_mappings")
+}
+
+// 1 lần upload file sao kê cho 1 ví. (walletId, fileHash) unique -> 1 file không import 2 lần cho cùng ví.
+// status: draft (đang xem/ghép) -> committed (đã đối soát các cặp được chấp nhận).
+model StatementImport {
+  id            String               @id @default(uuid()) @db.Uuid
+  walletId      String               @map("wallet_id") @db.Uuid
+  fileName      String               @map("file_name")
+  fileHash      String               @map("file_hash")
+  status        String               @default("draft")
+  rowCount      Int                  @map("row_count")
+  toleranceDays Int?                 @map("tolerance_days")
+  mapping       Json?
+  createdBy     String?              @map("created_by") @db.Uuid
+  createdAt     DateTime             @default(now()) @map("created_at")
+  committedBy   String?              @map("committed_by") @db.Uuid
+  committedAt   DateTime?            @map("committed_at")
+  wallet        Wallet               @relation(fields: [walletId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  rows          StatementImportRow[]
+
+  @@unique([walletId, fileHash])
+  @@index([walletId, createdAt])
+  @@map("statement_imports")
+}
+
+// 1 dòng thô của file (cells = mảng chuỗi). Các cột date/amount/... chỉ có sau khi áp mapping.
+model StatementImportRow {
+  id              String          @id @default(uuid()) @db.Uuid
+  importId        String          @map("import_id") @db.Uuid
+  rowIndex        Int             @map("row_index")
+  cells           Json
+  txnDate         DateTime?       @map("txn_date") @db.Date
+  amount          Decimal?        @db.Decimal(16, 2)
+  description     String?
+  reference       String?
+  matchedTxnId    String?         @map("matched_txn_id") @db.Uuid
+  statementImport StatementImport @relation(fields: [importId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  matchedTxn      WalletTxn?      @relation(fields: [matchedTxnId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([importId, rowIndex])
+  @@index([matchedTxnId])
+  @@map("statement_import_rows")
+}
+
+// Lịch sử mỗi lần xuất invoice (POST /trackings/invoice) - 1 dòng/lần xuất, kèm danh sách tracking đã gom.
+// Dùng để biết món nào CHƯA TỪNG lên invoice (trang "Hàng chưa lên invoice"). createdBy không FK (giống uploadedBy).
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  createdAt     DateTime      @default(now()) @map("created_at")
+  createdBy     String?       @map("created_by") @db.Uuid
+  note          String?
+  trackingCount Int           @map("tracking_count")
+  lineCount     Int           @map("line_count")
+  totalJpy      Decimal       @map("total_jpy") @db.Decimal(14, 2)
+  items         InvoiceItem[]
+
+  @@index([createdAt])
+  @@map("invoices")
+}
+
+// 1 tracking trong 1 lần xuất. Mã/đơn/khách chụp lại lúc xuất (snapshot) - xóa tracking thì giữ lịch sử, chỉ gỡ liên kết.
+model InvoiceItem {
+  id           String    @id @default(uuid()) @db.Uuid
+  invoiceId    String    @map("invoice_id") @db.Uuid
+  trackingId   String?   @map("tracking_id") @db.Uuid
+  trackingCode String    @map("tracking_code")
+  orderId      String?   @map("order_id") @db.Uuid
+  orderCode    String?   @map("order_code")
+  customerName String?   @map("customer_name")
+  invoice      Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  tracking     Tracking? @relation(fields: [trackingId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([trackingId])
+  @@map("invoice_items")
 }

@@ -9,6 +9,7 @@ import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { createOrphanTrackingSafe } from "../sheets/orphanTracking.js";
 import { queueCustomerSheetSync, queueTrackingSheetRow, queueTrackingSheetRowRemoval } from "../sheets/sheet.jobs.js";
 import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
+import { createInvoiceHistory } from "../invoices/invoice.repository.js";
 import * as repo from "./tracking.repository.js";
 
 export type Actor = { id: string; requestId?: string };
@@ -84,11 +85,11 @@ export async function bulkAssign(items: { orderCode: string; code: string }[], a
 }
 
 type InvoiceItem = { no: number; name: string; origin: string; unitPriceJpy: number; unit: string; qty: number; amount: number };
+type InvoiceTracking = Awaited<ReturnType<typeof repo.findTrackingsForInvoice>>[number];
 
-// Gom dữ liệu hóa đơn (invoice) từ các tracking được chọn
-export async function buildInvoice(ids: string[]) {
-  const trks = await repo.findTrackingsForInvoice(ids);
-  const orders = new Map<string, NonNullable<(typeof trks)[number]["order"]>>();
+// Gom dòng hóa đơn từ các tracking (thuần, không đụng DB)
+export function composeInvoice(trks: InvoiceTracking[]) {
+  const orders = new Map<string, NonNullable<InvoiceTracking["order"]>>();
   for (const t of trks) if (t.order) orders.set(t.order.id, t.order);
   const items: InvoiceItem[] = [];
   let no = 1, total = 0;
@@ -113,6 +114,21 @@ export async function buildInvoice(ids: string[]) {
   const consignees = [...new Set([...orders.values()].map((o) => o.customer?.name).filter(Boolean))] as string[];
   const addresses = [...new Set([...orders.values()].map((o) => o.customer?.address).filter(Boolean))] as string[];
   return { items, total, consignees, addresses };
+}
+
+// Gom dữ liệu hóa đơn (invoice) từ các tracking được chọn + ghi lịch sử xuất (Invoice/InvoiceItem) trong cùng
+// 1 transaction - response giữ nguyên như trước, lịch sử dùng cho trang "Hàng chưa lên invoice".
+export async function buildInvoice(ids: string[], actor: Actor, note?: string) {
+  const r = await prisma.$transaction(async (tx) => {
+    const trks = await repo.findTrackingsForInvoice(ids, tx);
+    const inv = composeInvoice(trks);
+    const invoiceId = trks.length
+      ? await createInvoiceHistory(tx, { createdBy: actor.id, note: note?.trim() || null, totalJpy: inv.total, lineCount: inv.items.length, trackings: trks })
+      : null;
+    return { inv, invoiceId, count: trks.length };
+  });
+  if (r.invoiceId) await logAudit({ actorId: actor.id, targetId: r.invoiceId, action: "invoice.exported", metadata: { trackings: r.count, total: r.inv.total }, requestId: actor.requestId });
+  return r.inv;
 }
 
 export type CreateTrackingInput = {

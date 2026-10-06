@@ -6,10 +6,11 @@ import { parseOr400 } from "../../app/http/parse.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import {
-  DOCUMENT_KINDS, TAX_SCAN_KINDS, checkFile, contentDisposition, decodeOriginalName, documentUpload,
+  DOCUMENT_KINDS, PURCHASE_INVOICE_KINDS, TAX_SCAN_KINDS, checkFile, contentDisposition, decodeOriginalName, documentUpload,
   readHead, removeTempFile, sanitizeFilename, taxScanUpload,
 } from "./documentUpload.js";
 import * as svc from "./shipments.service.js";
+import * as trackingDocs from "./trackingDocuments.service.js";
 
 export const shipmentsRouter = Router();
 shipmentsRouter.use(authenticateEither);
@@ -92,6 +93,37 @@ shipmentsRouter.post("/documents/scan-tax", authorize("shipments.upload_doc"), t
   // Sai loại -> cùng body như khi exceljs không đọc được file (FE chỉ hiện "Quét file thất bại").
   if (!check.ok) throw check.reason === "SIZE" ? fileRejected(check) : new AppError("BAD_FILE", 400, "Không đọc được file Excel");
   res.json(await svc.scanTaxFile(file.buffer));
+}));
+
+// ===== Hóa đơn mua đính theo tracking (M7-1) - cùng quyền với upload/xem chứng từ =====
+const uuidOr400 = (v: unknown) => parseOr400(z.string().uuid(), v);
+
+shipmentsRouter.post("/trackings/:trackingId/documents", authorize("shipments.upload_doc"), documentUpload, asyncHandler(async (req, res) => {
+  const file = req.file;
+  try {
+    const trackingId = uuidOr400(req.params.trackingId);
+    if (!file) throw new AppError("BAD_REQUEST", 400);
+    const safeName = sanitizeFilename(decodeOriginalName(file.originalname));
+    const check = checkFile(safeName, await readHead(file.path), file.size, PURCHASE_INVOICE_KINDS);
+    if (!check.ok) throw check.reason === "SIZE" ? fileRejected(check) : new AppError("BAD_FILE", 400, "Chỉ nhận PDF hoặc ảnh");
+    res.status(201).json(await trackingDocs.uploadTrackingDocument(trackingId, { path: file.path, size: file.size, safeName, mime: check.mime }, actor(req)));
+  } finally {
+    await removeTempFile(file?.path);
+  }
+}));
+
+shipmentsRouter.get("/trackings/:trackingId/documents", authorize("shipments.list"), asyncHandler(async (req, res) => {
+  res.json(await trackingDocs.listTrackingDocuments(uuidOr400(req.params.trackingId)));
+}));
+
+shipmentsRouter.delete("/trackings/:trackingId/documents/:docId", authorize("shipments.upload_doc"), asyncHandler(async (req, res) => {
+  res.json(await trackingDocs.deleteTrackingDocument(uuidOr400(req.params.trackingId), uuidOr400(req.params.docId), actor(req)));
+}));
+
+// POST (không phải GET) vì danh sách id có thể dài (bảng Kho VN vài trăm dòng) -> vượt giới hạn URL.
+const countSchema = z.object({ trackingIds: z.array(z.string().uuid()).max(trackingDocs.MAX_COUNT_IDS) });
+shipmentsRouter.post("/tracking-documents/counts", authorize("shipments.list"), asyncHandler(async (req, res) => {
+  res.json(await trackingDocs.countTrackingDocuments(parseOr400(countSchema, req.body).trackingIds));
 }));
 
 shipmentsRouter.get("/documents", authorize("shipments.list"), asyncHandler(async (req, res) => {

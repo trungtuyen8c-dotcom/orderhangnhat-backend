@@ -26,6 +26,7 @@ vi.mock("../sheets/orphanTracking.js", () => ({ createOrphanTrackingSafe: vi.fn(
 vi.mock("../scrape/scrape.service.js", () => ({ scrapeProduct: vi.fn() }));
 vi.mock("../cartons/carton.service.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
 vi.mock("./tracking.repository.js", async (orig) => ({ ...(await orig<object>()), claimOrCreateTracking: vi.fn() }));
+vi.mock("../invoices/invoice.repository.js", () => ({ createInvoiceHistory: vi.fn() }));
 
 import { trackingRouter } from "./tracking.routes.js";
 import { prisma } from "../../infrastructure/prisma.js";
@@ -33,6 +34,8 @@ import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { queueCustomerSheetSync, queueTrackingSheetRowRemoval } from "../sheets/sheet.jobs.js";
 import { claimOrCreateTracking } from "./tracking.repository.js";
 import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
+import { createInvoiceHistory } from "../invoices/invoice.repository.js";
+import { logAudit } from "../../app/audit.js";
 
 const db = prisma as any;
 const mockClaim = claimOrCreateTracking as ReturnType<typeof vi.fn>;
@@ -164,5 +167,52 @@ describe("POST /trackings/:id/resolve", () => {
     await request(buildApp()).post("/api/trackings/t1/resolve").send({ orderId: "22222222-2222-2222-2222-222222222222", reason: "gán nhầm" }).expect(200);
     expect(db.trackingLog.create.mock.calls[0][0].data).toMatchObject({ reason: "gán nhầm", oldValue: { orderId: "o1" } });
     expect(mockRecompute.mock.calls.map((c) => c[0])).toEqual(["o1", "22222222-2222-2222-2222-222222222222"]);
+  });
+});
+
+describe("POST /trackings/invoice", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const mockHistory = createInvoiceHistory as ReturnType<typeof vi.fn>;
+  const T1 = "11111111-1111-4111-8111-111111111111";
+  const T2 = "22222222-2222-4222-8222-222222222222";
+  const order = (id: string, items: { name: string; qty: number; unitPriceJpy: string }[], name = "Khach A") =>
+    ({ id, code: `JA${id}`, items, customer: { name, address: `Addr ${name}` } });
+
+  it("invoice_givenTrackings_whenExported_thenSameResponseAndHistoryRecordedInTx", async () => {
+    const trks = [
+      { id: T1, code: "C1", customsName: null, order: order("o1", [{ name: "Ao", qty: 2, unitPriceJpy: "1000" }]) },
+      { id: T2, code: "C2", customsName: "Quan ao", order: order("o2", [{ name: "Giay", qty: 1, unitPriceJpy: "500" }, { name: "Mu", qty: 1, unitPriceJpy: "300" }], "Khach B") },
+    ];
+    db.tracking.findMany.mockResolvedValue(trks);
+    mockHistory.mockResolvedValue("inv1");
+    const r = await request(buildApp()).post("/api/trackings/invoice").send({ ids: [T1, T2], note: " GB-1 " }).expect(200);
+    expect(r.body).toEqual({
+      items: [
+        { no: 1, name: "Quan ao", origin: "", unitPriceJpy: 400, unit: "pcs", qty: 2, amount: 800 },
+        { no: 2, name: "Ao", origin: "", unitPriceJpy: 1000, unit: "pcs", qty: 2, amount: 2000 },
+      ],
+      total: 2800, consignees: ["Khach A", "Khach B"], addresses: ["Addr Khach A", "Addr Khach B"],
+    });
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockHistory).toHaveBeenCalledWith(db, { createdBy: "actor1", note: "GB-1", totalJpy: 2800, lineCount: 2, trackings: trks });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "invoice.exported", targetId: "inv1" }));
+  });
+
+  it("invoice_givenNoTrackingFound_whenExported_thenEmptyResponseAndNoHistory", async () => {
+    db.tracking.findMany.mockResolvedValue([]);
+    const r = await request(buildApp()).post("/api/trackings/invoice").send({ ids: [T1] }).expect(200);
+    expect(r.body).toEqual({ items: [], total: 0, consignees: [], addresses: [] });
+    expect(mockHistory).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("invoice_givenHistoryWriteFails_whenExported_thenErrorNotPartialSuccess", async () => {
+    db.tracking.findMany.mockResolvedValue([{ id: T1, code: "C1", customsName: null, order: order("o1", []) }]);
+    mockHistory.mockRejectedValue(new Error("db down"));
+    await request(buildApp()).post("/api/trackings/invoice").send({ ids: [T1] }).expect(500);
+  });
+
+  it("invoice_givenEmptyIds_then400", async () => {
+    await request(buildApp()).post("/api/trackings/invoice").send({ ids: [] }).expect(400);
   });
 });

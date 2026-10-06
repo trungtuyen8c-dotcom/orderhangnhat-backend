@@ -55,6 +55,15 @@ export const TAX_SCAN_KINDS: FileKind[] = DOCUMENT_KINDS
   .filter((k) => k.kind === "office-zip" || k.kind === "office-ole")
   .map((k) => ({ ...k, exts: k.exts.filter((e) => e === "xlsx" || e === "xls"), maxBytes: 20 * MB }));
 
+// Hóa đơn mua đính theo tracking (M7-1): chỉ PDF / ảnh.
+const PURCHASE_INVOICE_KIND_NAMES = new Set(["pdf", "jpeg", "png", "gif", "webp", "bmp", "tiff", "heif"]);
+export const PURCHASE_INVOICE_KINDS: FileKind[] = DOCUMENT_KINDS.filter((k) => PURCHASE_INVOICE_KIND_NAMES.has(k.kind));
+
+// File sao kê ngân hàng (M9-2): CSV hoặc XLSX (exceljs không đọc được .xls cũ).
+export const STATEMENT_KINDS: FileKind[] = DOCUMENT_KINDS
+  .filter((k) => k.kind === "office-zip" || k.kind === "text")
+  .map((k) => ({ ...k, exts: k.exts.filter((e) => e === "xlsx" || e === "csv"), maxBytes: 10 * MB }));
+
 export const DOCUMENT_MAX_BYTES = Math.max(...DOCUMENT_KINDS.map((k) => k.maxBytes));
 export const TAX_SCAN_MAX_BYTES = Math.max(...TAX_SCAN_KINDS.map((k) => k.maxBytes));
 

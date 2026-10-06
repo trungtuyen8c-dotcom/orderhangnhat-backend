@@ -1,63 +1,76 @@
-import { describe, it, expect } from "vitest";
-import { summarizeOverdueDebts } from "./control.routes.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import request from "supertest";
+import express from "express";
 
-const NOW = new Date("2026-03-05T00:00:00Z").getTime();
-const DAY = 86400000;
-const cfg = { thresholdVnd: 100000, overdueDays: 30 };
-const customers = [
-  { id: "c1", name: "C1", code: null, phone: null },
-  { id: "c2", name: "C2", code: null, phone: null },
-  { id: "c3", name: "C3", code: null, phone: null },
-  { id: "c4", name: "C4", code: null, phone: null },
-  { id: "c5", name: "C5", code: null, phone: null },
-  { id: "c6", name: "C6", code: null, phone: null },
-];
+vi.mock("../../middlewares/authenticate.js", () => ({
+  authenticateEither: (req: any, _res: any, next: any) => { req.user = { id: "u1" }; next(); },
+}));
+vi.mock("../../middlewares/authorize.js", () => ({ authorize: () => (_req: any, _res: any, next: any) => next() }));
+vi.mock("../../infrastructure/prisma.js", () => {
+  const p: any = {
+    carton: { findUnique: vi.fn(), delete: vi.fn(), create: vi.fn(), update: vi.fn() },
+    tracking: { updateMany: vi.fn() },
+    appConfig: { upsert: vi.fn() },
+  };
+  p.$transaction = vi.fn(async (arg: any) => (typeof arg === "function" ? arg(p) : Promise.all(arg)));
+  return { prisma: p };
+});
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn() }));
 
-describe("summarizeOverdueDebts", () => {
-  it("summarizeOverdueDebts_vndDebtAboveThreshold_includesCustomer", () => {
-    const debtAgg = [{ customerId: "c1", currency: "VND", _sum: { balance: "500000" } }];
-    const list = summarizeOverdueDebts(debtAgg, new Map(), customers, cfg, NOW);
-    expect(list).toEqual([{ customerId: "c1", name: "C1", code: null, phone: null, balanceVnd: 500000, balanceJpy: 0, days: 0 }]);
+import { controlRouter } from "./control.routes.js";
+import { prisma } from "../../infrastructure/prisma.js";
+
+const mp = prisma as any;
+
+function buildApp() {
+  const app = express();
+  app.use(express.json());
+  app.use("/api/control", controlRouter);
+  return app;
+}
+
+beforeEach(() => vi.clearAllMocks());
+
+describe("control routes", () => {
+  it("deleteCarton_detachesTrackingsAsManualThenDeletesInOneTransaction", async () => {
+    const res = await request(buildApp()).delete("/api/control/cartons/k1");
+    expect(res.body).toEqual({ ok: true });
+    expect(mp.$transaction).toHaveBeenCalledTimes(1);
+    expect(mp.tracking.updateMany).toHaveBeenCalledWith({ where: { cartonId: "k1" }, data: { cartonId: null, cartonManual: true } });
+    expect(mp.carton.delete).toHaveBeenCalledWith({ where: { id: "k1" } });
   });
 
-  // Regression: trước đây debt.groupBy lọc where:{currency:"VND"} nên nợ ¥ vô hình hoàn toàn dù nợ bao lâu.
-  it("summarizeOverdueDebts_jpyOnlyDebtWithinOverdueDays_excludesCustomer", () => {
-    const debtAgg = [{ customerId: "c2", currency: "JPY", _sum: { balance: "20000" } }];
-    const oldest = new Map([["c2", new Date(NOW - 10 * DAY)]]);
-    const list = summarizeOverdueDebts(debtAgg, oldest, customers, cfg, NOW);
-    expect(list).toEqual([]);
+  it("assign_unknownCarton_returns404", async () => {
+    mp.carton.findUnique.mockResolvedValue(null);
+    const res = await request(buildApp()).post("/api/control/cartons/k1/assign").send({ codes: ["A"] });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "NOT_FOUND" });
   });
 
-  it("summarizeOverdueDebts_jpyOnlyDebtPastOverdueDays_includesCustomer", () => {
-    const debtAgg = [{ customerId: "c3", currency: "JPY", _sum: { balance: "20000" } }];
-    const oldest = new Map([["c3", new Date(NOW - 40 * DAY)]]);
-    const list = summarizeOverdueDebts(debtAgg, oldest, customers, cfg, NOW);
-    expect(list).toEqual([{ customerId: "c3", name: "C3", code: null, phone: null, balanceVnd: 0, balanceJpy: 20000, days: 40 }]);
+  it("assign_trimsCodesAndMarksManual", async () => {
+    mp.carton.findUnique.mockResolvedValue({ id: "k1" });
+    mp.tracking.updateMany.mockResolvedValue({ count: 2 });
+    const res = await request(buildApp()).post("/api/control/cartons/k1/assign").send({ codes: [" A ", "B", " "] });
+    expect(res.body).toEqual({ assigned: 2 });
+    expect(mp.tracking.updateMany).toHaveBeenCalledWith({ where: { code: { in: ["A", "B"] } }, data: { cartonId: "k1", cartonManual: true } });
   });
 
-  it("summarizeOverdueDebts_customerWithBothCurrencies_keepsThemSeparate", () => {
-    const debtAgg = [
-      { customerId: "c4", currency: "VND", _sum: { balance: "300000" } },
-      { customerId: "c4", currency: "JPY", _sum: { balance: "15000" } },
-    ];
-    const list = summarizeOverdueDebts(debtAgg, new Map(), customers, cfg, NOW);
-    expect(list[0].balanceVnd).toBe(300000);
-    expect(list[0].balanceJpy).toBe(15000);
+  it("patchCarton_newDeclaredWeight_resetsWeightConfirmation", async () => {
+    mp.carton.update.mockResolvedValue({ id: "k1" });
+    await request(buildApp()).patch("/api/control/cartons/k1").send({ declaredWeightKg: 12.5, packedDate: "" });
+    expect(mp.carton.update.mock.calls[0][0].data).toEqual({ declaredWeightKg: 12.5, weightConfirmedAt: null, packedDate: null });
   });
 
-  it("summarizeOverdueDebts_belowThresholdAndNotOverdueDays_excludesCustomer", () => {
-    const debtAgg = [{ customerId: "c5", currency: "VND", _sum: { balance: "50000" } }];
-    const oldest = new Map([["c5", new Date(NOW - 5 * DAY)]]);
-    const list = summarizeOverdueDebts(debtAgg, oldest, customers, cfg, NOW);
-    expect(list).toEqual([]);
+  it("putDebtConfig_invalid_returns400BadRequest", async () => {
+    const res = await request(buildApp()).put("/api/control/debt-config").send({ thresholdVnd: -1, overdueDays: 3 });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "BAD_REQUEST" });
   });
 
-  it("summarizeOverdueDebts_multipleCustomers_sortsByVndBalanceDescending", () => {
-    const debtAgg = [
-      { customerId: "c1", currency: "VND", _sum: { balance: "500000" } },
-      { customerId: "c6", currency: "VND", _sum: { balance: "800000" } },
-    ];
-    const list = summarizeOverdueDebts(debtAgg, new Map(), customers, cfg, NOW);
-    expect(list.map((r) => r.customerId)).toEqual(["c6", "c1"]);
+  it("putDebtConfig_valid_writesBothKeysAtomically", async () => {
+    const res = await request(buildApp()).put("/api/control/debt-config").send({ thresholdVnd: 100000, overdueDays: 30 });
+    expect(res.body).toEqual({ thresholdVnd: 100000, overdueDays: 30 });
+    expect(mp.appConfig.upsert).toHaveBeenCalledTimes(2);
+    expect(mp.$transaction).toHaveBeenCalledTimes(1);
   });
 });

@@ -5,8 +5,8 @@ import {
   backgroundRequest, batchUpdate, batchUpdateValues, checkboxValidationRequest, clearValidationRequest, listSheets, quotedRange, rowRange,
 } from "../../integrations/google/googleSheets.client.js";
 import type { SheetsRequest, ValueRangeUpdate } from "../../integrations/google/google.types.js";
-import { recomputeOrderTotals } from "../../utils/orderTotals.js";
-import { bumpOrderStatus } from "../../utils/orderStatus.js";
+import { recomputeOrderTotals } from "../orders/order.totals.js";
+import { bumpOrderStatus } from "../orders/order.state.js";
 import { logError } from "../../infrastructure/systemLog.js";
 import { syncCustomerOrders } from "./customerSheetSync.service.js";
 import { createOrphanTrackingSafe } from "./orphanTracking.js";

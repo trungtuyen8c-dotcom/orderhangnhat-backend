@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { applyOrderCardCharges, reverseOrderCardCharges } from "./orderCard.js";
 
-function fakeDb() {
+function fakeDb(): any {
   return {
     wallet: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
     walletTxn: { create: vi.fn(), findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn() },

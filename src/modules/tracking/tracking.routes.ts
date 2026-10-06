@@ -1,69 +1,18 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
-import { v4 as uuid } from "uuid";
-import { prisma } from "../../infrastructure/prisma.js";
+import { handle, parseOr400 } from "../../app/http/legacyError.js";
+import { readPage } from "../../app/http/pagination.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
-import { logAudit } from "../../app/audit.js";
-import { recomputeOrderTotals } from "../../utils/orderTotals.js";
-import { scrapeItem, isAllowedUrl } from "../../integrations/marketplace/scrape.js";
-import { syncTracking, removeTrackingRow } from "../sheets/trackingSheetSync.service.js";
-import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
-import { createOrphanTrackingSafe } from "../sheets/orphanTracking.js";
-import { deleteCartonIfEmpty } from "../../utils/cartons.js";
-import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
+import { scrapeProduct } from "../scrape/scrape.service.js";
+import * as svc from "./tracking.service.js";
 
 export const trackingRouter = Router();
 trackingRouter.use(authenticateEither);
 
-// Lấy tên + giá ¥ từ link sản phẩm (Yahoo Flea/Auctions, Mercari)
-trackingRouter.get("/scrape", authorize("trackings.create"), async (req, res) => {
-  const url = String(req.query.url || "");
-  if (!isAllowedUrl(url)) return res.status(400).json({ error: "BAD_URL", message: "Chỉ hỗ trợ link Yahoo / Mercari" });
-  try {
-    const data = await scrapeItem(url);
-    if (!data.name && data.priceJpy == null) return res.status(422).json({ error: "NOT_FOUND", message: "Không lấy được tên/giá, nhập tay" });
-    res.json(data);
-  } catch {
-    res.status(502).json({ error: "FETCH_FAILED", message: "Không tải được trang" });
-  }
-});
+const actor = (req: Request): svc.Actor => ({ id: req.user!.id, requestId: req.requestId });
 
-trackingRouter.get("/", authorize("trackings.list"), async (req, res) => {
-  const where: any = {};
-  if (req.query.orderId) where.orderId = String(req.query.orderId);
-  // Tồn kho = đã về kho (packedAt) nhưng chưa có tracking VN (chưa đóng đi VN)
-  if (req.query.stock === "1") { where.packedAt = { not: null }; where.OR = [{ vnTrackingCode: null }, { vnTrackingCode: "" }]; }
-  const customerQ = String(req.query.customer ?? "").trim();
-  if (customerQ) where.order = { customer: { name: { contains: customerQ, mode: "insensitive" } } };
-  const rows = await prisma.tracking.findMany({
-    where, orderBy: { createdAt: "desc" }, take: 500,
-    include: { carton: { select: { code: true } }, order: { select: { code: true, needsCheck: true, checkNote: true, exchangeRate: true, customer: { select: { name: true } }, items: { select: { url: true } } } } },
-  });
-  res.json(rows);
-});
-
-// Tra cứu nhanh: mã tracking này đã gắn đơn nào chưa - để tự điền Mã đơn khi sửa mã quét sai (đỡ gõ tay)
-trackingRouter.get("/lookup-code", authorize("trackings.create"), async (req, res) => {
-  const code = String(req.query.code ?? "").trim();
-  if (!code) return res.json({ orderCode: null });
-  const t = await prisma.tracking.findFirst({ where: { code, orderId: { not: null } }, include: { order: { select: { code: true } } } });
-  res.json({ orderCode: t?.order?.code ?? null });
-});
-
-// Gộp: gán 1 mã tracking VN cho nhiều kiện hàng (rời khỏi tồn kho)
 const assignVnSchema = z.object({ ids: z.array(z.string().uuid()).min(1), vnTrackingCode: z.string().min(1) });
-trackingRouter.post("/assign-vn", authorize("trackings.update"), async (req, res) => {
-  const p = assignVnSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids } }, data: { vnTrackingCode: p.data.vnTrackingCode.trim(), status: "vn_received" } });
-  const trks = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { orderId: true, order: { select: { customerId: true } } } });
-  const customers = new Set(trks.map((t) => t.order?.customerId).filter(Boolean) as string[]);
-  for (const c of customers) void syncCustomerOrders(c);
-  await logAudit({ actorId: req.user!.id, action: "tracking.assign_vn", metadata: { count: p.data.ids.length, vn: p.data.vnTrackingCode } });
-  res.json({ assigned: p.data.ids.length });
-});
-
 const createSchema = z.object({
   orderId: z.string().uuid().optional(),
   code: z.string().min(1),
@@ -78,85 +27,8 @@ const createSchema = z.object({
   packedAt: z.coerce.date().optional(),
   cartonId: z.string().uuid().optional(),
 });
-
-// Backfill: tạo 1 tracking trống cho mọi đơn chưa có tracking (đơn cũ)
-trackingRouter.post("/backfill", authorize("trackings.create"), async (_req, res) => {
-  const orders = await prisma.order.findMany({ where: { status: { not: "cancelled" }, trackings: { none: {} } }, select: { id: true } });
-  if (orders.length) await prisma.tracking.createMany({ data: orders.map((o) => ({ id: uuid(), orderId: o.id, code: "", status: "linked" })) });
-  res.json({ created: orders.length });
-});
-
-// Dán nhiều: gán mã tracking theo mã đơn (mỗi dòng "JA10017<tab>code")
 const bulkSchema = z.object({ items: z.array(z.object({ orderCode: z.string().min(1), code: z.string().min(1) })).min(1) });
-trackingRouter.post("/bulk", authorize("trackings.update"), async (req, res) => {
-  const p = bulkSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  let updated = 0, created = 0;
-  const notFound: string[] = [];
-  const customers = new Set<string>();
-  for (const it of p.data.items) {
-    const order = await prisma.order.findUnique({ where: { code: it.orderCode.trim() }, select: { id: true, customerId: true } });
-    if (!order) { notFound.push(it.orderCode); continue; }
-    const empty = await prisma.tracking.findFirst({ where: { orderId: order.id, code: "" } });
-    if (empty) { await prisma.tracking.update({ where: { id: empty.id }, data: { code: it.code.trim() } }); updated++; }
-    else { await claimOrCreateTracking(order.id, it.code); created++; }
-    customers.add(order.customerId);
-    await recomputeOrderTotals(order.id);
-  }
-  for (const c of customers) void syncCustomerOrders(c);
-  await logAudit({ actorId: req.user!.id, action: "tracking.bulk_assign", metadata: { updated, created, notFound: notFound.length } });
-  res.json({ updated, created, notFound });
-});
-
-// Gom dữ liệu hóa đơn (invoice) từ các tracking được chọn
 const invSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
-trackingRouter.post("/invoice", authorize("trackings.list"), async (req, res) => {
-  const p = invSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const trks = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, include: { order: { include: { items: true, customer: true } } } });
-  const orders = new Map<string, (typeof trks)[number]["order"]>();
-  for (const t of trks) if (t.order) orders.set(t.order.id, t.order);
-  const items: { no: number; name: string; origin: string; unitPriceJpy: number; unit: string; qty: number; amount: number }[] = [];
-  let no = 1, total = 0;
-  // Tracking đã có customsName (kho tự sửa tên trong sheet để dễ thông quan) -> gộp 1 dòng dùng tên đó thay vì liệt kê từng món gốc
-  const usedOrderIds = new Set<string>();
-  for (const t of trks) {
-    if (!t.order || !t.customsName) continue;
-    const amount = t.order.items.reduce((s, i) => s + i.qty * Number(i.unitPriceJpy), 0);
-    const qty = t.order.items.reduce((s, i) => s + i.qty, 0) || 1;
-    items.push({ no: no++, name: t.customsName, origin: "", unitPriceJpy: amount / qty, unit: "pcs", qty, amount });
-    total += amount;
-    usedOrderIds.add(t.order.id);
-  }
-  for (const o of orders.values()) {
-    if (usedOrderIds.has(o!.id)) continue;
-    for (const it of o!.items) {
-      const amount = it.qty * Number(it.unitPriceJpy);
-      items.push({ no: no++, name: it.name, origin: "", unitPriceJpy: Number(it.unitPriceJpy), unit: "pcs", qty: it.qty, amount });
-      total += amount;
-    }
-  }
-  const consignees = [...new Set([...orders.values()].map((o) => o!.customer?.name).filter(Boolean))] as string[];
-  const addresses = [...new Set([...orders.values()].map((o) => o!.customer?.address).filter(Boolean))] as string[];
-  res.json({ items, total, consignees, addresses });
-});
-
-// NV mua điền tracking
-trackingRouter.post("/", authorize("trackings.create"), async (req, res) => {
-  const p = createSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  // Mã này có thể đã bị kho quét trước đó (tạo mồ côi chờ gắn đơn) -> claim lại đúng dòng đó thay vì tạo trùng
-  // (giữ nguyên cân/kiện/ngày đóng đã có), tránh 1 mã tồn tại 2 Tracking (đếm dùng-chung sai, giá/tên gộp nhầm).
-  const existing = await prisma.tracking.findFirst({ where: { code: p.data.code, orderId: null } });
-  const t = existing
-    ? await prisma.tracking.update({ where: { id: existing.id }, data: { ...p.data, cartonManual: p.data.cartonId !== undefined ? true : existing.cartonManual, status: p.data.orderId ? "linked" : existing.status } })
-    : await createOrphanTrackingSafe({ id: uuid(), ...p.data, cartonManual: !!p.data.cartonId, status: p.data.orderId ? "linked" : "new" });
-  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
-  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.created", metadata: { code: t.code } });
-  void syncTracking(t);
-  res.status(201).json(t);
-});
-
 // Kho Nhật: quét ra tên + giá + cân
 const updateSchema = z.object({
   code: z.string().optional(),
@@ -176,76 +48,65 @@ const updateSchema = z.object({
   // Ngày xác nhận khách ĐÃ THỰC NHẬN hàng (khác deliveredAt = ngày tạo mã vận đơn nội địa) - set tay qua nút riêng.
   customerReceivedAt: z.coerce.date().nullable().optional(),
 });
-
-trackingRouter.patch("/:id", authorize("trackings.update"), async (req, res) => {
-  const p = updateSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const before = await prisma.tracking.findUnique({ where: { id: req.params.id }, select: { cartonId: true, code: true } });
-  // Tự tay đổi/gỡ kiện qua API này -> đánh dấu manual để sync kho không tự đè lại theo BILL/Thùng nữa.
-  const data: typeof p.data & { cartonManual?: boolean } = { ...p.data };
-  if (p.data.cartonId !== undefined) data.cartonManual = true;
-  const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
-  if (t.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
-  void syncTracking(t);
-  if (before && before.cartonId !== t.cartonId) await deleteCartonIfEmpty(before.cartonId);
-  // Sửa mã tracking qua đường nhanh (Orders...) cũng phải để lại vết - không bắt buộc nhập lý do như "Xử lý lạ",
-  // nhưng vẫn cần biết đã từng đổi từ mã gì sang mã gì để tra cứu khi có tranh chấp/nhầm lẫn.
-  if (before && p.data.code !== undefined && p.data.code !== before.code) {
-    await prisma.trackingLog.create({
-      data: { trackingId: t.id, actorId: req.user!.id, oldValue: { code: before.code }, newValue: { code: t.code }, reason: "Sửa mã tracking" },
-    });
-  }
-  res.json(t);
-});
-
-// Xử lý tracking lạ / không khớp: sửa + ghi log
 const resolveSchema = z.object({
   orderId: z.string().uuid().nullable().optional(),
   code: z.string().optional(),
   reason: z.string().min(1),
 });
 
-trackingRouter.post("/:id/resolve", authorize("trackings.resolve"), async (req, res) => {
-  const p = resolveSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const old = await prisma.tracking.findUnique({ where: { id: req.params.id } });
-  if (!old) return res.status(404).json({ error: "NOT_FOUND" });
+// Lấy tên + giá ¥ từ link sản phẩm - giữ path cũ, dùng chung logic với GET /scrape.
+trackingRouter.get("/scrape", authorize("trackings.create"), handle(async (req, res) => {
+  res.json(await scrapeProduct(String(req.query.url || "")));
+}));
 
-  const updated = await prisma.tracking.update({
-    where: { id: old.id },
-    data: {
-      orderId: p.data.orderId === undefined ? old.orderId : p.data.orderId,
-      code: p.data.code ?? old.code,
-      status: "resolved",
-    },
-  });
-  await prisma.trackingLog.create({
-    data: {
-      trackingId: old.id,
-      actorId: req.user!.id,
-      oldValue: { orderId: old.orderId, code: old.code, status: old.status },
-      newValue: { orderId: updated.orderId, code: updated.code, status: updated.status },
-      reason: p.data.reason,
-    },
-  });
-  await logAudit({ actorId: req.user!.id, targetId: old.id, action: "tracking.resolved", metadata: { reason: p.data.reason } });
-  // cập nhật tổng cả đơn cũ lẫn đơn mới nếu gán lại
-  for (const oid of new Set([old.orderId, updated.orderId].filter(Boolean) as string[])) {
-    await recomputeOrderTotals(oid);
-    const o = await prisma.order.findUnique({ where: { id: oid }, select: { customerId: true } });
-    if (o) void syncCustomerOrders(o.customerId);
-  }
-  void syncTracking(updated);
-  res.json(updated);
-});
+// Mặc định trả mảng (tối đa 500); gửi ?page= thì trả { items, pagination }.
+trackingRouter.get("/", authorize("trackings.list"), handle(async (req, res) => {
+  res.json(await svc.listTrackings({
+    orderId: req.query.orderId ? String(req.query.orderId) : undefined,
+    stock: req.query.stock === "1",
+    customer: String(req.query.customer ?? "").trim() || undefined,
+  }, readPage(req, 100, 500)));
+}));
 
-trackingRouter.delete("/:id", authorize("trackings.delete"), async (req, res) => {
-  const t = await prisma.tracking.findUnique({ where: { id: req.params.id } });
-  await prisma.trackingLog.deleteMany({ where: { trackingId: req.params.id } });
-  await prisma.tracking.delete({ where: { id: req.params.id } });
-  if (t?.orderId) { await recomputeOrderTotals(t.orderId); const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId); }
-  void removeTrackingRow(req.params.id);
-  await deleteCartonIfEmpty(t?.cartonId);
-  await logAudit({ actorId: req.user!.id, targetId: req.params.id, action: "tracking.deleted" });
+trackingRouter.get("/lookup-code", authorize("trackings.create"), handle(async (req, res) => {
+  res.json(await svc.lookupOrderCodeByTracking(String(req.query.code ?? "").trim()));
+}));
+
+trackingRouter.post("/assign-vn", authorize("trackings.update"), handle(async (req, res) => {
+  const body = parseOr400(assignVnSchema, req.body);
+  res.json(await svc.assignVnTracking(body.ids, body.vnTrackingCode, actor(req)));
+}));
+
+trackingRouter.post("/backfill", authorize("trackings.create"), handle(async (_req, res) => {
+  res.json(await svc.backfillEmptyTrackings());
+}));
+
+trackingRouter.post("/bulk", authorize("trackings.update"), handle(async (req, res) => {
+  const body = parseOr400(bulkSchema, req.body);
+  res.json(await svc.bulkAssign(body.items, actor(req)));
+}));
+
+trackingRouter.post("/invoice", authorize("trackings.list"), handle(async (req, res) => {
+  const body = parseOr400(invSchema, req.body);
+  res.json(await svc.buildInvoice(body.ids));
+}));
+
+trackingRouter.post("/", authorize("trackings.create"), handle(async (req, res) => {
+  const body = parseOr400(createSchema, req.body);
+  res.status(201).json(await svc.createTracking(body, actor(req)));
+}));
+
+trackingRouter.patch("/:id", authorize("trackings.update"), handle(async (req, res) => {
+  const body = parseOr400(updateSchema, req.body);
+  res.json(await svc.updateTracking(req.params.id, body, actor(req)));
+}));
+
+trackingRouter.post("/:id/resolve", authorize("trackings.resolve"), handle(async (req, res) => {
+  const body = parseOr400(resolveSchema, req.body);
+  res.json(await svc.resolveTracking(req.params.id, body, actor(req)));
+}));
+
+trackingRouter.delete("/:id", authorize("trackings.delete"), handle(async (req, res) => {
+  await svc.deleteTracking(req.params.id, actor(req));
   res.json({ ok: true });
-});
+}));

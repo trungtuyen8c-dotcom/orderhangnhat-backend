@@ -1,9 +1,17 @@
-import { prisma } from "../infrastructure/prisma.js";
+import type { Prisma, PrismaClient } from "@prisma/client";
+import { postWalletTxn, reverseWalletTxns } from "./wallet.service.js";
 
 type Item = { unitPriceJpy: number | any; qty: number; shipJpy?: number | any | null; paymentMethod?: string | null; purchaseDate?: Date | string | null };
-type Client = typeof prisma | any;
+type Tx = Prisma.TransactionClient;
+// Truyền `tx` (đang trong transaction của caller) để trừ thẻ cùng commit với đơn.
+// Truyền client gốc `prisma` -> tự mở transaction riêng (vẫn atomic).
+type Client = Tx | PrismaClient;
 
 const AUTO_REF = "auto:order";
+
+function inTx<T>(db: Client, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return "$transaction" in db ? (db as PrismaClient).$transaction((tx) => fn(tx)) : fn(db);
+}
 
 // Tổng tiền JPY thực trả cho 1 món (giá x sl + ship nội địa JP nếu có)
 function itemJpy(i: Item): number {
@@ -30,34 +38,29 @@ export async function applyOrderCardCharges(
   }
   if (!groups.size) return;
 
-  const wallets = await db.wallet.findMany({ where: { name: { in: [...new Set([...groups.values()].map((g) => g.name))] } } });
-  const walletByName = new Map<string, any>(wallets.map((w: any) => [w.name, w]));
-  const rate = args.exchangeRate != null ? Number(args.exchangeRate) : null;
+  await inTx(db, async (tx) => {
+    const wallets = await tx.wallet.findMany({ where: { name: { in: [...new Set([...groups.values()].map((g) => g.name))] } } });
+    const walletByName = new Map(wallets.map((w) => [w.name, w]));
+    const rate = args.exchangeRate != null ? Number(args.exchangeRate) : null;
 
-  for (const g of groups.values()) {
-    const w = walletByName.get(g.name);
-    if (!w) continue;
-    let charge: number;
-    if (w.currency === "JPY") charge = g.jpy;
-    else if (rate && rate > 0) charge = Math.round(g.jpy * rate);
-    else continue; // thẻ VND mà đơn chưa có tỉ giá -> bỏ qua, không đoán
-    if (charge <= 0) continue;
+    for (const g of groups.values()) {
+      const w = walletByName.get(g.name);
+      if (!w) continue;
+      let charge: number;
+      if (w.currency === "JPY") charge = g.jpy;
+      else if (rate && rate > 0) charge = Math.round(g.jpy * rate);
+      else continue; // thẻ VND mà đơn chưa có tỉ giá -> bỏ qua, không đoán
+      if (charge <= 0) continue;
 
-    await db.walletTxn.create({
-      data: {
+      await postWalletTxn(tx, {
         walletId: w.id, amount: -charge, type: "out", category: "Mua hàng",
         note: args.code, refOrderId: args.orderId, statementRef: AUTO_REF, createdAt: g.date,
-      },
-    });
-    await db.wallet.update({ where: { id: w.id }, data: { balance: { decrement: charge } } });
-  }
+      });
+    }
+  });
 }
 
 // Hoàn lại số dư + xóa các giao dịch "Mua hàng" auto của đơn.
 export async function reverseOrderCardCharges(db: Client, orderId: string) {
-  const txns = await db.walletTxn.findMany({ where: { refOrderId: orderId, statementRef: AUTO_REF } });
-  for (const t of txns) {
-    await db.wallet.update({ where: { id: t.walletId }, data: { balance: { increment: -Number(t.amount) } } });
-  }
-  if (txns.length) await db.walletTxn.deleteMany({ where: { refOrderId: orderId, statementRef: AUTO_REF } });
+  await inTx(db, (tx) => reverseWalletTxns(tx, { refOrderId: orderId, statementRef: AUTO_REF }));
 }

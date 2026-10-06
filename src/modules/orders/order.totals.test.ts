@@ -1,15 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../infrastructure/prisma.js", () => ({
-  prisma: {
+vi.mock("../../infrastructure/prisma.js", () => {
+  const p: any = {
     order: { findUnique: vi.fn(), update: vi.fn() },
     companyCost: { groupBy: vi.fn() },
     debt: { findFirst: vi.fn(), update: vi.fn() },
-  },
-}));
+  };
+  p.$transaction = vi.fn(async (fn: any) => fn(p));
+  return { prisma: p };
+});
 
-import { trackingShipVnd, computeDebtBalance, recomputeOrderTotals } from "./orderTotals.js";
-import { prisma } from "../infrastructure/prisma.js";
+import { trackingShipVnd, computeDebtBalance, recomputeOrderTotals } from "./order.totals.js";
+import { prisma } from "../../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   order: { findUnique: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
@@ -220,18 +222,19 @@ describe("recomputeOrderTotals", () => {
     expect(result).toEqual({ totalQuote: 10000, totalVnd: 1620000 });
   });
 
-  it("recomputeOrderTotals_commissionPercentSet_addsPercentOfSubtotalToTotalVndBeforeRate", async () => {
+  // Công (commissionPercent) KHÔNG vào totalVnd/công nợ từ v1.55.0 (commit 6c5b438) - chỉ tính riêng ở file gửi khách.
+  it("recomputeOrderTotals_commissionPercentSet_doesNotAddCommissionToTotalVnd", async () => {
     mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
       exchangeRate: "180",
       items: [{ qty: 1, unitPriceJpy: "10000", shipJpy: null }],
       commissionPercent: "10",
     }));
     const result = await recomputeOrderTotals("o1");
-    // commissionJpy = 10000*10% = 1000 -> (10000+1000)*180 = 1980000. Công không cộng vào totalQuote (giá mua thật).
-    expect(result).toEqual({ totalQuote: 10000, totalVnd: 1980000 });
+    // 10000*180 = 1800000 - công 10% không cộng vào totalVnd lẫn totalQuote.
+    expect(result).toEqual({ totalQuote: 10000, totalVnd: 1800000 });
   });
 
-  it("recomputeOrderTotals_commissionAppliesOnlyToItemsNotOrderShipFee_excludesShipAmountFromCommissionBase", async () => {
+  it("recomputeOrderTotals_commissionPercentWithOrderShipFee_totalIsItemsPlusShipWithoutCommission", async () => {
     mockPrisma.order.findUnique.mockResolvedValue(baseOrder({
       exchangeRate: "180",
       items: [{ qty: 1, unitPriceJpy: "10000", shipJpy: null }],
@@ -239,7 +242,25 @@ describe("recomputeOrderTotals", () => {
       shipAmount: "5000", shipCurrency: "JPY",
     }));
     const result = await recomputeOrderTotals("o1");
-    // commissionJpy = 10000*10% = 1000 (KHÔNG tính trên shipAmount) -> (10000+1000)*180 + 5000*180 = 1980000+900000
-    expect(result).toEqual({ totalQuote: 10000, totalVnd: 2880000 });
+    // 10000*180 + 5000*180 = 1800000 + 900000 (không có công)
+    expect(result).toEqual({ totalQuote: 10000, totalVnd: 2700000 });
+  });
+
+  it("recomputeOrderTotals_txProvided_usesTxAndDoesNotOpenNewTransaction", async () => {
+    const tx: any = {
+      order: { findUnique: vi.fn().mockResolvedValue(baseOrder({ exchangeRate: "100", items: [{ qty: 1, unitPriceJpy: "10", shipJpy: null }] })), update: vi.fn() },
+      companyCost: { groupBy: vi.fn() },
+      debt: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
+    };
+    const result = await recomputeOrderTotals("o1", tx);
+    expect(result).toEqual({ totalQuote: 10, totalVnd: 1000 });
+    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: "o1" }, data: { totalQuote: 10, totalVnd: 1000 } });
+    expect((prisma as any).$transaction).not.toHaveBeenCalled();
+  });
+
+  it("recomputeOrderTotals_noTx_wrapsTotalsAndDebtWriteInOneTransaction", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(baseOrder({ exchangeRate: "100", items: [{ qty: 1, unitPriceJpy: "10", shipJpy: null }] }));
+    await recomputeOrderTotals("o1");
+    expect((prisma as any).$transaction).toHaveBeenCalledTimes(1);
   });
 });

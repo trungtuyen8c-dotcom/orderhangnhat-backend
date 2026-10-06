@@ -1,0 +1,192 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import request from "supertest";
+import express from "express";
+
+vi.mock("../../middlewares/authenticate.js", () => ({
+  authenticateEither: (req: any, _res: any, next: any) => { req.user = { id: "u1" }; next(); },
+}));
+vi.mock("../../middlewares/authorize.js", () => ({ authorize: () => (_req: any, _res: any, next: any) => next() }));
+vi.mock("../../infrastructure/prisma.js", () => {
+  const p: any = {
+    customer: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn(), count: vi.fn() },
+    order: { groupBy: vi.fn(), count: vi.fn() },
+    debt: { groupBy: vi.fn(), count: vi.fn() },
+    customerDeposit: { groupBy: vi.fn(), count: vi.fn() },
+    payment: { findMany: vi.fn() },
+  };
+  p.$transaction = vi.fn(async (fn: any) => fn(p));
+  return { prisma: p };
+});
+vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn() }));
+vi.mock("../sheets/sheet.jobs.js", () => ({ queueCustomerSheetSync: vi.fn() }));
+vi.mock("../sheets/customerSheetSync.service.js", () => ({ syncCustomerOrders: vi.fn() }));
+
+import { customersRouter } from "./customers.routes.js";
+import { prisma } from "../../infrastructure/prisma.js";
+import { logAudit } from "../../app/audit.js";
+import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
+import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
+
+const mp = prisma as any;
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuvwxyz123/edit";
+
+function buildApp() {
+  const app = express();
+  app.use(express.json());
+  app.use("/api/customers", customersRouter);
+  return app;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mp.order.groupBy.mockResolvedValue([]);
+  mp.debt.groupBy.mockResolvedValue([]);
+  mp.customerDeposit.groupBy.mockResolvedValue([]);
+  mp.payment.findMany.mockResolvedValue([]);
+  mp.order.count.mockResolvedValue(0);
+  mp.customerDeposit.count.mockResolvedValue(0);
+  mp.debt.count.mockResolvedValue(0);
+});
+
+describe("GET /customers", () => {
+  it("list_noPage_returnsPlainArrayWithRevenueDebtAndJpyDebt", async () => {
+    mp.customer.findMany.mockResolvedValue([{ id: "c1", name: "A" }, { id: "c2", name: "B" }]);
+    mp.order.groupBy
+      .mockResolvedValueOnce([{ customerId: "c1", _sum: { totalVnd: "1000000" } }])
+      .mockResolvedValueOnce([{ customerId: "c1", _sum: { totalVnd: "900000" } }]);
+    mp.debt.groupBy.mockResolvedValue([{ customerId: "c2", _sum: { balance: "3000" } }]);
+    mp.customerDeposit.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { amountVnd: "200000" } }]);
+    mp.payment.findMany.mockResolvedValue([
+      { amountVnd: "100000", type: "payment", order: { customerId: "c1" } },
+      { amountVnd: "50000", type: "refund", order: { customerId: "c1" } },
+    ]);
+    const res = await request(buildApp()).get("/api/customers");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { id: "c1", name: "A", revenue: 1000000, debt: 900000 - (200000 + 100000 - 50000), debtJpy: 0 },
+      { id: "c2", name: "B", revenue: 0, debt: 0, debtJpy: 3000 },
+    ]);
+    expect(mp.customer.findMany).toHaveBeenCalledWith({ orderBy: { createdAt: "desc" }, skip: undefined, take: 500 });
+    expect(mp.payment.findMany.mock.calls[0][0].where).toBeUndefined();
+  });
+
+  it("list_withPage_returnsPagedEnvelopeAndScopesAggregatesToPage", async () => {
+    mp.customer.findMany.mockResolvedValue([{ id: "c3", name: "C" }]);
+    mp.customer.count.mockResolvedValue(51);
+    const res = await request(buildApp()).get("/api/customers?page=2&pageSize=50");
+    expect(res.body).toEqual({ items: [{ id: "c3", name: "C", revenue: 0, debt: 0, debtJpy: 0 }], pagination: { page: 2, pageSize: 50, total: 51, totalPages: 2 } });
+    expect(mp.customer.findMany).toHaveBeenCalledWith({ orderBy: { createdAt: "desc" }, skip: 50, take: 50 });
+    expect(mp.order.groupBy.mock.calls[0][0].where).toEqual({ customerId: { in: ["c3"] } });
+    expect(mp.payment.findMany.mock.calls[0][0].where).toEqual({ order: { customerId: { in: ["c3"] } } });
+  });
+});
+
+describe("POST /customers", () => {
+  it("create_invalidBody_returns400BadRequest", async () => {
+    const res = await request(buildApp()).post("/api/customers").send({ name: "" });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "BAD_REQUEST" });
+  });
+
+  it("create_generatesNextKhCodeAndParsesSheetId", async () => {
+    mp.customer.findFirst.mockResolvedValue({ code: "KH-0041" });
+    mp.customer.create.mockImplementation(async ({ data }: any) => data);
+    const res = await request(buildApp()).post("/api/customers").send({ name: "A", sheetUrl: SHEET_URL });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ code: "KH-0042", name: "A", sheetId: "abcdefghijklmnopqrstuvwxyz123" });
+    expect(res.body.sheetUrl).toBeUndefined();
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "customer.created" }));
+  });
+
+  it("create_noExistingCodes_startsAtKh0001", async () => {
+    mp.customer.findFirst.mockResolvedValue(null);
+    mp.customer.create.mockImplementation(async ({ data }: any) => data);
+    const res = await request(buildApp()).post("/api/customers").send({ name: "A" });
+    expect(res.body.code).toBe("KH-0001");
+  });
+});
+
+describe("PATCH /customers/:id", () => {
+  it("update_sheetUrlChanged_queuesCustomerSheetSync", async () => {
+    mp.customer.update.mockResolvedValue({ id: "c1", sheetId: "abcdefghijklmnopqrstuvwxyz123" });
+    const res = await request(buildApp()).patch("/api/customers/c1").send({ sheetUrl: SHEET_URL });
+    expect(res.status).toBe(200);
+    expect(mp.customer.update.mock.calls[0][0].data).toEqual({ sheetId: "abcdefghijklmnopqrstuvwxyz123" });
+    expect(queueCustomerSheetSync).toHaveBeenCalledWith("c1");
+  });
+
+  it("update_shipRateChanged_queuesSync", async () => {
+    mp.customer.update.mockResolvedValue({ id: "c1", sheetId: "sid" });
+    await request(buildApp()).patch("/api/customers/c1").send({ shipRatePerKg: 120000 });
+    expect(queueCustomerSheetSync).toHaveBeenCalledWith("c1");
+  });
+
+  it("update_onlyPhone_doesNotQueueSync", async () => {
+    mp.customer.update.mockResolvedValue({ id: "c1", sheetId: "sid" });
+    await request(buildApp()).patch("/api/customers/c1").send({ phone: "090" });
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
+  });
+
+  it("update_customerWithoutSheet_doesNotQueueSync", async () => {
+    mp.customer.update.mockResolvedValue({ id: "c1", sheetId: null });
+    await request(buildApp()).patch("/api/customers/c1").send({ sheetUrl: null });
+    expect(mp.customer.update.mock.calls[0][0].data).toEqual({ sheetId: null });
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /customers/:id/sync-sheet", () => {
+  it("syncSheet_unknownCustomer_returns404", async () => {
+    mp.customer.findUnique.mockResolvedValue(null);
+    const res = await request(buildApp()).post("/api/customers/x/sync-sheet");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "NOT_FOUND" });
+  });
+
+  it("syncSheet_noSheet_returns400NoSheet", async () => {
+    mp.customer.findUnique.mockResolvedValue({ id: "c1", sheetId: null });
+    const res = await request(buildApp()).post("/api/customers/c1/sync-sheet");
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "NO_SHEET", message: "Khách chưa có link Sheet" });
+  });
+
+  it("syncSheet_withSheet_runsSyncSynchronously", async () => {
+    mp.customer.findUnique.mockResolvedValue({ id: "c1", sheetId: "sid" });
+    const res = await request(buildApp()).post("/api/customers/c1/sync-sheet");
+    expect(res.body).toEqual({ ok: true });
+    expect(syncCustomerOrders).toHaveBeenCalledWith("c1");
+  });
+});
+
+describe("DELETE /customers/:id", () => {
+  it("delete_hasOrders_returns409HasOrders", async () => {
+    mp.order.count.mockResolvedValue(2);
+    const res = await request(buildApp()).delete("/api/customers/c1");
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "HAS_ORDERS", message: "Khách còn đơn, không xóa được" });
+    expect(mp.customer.delete).not.toHaveBeenCalled();
+  });
+
+  it("delete_hasDeposits_returns409HasDeposits", async () => {
+    mp.customerDeposit.count.mockResolvedValue(1);
+    const res = await request(buildApp()).delete("/api/customers/c1");
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "HAS_DEPOSITS", message: "Khách còn lịch sử cọc, không xóa được" });
+  });
+
+  it("delete_hasDebtRows_returns409HasDebts", async () => {
+    mp.debt.count.mockResolvedValue(1);
+    const res = await request(buildApp()).delete("/api/customers/c1");
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "HAS_DEBTS", message: "Khách còn công nợ, không xóa được" });
+    expect(mp.customer.delete).not.toHaveBeenCalled();
+  });
+
+  it("delete_noReferences_deletesInTransactionAndAudits", async () => {
+    const res = await request(buildApp()).delete("/api/customers/c1");
+    expect(res.body).toEqual({ ok: true });
+    expect(mp.$transaction).toHaveBeenCalled();
+    expect(mp.customer.delete).toHaveBeenCalledWith({ where: { id: "c1" } });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "customer.deleted", targetId: "c1" }));
+  });
+});

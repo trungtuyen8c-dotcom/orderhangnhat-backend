@@ -5,7 +5,7 @@ import {
   listSheetTitles, numberFormatRequest, protectedRangeRequest, sleep, updateValues,
 } from "../../integrations/google/googleSheets.client.js";
 import type { RgbColor, SheetsRequest } from "../../integrations/google/google.types.js";
-import { trackingShipVnd } from "../../utils/orderTotals.js";
+import { trackingShipVnd } from "../orders/order.totals.js";
 import { logWarn, logError } from "../../infrastructure/systemLog.js";
 import { fmtDate, vnDate } from "./sheet.utils.js";
 

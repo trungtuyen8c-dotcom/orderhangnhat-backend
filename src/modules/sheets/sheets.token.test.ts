@@ -24,8 +24,8 @@ afterEach(() => {
 
 async function loadGsheets() {
   vi.doMock("../../infrastructure/prisma.js", () => ({ prisma: {} }));
-  vi.doMock("../../utils/orderTotals.js", () => ({ recomputeOrderTotals: vi.fn(), trackingShipVnd: vi.fn() }));
-  vi.doMock("../../utils/cartons.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
+  vi.doMock("../orders/order.totals.js", () => ({ recomputeOrderTotals: vi.fn(), trackingShipVnd: vi.fn() }));
+  vi.doMock("../cartons/carton.service.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
   vi.doMock("../../infrastructure/systemLog.js", () => ({ logWarn: vi.fn(), logError: vi.fn() }));
   vi.doMock("jsonwebtoken", () => ({ default: { sign: vi.fn(() => "signed.jwt.token") } }));
   const [reader, tracking, invoiceTax, warehouse] = await Promise.all([

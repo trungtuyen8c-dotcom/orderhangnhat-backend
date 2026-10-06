@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../infrastructure/prisma.js", () => ({
+vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     tracking: { count: vi.fn() },
     carton: { delete: vi.fn() },
   },
 }));
 
-import { deleteCartonIfEmpty } from "./cartons.js";
-import { prisma } from "../infrastructure/prisma.js";
+import { deleteCartonIfEmpty } from "./carton.service.js";
+import { prisma } from "../../infrastructure/prisma.js";
 
 const mockPrisma = prisma as unknown as {
   tracking: { count: ReturnType<typeof vi.fn> };

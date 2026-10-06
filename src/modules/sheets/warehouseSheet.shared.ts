@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { backgroundRequest, clearValidationRequest, parseSheetId, quotedRange, rowRange } from "../../integrations/google/googleSheets.client.js";
 import type { SheetsRequest, ValueRangeUpdate } from "../../integrations/google/google.types.js";
-import { deleteCartonIfEmpty } from "../../utils/cartons.js";
+import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
 
 // Dùng chung cho quét file kho (cron) và khớp 1 mã (webhook).
 

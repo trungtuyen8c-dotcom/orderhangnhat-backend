@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mk } from "./companycost.routes.js";
+import { mk } from "./companycost.service.js";
 
 describe("mk", () => {
   it("mk_dateWellWithinVnMonth_returnsThatMonth", () => {

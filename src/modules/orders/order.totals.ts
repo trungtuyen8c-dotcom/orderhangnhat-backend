@@ -1,5 +1,5 @@
-import { v4 as uuid } from "uuid";
-import { prisma } from "../infrastructure/prisma.js";
+import type { Prisma } from "@prisma/client";
+import { prisma } from "../../infrastructure/prisma.js";
 
 // Tiền ship 1 tracking = cân (kg) x đơn giá/kg (quy về VND).
 // Ưu tiên cân VN (thực tế); chưa cân VN thì tạm dùng cân JP (báo trước).
@@ -32,8 +32,15 @@ export function computeDebtBalance(
 // Tính lại totalQuote (¥), totalVnd và công nợ của 1 đơn.
 // totalVnd = subtotal¥ x tỉ giá + ship + phụ thu - giảm (¥ x tỉ giá, ₫ cộng thẳng) + ship các tracking gán đơn.
 // Chưa có tỉ giá mà còn khoản ¥ chưa quy đổi -> totalVnd = null.
-export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuote: number; totalVnd: number | null } | undefined> {
-  const order = await prisma.order.findUnique({
+// Truyền `tx` khi đang ở trong 1 transaction; không truyền thì tự mở transaction riêng (totals + công nợ ghi cùng lúc).
+export type Totals = { totalQuote: number; totalVnd: number | null };
+export async function recomputeOrderTotals(orderId: string, tx?: Prisma.TransactionClient): Promise<Totals | undefined> {
+  if (!tx) return prisma.$transaction((t) => recompute(orderId, t));
+  return recompute(orderId, tx);
+}
+
+async function recompute(orderId: string, db: Prisma.TransactionClient): Promise<Totals | undefined> {
+  const order = await db.order.findUnique({
     where: { id: orderId },
     include: { items: true, trackings: true, payments: true, customer: { select: { shipRatePerKg: true } } },
   });
@@ -58,7 +65,7 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
   // 着払い/COD do kho Nhật báo theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng thẳng vào công nợ khách
   // của đúng đơn gắn mã đó. Lấy sống từ CompanyCost (không cache) -> xóa khoản là tự trừ lại ngay lần recompute sau.
   const codRows = order.trackings.length
-    ? await prisma.companyCost.groupBy({
+    ? await db.companyCost.groupBy({
         by: ["refId"],
         where: { kind: "chakubarai", refId: { in: order.trackings.map((t) => t.id) } },
         _sum: { amountVnd: true },
@@ -93,13 +100,13 @@ export async function recomputeOrderTotals(orderId: string): Promise<{ totalQuot
       + trackingShip
       + codVnd;
 
-  await prisma.order.update({ where: { id: orderId }, data: { totalQuote: subtotalJpy, totalVnd } });
+  await db.order.update({ where: { id: orderId }, data: { totalQuote: subtotalJpy, totalVnd } });
 
   // Công nợ chỉ cập nhật khi đã có (giữ nguyên: công nợ phát sinh khi ghi tiền)
-  const existing = await prisma.debt.findFirst({ where: { orderId } });
+  const existing = await db.debt.findFirst({ where: { orderId } });
   if (existing) {
     const { balance, currency } = computeDebtBalance({ totalVnd, totalQuote: subtotalJpy }, order.payments);
-    await prisma.debt.update({ where: { id: existing.id }, data: { balance, currency } });
+    await db.debt.update({ where: { id: existing.id }, data: { balance, currency } });
   }
 
   return { totalQuote: subtotalJpy, totalVnd };

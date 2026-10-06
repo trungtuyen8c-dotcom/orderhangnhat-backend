@@ -1,434 +1,154 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
-import { v4 as uuid } from "uuid";
-import { prisma } from "../../infrastructure/prisma.js";
+import { handle, parseOr400, LegacyError } from "../../app/http/legacyError.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
-import { authorize, loadPermissions } from "../../middlewares/authorize.js";
-import { logAudit } from "../../app/audit.js";
-import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
-import { syncTracking } from "../sheets/trackingSheetSync.service.js";
-import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
-import { syncPackedFromWarehouse, setDayLockFromTab, clearWarehouseRow } from "../sheets/warehouseSheetSync.service.js";
-import { syncPackedOne } from "../sheets/warehousePackedOne.service.js";
-import { recomputeOrderTotals } from "../../utils/orderTotals.js";
-import { deleteCartonIfEmpty } from "../../utils/cartons.js";
-import { claimOrCreateTracking } from "../../utils/trackingClaim.js";
-import { bumpOrderStatus } from "../../utils/orderStatus.js";
+import { authorize } from "../../middlewares/authorize.js";
+import * as cartons from "../cartons/carton.service.js";
+import * as svc from "./warehouse.service.js";
 
 export const warehouseRouter = Router();
 
+const actor = (req: Request): svc.Actor => ({ id: req.user!.id, requestId: req.requestId, roles: req.user!.roles });
+
 // Webhook cho Apps Script (KHÔNG qua JWT) — xác thực bằng key bí mật. Đặt TRƯỚC authenticate.
-warehouseRouter.post("/sync-hook", async (req, res) => {
-  const key = String(req.query.key ?? req.headers["x-hook-key"] ?? "");
-  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
-  if (!cfg?.value || key !== cfg.value) return res.status(401).json({ error: "BAD_KEY" });
-  // Kho tick Z1 (checkbox "Đã nộp hải quan") của tab -> khóa/mở khóa ngày đó ngay, không cần vào app bấm "Chốt ngày".
-  if (typeof req.body?.dayLock === "boolean" && req.body?.tab) {
-    await setDayLockFromTab(String(req.body.tab), req.body.dayLock);
-    return res.json({ ok: true });
-  }
-  // TỨC THÌ: webhook gửi mã + ô vừa gõ -> khớp đúng 1 dòng. Không có mã -> quét tab gần đây (fallback).
-  const code = req.body?.code;
-  if (code) {
-    const r = await syncPackedOne(
-      String(code),
-      req.body?.tab ? String(req.body.tab) : undefined,
-      req.body?.row ? Number(req.body.row) : undefined,
-      req.body?.bill ? String(req.body.bill) : undefined,
-      req.body?.thung ? String(req.body.thung) : undefined,
-    );
-    return res.json(r);
-  }
-  const r = await syncPackedFromWarehouse({ recentDays: 45 });
-  res.json(r);
-});
+// Key: header X-Warehouse-Webhook-Key (khuyến nghị) | ?key= / X-Hook-Key (Apps Script hiện tại vẫn gửi).
+warehouseRouter.post("/sync-hook", handle(async (req, res) => {
+  const keys = [req.query.key, req.headers["x-warehouse-webhook-key"], req.headers["x-hook-key"]]
+    .filter((k): k is string => typeof k === "string" && k.length > 0);
+  res.json(await svc.handleSyncHook(keys, req.body));
+}));
 
 warehouseRouter.use(authenticateEither);
 
-// ===== Bảng kho VN: tracking đóng từ Nhật, chia theo NGÀY > KIỆN > tracking =====
-export const dayKey = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
-export const effKg = (t: { jpWeightKg: unknown; vnWeightKg: unknown }) =>
-  t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0);
-
-// Kiện khóa cân từng mã lẻ (không khóa Tracking VN/ship) khi: thiếu 1 trong 2 tổng (kho Nhật khai báo / kho VN
-// nhập tay), hoặc 2 tổng lệch nhau >= 1kg mà chưa được Sale/NV mua bấm "Xác nhận" (weightConfirmedAt).
-const CARTON_WEIGHT_DIFF_THRESHOLD_KG = 1;
-export function cartonWeightLocked(c: { declaredWeightKg: unknown; vnTotalWeightKg: unknown; weightConfirmedAt: Date | null }): boolean {
-  const declared = c.declaredWeightKg != null ? Number(c.declaredWeightKg) : null;
-  const vnTotal = c.vnTotalWeightKg != null ? Number(c.vnTotalWeightKg) : null;
-  if (declared == null || vnTotal == null) return true;
-  return Math.abs(declared - vnTotal) >= CARTON_WEIGHT_DIFF_THRESHOLD_KG && !c.weightConfirmedAt;
-}
-
-warehouseRouter.get("/vn-board", authorize("trackings.list"), async (req, res) => {
-  const trkSelect = {
-    id: true, code: true, cartonId: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, customsName: true,
-    order: { select: { code: true, customer: { select: { name: true } } } },
-  } as const;
-  // Đã "Chuyển lưu kho" thì ra khỏi board chính (xem ở /warehouse/stored), trừ khi đã ship (có Tracking VN) thì luôn loại khỏi board.
-  // Đơn chỉ order hộ - hàng về kho khác (externalWarehouse) không qua kho VN của mình -> loại luôn khỏi board.
-  // Đơn chỉ lấy chứng từ, giao thẳng công ty (skipVnWeighing) - vẫn qua kho nhưng không cần cân -> loại khỏi board.
-  const boardWhere = { status: { not: "stored" }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], NOT: { order: { OR: [{ externalWarehouse: true }, { skipVnWeighing: true }] } } };
-  const customerQ = String(req.query.customer ?? "").trim();
-  const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
-  const [cartons, loose] = await Promise.all([
-    prisma.carton.findMany({
-      orderBy: { createdAt: "desc" },
-      include: {
-        trackings: { where: { ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "asc" }, { packRow: "asc" }] },
-        // Tổng tracking TỪNG gán vào kiện (mọi trạng thái) - phân biệt kiện mới tạo chưa gán gì (vẫn hiện để gán)
-        // với kiện đã dồn hết tracking sang Lưu kho (ẩn khỏi board, xem lại ở "Lưu kho"/"Tra cứu Kho VN").
-        _count: { select: { trackings: true } },
-      },
-    }),
-    prisma.tracking.findMany({ where: { packedAt: { not: null }, cartonId: null, ...boardWhere, ...customerFilter }, select: trkSelect, orderBy: [{ packedAt: "desc" }, { packRow: "asc" }] }),
-  ]);
-  type Day = { day: string; cartons: any[]; unassigned: any[] };
-  const days = new Map<string, Day>();
-  const getDay = (k: string) => { let d = days.get(k); if (!d) { d = { day: k, cartons: [], unassigned: [] }; days.set(k, d); } return d; };
-  const NO_DAY = "0000-00-00";
-
-  for (const c of cartons) {
-    const tDays = c.trackings.map((t) => dayKey(t.packedAt)).filter(Boolean) as string[];
-    const k = dayKey(c.packedDate) ?? (tDays.length ? tDays.sort()[0] : NO_DAY);
-    const declared = c.declaredWeightKg != null ? Number(c.declaredWeightKg) : null;
-    const vnTotalWeightKg = c.vnTotalWeightKg != null ? Number(c.vnTotalWeightKg) : null;
-    const actualKg = Number(c.trackings.reduce((s, t) => s + effKg(t), 0).toFixed(3));
-    getDay(k).cartons.push({
-      id: c.id, code: c.code, note: c.note, declaredWeightKg: declared, electronicsCount: c.electronicsCount,
-      electronicsConfirmedAt: c.electronicsConfirmedAt,
-      vnTotalWeightKg, weightConfirmedAt: c.weightConfirmedAt, weightLocked: cartonWeightLocked(c),
-      actualKg, count: c.trackings.length, everAssignedCount: c._count.trackings,
-      diffKg: declared != null ? Number((actualKg - declared).toFixed(3)) : null,
-      trackings: c.trackings,
-    });
-  }
-  for (const t of loose) getDay(dayKey(t.packedAt)!).unassigned.push(t);
-
-  // Kiện đã dồn hết tracking sang Lưu kho (0 dòng còn hiện trên board, nhưng TỪNG có tracking) không còn gì để
-  // đối soát ở đây nữa - ẩn khỏi board cho đỡ rác. Kiện mới tạo, chưa từng gán mã nào thì vẫn giữ để còn gán tiếp.
-  for (const d of days.values()) d.cartons = d.cartons.filter((c) => c.count > 0 || c.everAssignedCount === 0);
-  const out = [...days.values()].filter((d) => d.cartons.length > 0 || d.unassigned.length > 0).sort((a, b) => (a.day < b.day ? 1 : -1));
-  res.json(out);
-});
-
-// Cân VN + Tracking VN (nội địa) — việc của Kho VN, tách khỏi quyền sửa tracking (trackings.update, dành cho sale/buyer)
-// để đúng ý: kho chỉ cân + gán tracking nội địa, không tự thêm/sửa mã tracking Nhật hay gán đơn.
 const vnWeighSchema = z.object({ vnWeightKg: z.number().nonnegative().optional(), vnTrackingCode: z.string().optional(), jpWeightKg: z.number().nonnegative().optional() });
-warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = vnWeighSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const before = await prisma.tracking.findUnique({
-    where: { id: req.params.id },
-    select: { vnTrackingCode: true, cartonId: true, carton: { select: { declaredWeightKg: true, vnTotalWeightKg: true, weightConfirmedAt: true } } },
-  });
-  if (!before) return res.status(404).json({ error: "NOT_FOUND" });
-  // Cân JP (kho Nhật) là việc của Sale/NV mua (trackings.update), Kho VN chỉ cân/gán tracking VN - không được sửa cân Nhật.
-  if (p.data.jpWeightKg !== undefined && !req.user!.roles.includes("super_admin")) {
-    const perms = await loadPermissions(req.user!.id);
-    if (!perms.includes("trackings.update")) return res.status(403).json({ error: "FORBIDDEN", message: "Thiếu quyền: trackings.update" });
-  }
-  // Kiện đang khóa (thiếu tổng cân hoặc lệch >=1kg chưa xác nhận) - chặn điền cân VN từng mã lẻ, vẫn cho điền Tracking VN.
-  if (p.data.vnWeightKg !== undefined && before.carton && cartonWeightLocked(before.carton)) {
-    return res.status(423).json({ error: "CARTON_LOCKED", message: "Kiện đang khóa cân - đối soát tổng cân Nhật/VN (hoặc xác nhận lệch) trước" });
-  }
-  const data: typeof p.data & { deliveredAt?: Date | null } = { ...p.data };
-  // Điền Tracking VN lần đầu -> ghi nhận đúng ngày này là "Ngày giao cho khách hàng" trên sheet khách.
-  // Xóa trắng lại thì tự bỏ ngày đi (không giữ ngày cũ), không phải ngày lúc sync/quét lại.
-  if (p.data.vnTrackingCode !== undefined) {
-    const hadBefore = !!before.vnTrackingCode;
-    const hasNow = !!p.data.vnTrackingCode;
-    if (hasNow && !hadBefore) data.deliveredAt = new Date();
-    else if (!hasNow) data.deliveredAt = null;
-  }
-  const t = await prisma.tracking.update({ where: { id: req.params.id }, data });
-  if (t.orderId) {
-    await recomputeOrderTotals(t.orderId);
-    if (data.deliveredAt) await bumpOrderStatus(t.orderId, "delivered");
-    const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } }); if (o) void syncCustomerOrders(o.customerId);
-  }
-  void syncTracking(t);
-  res.json(t);
-});
-
-// Tổng cân VN (Kho VN tự cân, nhập tay) - phải điền trước khi mở khóa cân từng mã lẻ trong kiện. Sửa lại thì
-// reset xác nhận lệch cân cũ (nếu có), vì số vừa đổi chưa chắc còn khớp với lần xác nhận trước.
 const vnTotalSchema = z.object({ vnTotalWeightKg: z.number().nonnegative().nullable() });
-warehouseRouter.patch("/cartons/:id/vn-total", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = vnTotalSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { vnTotalWeightKg: p.data.vnTotalWeightKg, weightConfirmedAt: null } });
-  res.json(c);
-});
-
-// Sale/NV mua xác nhận đã hỏi lại kho Nhật, chấp nhận mức lệch cân hiện tại - mở khóa cân từng mã lẻ.
-warehouseRouter.post("/cartons/:id/confirm-weight", authorize("trackings.update"), async (req, res) => {
-  const carton = await prisma.carton.findUnique({ where: { id: req.params.id }, select: { declaredWeightKg: true, vnTotalWeightKg: true } });
-  if (!carton) return res.status(404).json({ error: "NOT_FOUND" });
-  if (carton.declaredWeightKg == null || carton.vnTotalWeightKg == null) return res.status(400).json({ error: "MISSING_TOTALS", message: "Cần đủ cân tổng kho Nhật và tổng cân VN trước khi xác nhận" });
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { weightConfirmedAt: new Date() } });
-  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.weight_confirmed", metadata: { declaredWeightKg: String(carton.declaredWeightKg), vnTotalWeightKg: String(carton.vnTotalWeightKg) } });
-  res.json(c);
-});
-
-// Số thiết bị điện tử (Kho VN tự đếm/kiểm tra lại khi nhận kiện) - sửa lại số thì reset xác nhận cũ.
 const electronicsSchema = z.object({ electronicsCount: z.number().int().nonnegative().nullable() });
-warehouseRouter.patch("/cartons/:id/electronics", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = electronicsSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { electronicsCount: p.data.electronicsCount, electronicsConfirmedAt: null } });
-  res.json(c);
-});
-
-// Kho VN xác nhận đã đếm thực tế khớp đúng electronicsCount đã điền.
-warehouseRouter.post("/cartons/:id/confirm-electronics", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const carton = await prisma.carton.findUnique({ where: { id: req.params.id }, select: { electronicsCount: true } });
-  if (!carton) return res.status(404).json({ error: "NOT_FOUND" });
-  if (carton.electronicsCount == null) return res.status(400).json({ error: "MISSING_COUNT", message: "Cần điền số thiết bị trước khi xác nhận" });
-  const c = await prisma.carton.update({ where: { id: req.params.id }, data: { electronicsConfirmedAt: new Date() } });
-  await logAudit({ actorId: req.user!.id, targetId: c.id, action: "carton.electronics_confirmed", metadata: { electronicsCount: String(carton.electronicsCount) } });
-  res.json(c);
-});
-
-// "Chuyển lưu kho": hàng chưa ship xong nhưng cần dọn khỏi board chính để làm ngày mới, vẫn xem/lọc lại được ở /warehouse/stored
 const storeSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
-warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = storeSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  // storedAt chỉ set lần đầu (không đè lại nếu đã có) - đúng mốc "bắt đầu nằm lưu kho" để tính tuổi tồn kho,
-  // tránh bị reset về "mới" nếu lỡ bấm "Chuyển lưu kho" lại cho hàng đã lưu kho từ trước.
-  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids }, storedAt: null }, data: { status: "stored", storedAt: new Date() } });
-  await prisma.tracking.updateMany({ where: { id: { in: p.data.ids }, storedAt: { not: null } }, data: { status: "stored" } });
-  await logAudit({ actorId: req.user!.id, action: "warehouse.store", metadata: { count: p.data.ids.length } });
-  // Đổ chữ/màu "lưu kho" ngay lên sheet khách, không đợi lần sync khác.
-  const stored = await prisma.tracking.findMany({ where: { id: { in: p.data.ids } }, select: { orderId: true, order: { select: { customerId: true } } } });
-  const customerIds = new Set(stored.map((s) => s.order?.customerId).filter((c): c is string => !!c));
-  for (const cid of customerIds) void syncCustomerOrders(cid);
-  const orderIds = [...new Set(stored.map((s) => s.orderId).filter((c): c is string => !!c))];
-  await bumpOrderStatus(orderIds, "vn_warehouse");
-  res.json({ stored: p.data.ids.length });
-});
-
-warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), async (req, res) => {
-  const customerQ = String(req.query.customer ?? "").trim();
-  const customerFilter = customerQ ? { order: { customer: { name: { contains: customerQ, mode: "insensitive" as const } } } } : {};
-  const rows = await prisma.tracking.findMany({
-    where: { status: "stored", OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }], ...customerFilter },
-    orderBy: { storedAt: "asc" }, take: 500,
-    select: {
-      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, storedAt: true,
-      carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
-    },
-  });
-  res.json(rows);
-});
-
-// Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
-// Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
-warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.history.read"), async (req, res) => {
-  const date = String(req.query.date ?? "").trim();
-  const vnCode = String(req.query.vnTrackingCode ?? "").trim();
-  const jpCode = String(req.query.code ?? "").trim();
-  const where: Record<string, unknown> = { packedAt: { not: null } };
-  if (date) { const d = new Date(date); where.packedAt = { gte: d, lt: new Date(d.getTime() + 86400000) }; }
-  if (vnCode) where.vnTrackingCode = { contains: vnCode, mode: "insensitive" };
-  if (jpCode) where.code = { contains: jpCode, mode: "insensitive" };
-  const rows = await prisma.tracking.findMany({
-    where, orderBy: { packedAt: "desc" }, take: 200,
-    select: {
-      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, deliveredAt: true,
-      storedAt: true, customerReceivedAt: true,
-      carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
-    },
-  });
-  res.json(rows);
-});
-
-// Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
-// Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
-warehouseRouter.get("/history", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const date = String(req.query.date ?? "").trim();
-  const vnCode = String(req.query.vnTrackingCode ?? "").trim();
-  const jpCode = String(req.query.code ?? "").trim();
-  const where: Record<string, unknown> = { packedAt: { not: null } };
-  if (date) { const d = new Date(date); where.packedAt = { gte: d, lt: new Date(d.getTime() + 86400000) }; }
-  if (vnCode) where.vnTrackingCode = { contains: vnCode, mode: "insensitive" };
-  if (jpCode) where.code = { contains: jpCode, mode: "insensitive" };
-  const rows = await prisma.tracking.findMany({
-    where, orderBy: { packedAt: "desc" }, take: 200,
-    select: {
-      id: true, code: true, jpWeightKg: true, vnWeightKg: true, vnTrackingCode: true, packedAt: true, deliveredAt: true,
-      carton: { select: { code: true } }, order: { select: { code: true, customer: { select: { name: true } } } },
-    },
-  });
-  res.json(rows);
-});
-
-// Thêm tracking tay vào kiện (khi seller/kho quét sai mã, đơn không tự khớp) — chỉ sale/buyer/admin (trackings.create),
-// Kho VN KHÔNG có quyền này vì là việc nội bộ gán đơn, không phải cân/ship.
 const addManualSchema = z.object({ orderCode: z.string().min(1), code: z.string().min(1), jpWeightKg: z.number().nonnegative().optional(), cartonId: z.string().uuid().optional() });
-warehouseRouter.post("/tracking", authorize("trackings.create"), async (req, res) => {
-  const p = addManualSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const order = await prisma.order.findUnique({ where: { code: p.data.orderCode.trim() }, select: { id: true, customerId: true } });
-  if (!order) return res.status(404).json({ error: "ORDER_NOT_FOUND" });
-  const code = p.data.code.trim();
-  // Đơn đã có sẵn tracking đúng mã này (vd gõ lại mã đã nhập ở ô "Điền mã" trang đơn) -> cập nhật, không tạo bản ghi trùng
-  // (trước đây tạo thẳng bản ghi mới, khiến 1 đơn có 2 tracking cùng mã, hiện lặp "mã +mã" ngoài danh sách đơn).
-  const existing = await prisma.tracking.findFirst({ where: { orderId: order.id, code } });
-  const t = existing
-    ? await prisma.tracking.update({
-        where: { id: existing.id },
-        data: { jpWeightKg: p.data.jpWeightKg, cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: existing.packedAt ?? new Date(), status: "linked" },
-      })
-    // Mã có thể đã bị kho quét trước đó (mồ côi ở đơn khác/chưa gắn đơn) -> claim lại thay vì tạo trùng
-    : await claimOrCreateTracking(order.id, code, {
-        jpWeightKg: p.data.jpWeightKg, cartonId: p.data.cartonId, cartonManual: !!p.data.cartonId, packedAt: new Date(),
-      });
-  await recomputeOrderTotals(order.id);
-  void syncCustomerOrders(order.customerId);
-  void syncTracking(t);
-  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_added_manual", metadata: { orderCode: p.data.orderCode, code: p.data.code } });
-  res.status(201).json(t);
-});
-
-// Gỡ tracking khỏi Kho VN: nếu mồ côi (không thuộc đơn nào) thì xóa hẳn - an toàn vì không có gì để mất.
-// Nếu thuộc đơn thật thì KHÔNG xóa (dữ liệu đơn/kế toán phải giữ nguyên) - chỉ reset trạng thái đóng gói
-// để biến mất khỏi board, quét sheet lại vẫn tự nhảy vào bình thường.
-warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), async (req, res) => {
-  const t = await prisma.tracking.findUnique({ where: { id: req.params.id } });
-  if (!t) return res.status(404).json({ error: "NOT_FOUND" });
-  // Gỡ qua APP (không phải kho tự xóa mã trong sheet) - cron quét file kho sẽ không còn cơ hội tự dọn màu/nội
-  // dung dòng vật lý từng chiếm nữa (nhất là sau khi packedAt/packRow reset), nên phải tự dọn ngay ở đây.
-  void clearWarehouseRow(t.packedAt, t.packRow);
-  if (!t.orderId) {
-    await prisma.trackingLog.deleteMany({ where: { trackingId: t.id } });
-    await prisma.tracking.delete({ where: { id: t.id } });
-    await logAudit({ actorId: req.user!.id, targetId: t.id, action: "tracking.deleted", metadata: { code: t.code } });
-  } else {
-    await prisma.tracking.update({
-      where: { id: t.id },
-      data: { packedAt: null, packRow: null, cartonId: null, cartonManual: false, vnWeightKg: null, vnTrackingCode: null, status: "linked", lateAfterLock: false, deliveredAt: null },
-    });
-    await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.tracking_unpacked", metadata: { code: t.code } });
-    // Gỡ khỏi Kho VN thì sheet khách cũng phải tự mất theo (cân/lưu kho/tracking VN/ngày giao) - không đợi sync khác.
-    await recomputeOrderTotals(t.orderId);
-    const o = await prisma.order.findUnique({ where: { id: t.orderId }, select: { customerId: true } });
-    if (o) void syncCustomerOrders(o.customerId);
-  }
-  await deleteCartonIfEmpty(t.cartonId);
-  res.json({ ok: true });
-});
-
-async function getHookKey(): Promise<string> {
-  const existing = await prisma.appConfig.findUnique({ where: { key: "warehouse_hook_key" } });
-  if (existing?.value) return existing.value;
-  const k = (uuid() + uuid()).replace(/-/g, "");
-  await prisma.appConfig.upsert({ where: { key: "warehouse_hook_key" }, update: { value: k }, create: { key: "warehouse_hook_key", value: k } });
-  return k;
-}
-
-// Link file kho (bên đóng hàng quét tracking) — lưu trong AppConfig
-warehouseRouter.get("/pack-config", authorize("system.manage_settings"), async (req, res) => {
-  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
-  const hookKey = await getHookKey();
-  const hookUrl = `${req.protocol}://${req.get("host")}/api/warehouse/sync-hook?key=${hookKey}`;
-  res.json({ sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null, hookUrl });
-});
-
 const packCfgSchema = z.object({ sheetUrl: z.string().nullable().optional() });
-warehouseRouter.put("/pack-config", authorize("system.manage_settings"), async (req, res) => {
-  const p = packCfgSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const url = (p.data.sheetUrl ?? "").trim();
-  if (url && !parseSheetId(url)) return res.status(400).json({ error: "BAD_URL", message: "Link Google Sheet không hợp lệ" });
-  await prisma.appConfig.upsert({ where: { key: "warehouse_sheet_id" }, update: { value: url }, create: { key: "warehouse_sheet_id", value: url } });
-  await logAudit({ actorId: req.user!.id, action: "warehouse.pack_config_set" });
-  res.json({ sheetUrl: url, sheetId: url ? parseSheetId(url) : null });
-});
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const dayLockSchema = z.object({ date: z.string().regex(DATE_RE) });
+const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });
+const jpSchema = z.object({ trackingId: z.string().uuid(), jpWeightKg: z.number().nonnegative() });
+const vnSchema = z.object({ orderId: z.string().uuid(), vnWeight: z.number().nonnegative(), note: z.string().optional() });
 
-// Quét file kho ngay: mã trùng -> đóng hàng về (cam)
-warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), async (req, res) => {
-  const r = await syncPackedFromWarehouse();
-  await logAudit({ actorId: req.user!.id, action: "warehouse.sync_pack", metadata: r });
-  res.json(r);
-});
+const customerQuery = (req: Request) => String(req.query.customer ?? "").trim() || undefined;
 
-// "Chốt ngày" khai hải quan: mã tracking quét vào SAU khi ngày đã chốt sẽ bị đánh dấu lateAfterLock,
-// không gộp vào invoice ngày đó nữa (xem modules/sheets syncPackedOne/syncPackedFromWarehouse).
-// Đọc (không sửa) - mở cho shipments.list dùng để lọc "Cần lấy thuế" theo ngày chuyến/chốt hải quan.
-warehouseRouter.get("/day-locks", authorize("shipments.list"), async (_req, res) => {
-  const rows = await prisma.packDayLock.findMany({ orderBy: { date: "desc" }, take: 60 });
-  res.json(rows);
-});
-const dayLockSchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
-warehouseRouter.post("/day-locks", authorize("system.manage_settings"), async (req, res) => {
-  const p = dayLockSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const date = new Date(`${p.data.date}T00:00:00`);
-  const row = await prisma.packDayLock.upsert({ where: { date }, update: {}, create: { date, lockedBy: req.user!.id } });
-  await logAudit({ actorId: req.user!.id, action: "warehouse.day_lock", metadata: { date: p.data.date } });
-  res.status(201).json(row);
-});
-warehouseRouter.delete("/day-locks/:date", authorize("system.manage_settings"), async (req, res) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "BAD_REQUEST" });
-  const date = new Date(`${req.params.date}T00:00:00`);
-  await prisma.packDayLock.deleteMany({ where: { date } });
-  await logAudit({ actorId: req.user!.id, action: "warehouse.day_unlock", metadata: { date: req.params.date } });
+warehouseRouter.get("/vn-board", authorize("trackings.list"), handle(async (req, res) => {
+  res.json(await svc.getVnBoard(customerQuery(req)));
+}));
+
+// Cân VN + Tracking VN (nội địa) — quyền warehouse.weigh_vn; sửa cân JP thì cần thêm trackings.update (kiểm trong service).
+warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(vnWeighSchema, req.body);
+  res.json(await svc.weighVn(req.params.id, body, actor(req)));
+}));
+
+warehouseRouter.patch("/cartons/:id/vn-total", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(vnTotalSchema, req.body);
+  res.json(await cartons.setVnTotalWeight(req.params.id, body.vnTotalWeightKg, actor(req)));
+}));
+
+warehouseRouter.post("/cartons/:id/confirm-weight", authorize("trackings.update"), handle(async (req, res) => {
+  res.json(await cartons.confirmWeight(req.params.id, actor(req)));
+}));
+
+warehouseRouter.patch("/cartons/:id/electronics", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(electronicsSchema, req.body);
+  res.json(await cartons.setElectronicsCount(req.params.id, body.electronicsCount));
+}));
+
+warehouseRouter.post("/cartons/:id/confirm-electronics", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  res.json(await cartons.confirmElectronics(req.params.id, actor(req)));
+}));
+
+warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(storeSchema, req.body);
+  res.json(await svc.storeTrackings(body.ids, actor(req)));
+}));
+
+warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), handle(async (req, res) => {
+  res.json(await svc.listStored(customerQuery(req)));
+}));
+
+// Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
+// Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
+warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.history.read"), handle(async (req, res) => {
+  res.json(await svc.searchHistory({
+    date: String(req.query.date ?? "").trim() || undefined,
+    vnTrackingCode: String(req.query.vnTrackingCode ?? "").trim() || undefined,
+    code: String(req.query.code ?? "").trim() || undefined,
+  }));
+}));
+
+// Thêm tracking tay vào kiện — chỉ sale/buyer/admin (trackings.create), Kho VN KHÔNG có quyền này vì là việc nội bộ gán đơn.
+warehouseRouter.post("/tracking", authorize("trackings.create"), handle(async (req, res) => {
+  const body = parseOr400(addManualSchema, req.body);
+  res.status(201).json(await svc.addManualTracking(body, actor(req)));
+}));
+
+warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), handle(async (req, res) => {
+  await svc.removeFromVnWarehouse(req.params.id, actor(req));
   res.json({ ok: true });
-});
+}));
+
+warehouseRouter.get("/pack-config", authorize("system.manage_settings"), handle(async (req, res) => {
+  res.json(await svc.getPackConfig(`${req.protocol}://${req.get("host")}`));
+}));
+
+warehouseRouter.put("/pack-config", authorize("system.manage_settings"), handle(async (req, res) => {
+  const body = parseOr400(packCfgSchema, req.body);
+  res.json(await svc.setPackConfig(body.sheetUrl, actor(req)));
+}));
+
+warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), handle(async (req, res) => {
+  res.json(await svc.syncPackNow(actor(req)));
+}));
+
+// Đọc (không sửa) - mở cho shipments.list dùng để lọc "Cần lấy thuế" theo ngày chuyến/chốt hải quan.
+warehouseRouter.get("/day-locks", authorize("shipments.list"), handle(async (_req, res) => {
+  res.json(await svc.listDayLocks());
+}));
+
+warehouseRouter.post("/day-locks", authorize("system.manage_settings"), handle(async (req, res) => {
+  const body = parseOr400(dayLockSchema, req.body);
+  res.status(201).json(await svc.lockDay(body.date, actor(req)));
+}));
+
+warehouseRouter.delete("/day-locks/:date", authorize("system.manage_settings"), handle(async (req, res) => {
+  if (!DATE_RE.test(req.params.date)) throw new LegacyError(400, "BAD_REQUEST");
+  await svc.unlockDay(req.params.date, actor(req));
+  res.json({ ok: true });
+}));
 
 // Danh sách tracking quét sau khi ngày đã chốt - cần khai bổ sung hải quan riêng
-warehouseRouter.get("/late-after-lock", authorize("system.manage_settings"), async (_req, res) => {
-  const rows = await prisma.tracking.findMany({
-    where: { lateAfterLock: true },
-    orderBy: { packedAt: "desc" }, take: 200,
-    select: { id: true, code: true, packedAt: true, order: { select: { code: true, customer: { select: { name: true } } } } },
-  });
-  res.json(rows);
-});
-warehouseRouter.post("/late-after-lock/:id/resolve", authorize("system.manage_settings"), async (req, res) => {
-  await prisma.tracking.update({ where: { id: req.params.id }, data: { lateAfterLock: false } });
+warehouseRouter.get("/late-after-lock", authorize("system.manage_settings"), handle(async (_req, res) => {
+  res.json(await svc.listLateAfterLock());
+}));
+
+warehouseRouter.post("/late-after-lock/:id/resolve", authorize("system.manage_settings"), handle(async (req, res) => {
+  await svc.resolveLateAfterLock(req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // Kho VN: nhập mã tracking nội địa VN cho 1 tracking
-const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });
-warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = vnTrackSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.update({ where: { id: p.data.trackingId }, data: { vnTrackingCode: p.data.vnTrackingCode } });
-  void syncTracking(t);
-  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.vn_tracking_set" });
-  res.json(t);
-});
+warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(vnTrackSchema, req.body);
+  res.json(await svc.setVnTrackingCode(body.trackingId, body.vnTrackingCode, actor(req)));
+}));
 
 // Cân Nhật: cập nhật cân cho tracking
-const jpSchema = z.object({ trackingId: z.string().uuid(), jpWeightKg: z.number().nonnegative() });
-warehouseRouter.post("/jp-weight", authorize("warehouse.weigh_jp"), async (req, res) => {
-  const p = jpSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const t = await prisma.tracking.update({ where: { id: p.data.trackingId }, data: { jpWeightKg: p.data.jpWeightKg } });
-  await logAudit({ actorId: req.user!.id, targetId: t.id, action: "warehouse.jp_weighed" });
-  res.json(t);
-});
+warehouseRouter.post("/jp-weight", authorize("warehouse.weigh_jp"), handle(async (req, res) => {
+  const body = parseOr400(jpSchema, req.body);
+  res.json(await svc.setJpWeight(body.trackingId, body.jpWeightKg, actor(req)));
+}));
 
 // Cân VN + đối soát chênh cân (so với tổng cân Nhật của đơn)
-const vnSchema = z.object({ orderId: z.string().uuid(), vnWeight: z.number().nonnegative(), note: z.string().optional() });
-warehouseRouter.post("/vn-weight", authorize("warehouse.weigh_vn"), async (req, res) => {
-  const p = vnSchema.safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "BAD_REQUEST" });
-  const trackings = await prisma.tracking.findMany({ where: { orderId: p.data.orderId } });
-  const jpWeight = trackings.reduce((s, t) => s + Number(t.jpWeightKg ?? 0), 0);
-  const diff = Number((p.data.vnWeight - jpWeight).toFixed(3));
-  const recon = await prisma.weightRecon.create({
-    data: { id: uuid(), orderId: p.data.orderId, jpWeight, vnWeight: p.data.vnWeight, diffKg: diff, note: p.data.note },
-  });
-  await logAudit({ actorId: req.user!.id, targetId: p.data.orderId, action: "warehouse.vn_weighed", metadata: { jpWeight, vnWeight: p.data.vnWeight, diff } });
-  res.status(201).json(recon);
-});
+warehouseRouter.post("/vn-weight", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+  const body = parseOr400(vnSchema, req.body);
+  res.status(201).json(await svc.reconcileOrderWeight(body, actor(req)));
+}));
 
-warehouseRouter.get("/recon", authorize("warehouse.weigh_vn", "warehouse.recon.read"), async (_req, res) => {
-  const rows = await prisma.weightRecon.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
-  res.json(rows);
-});
+warehouseRouter.get("/recon", authorize("warehouse.weigh_vn", "warehouse.recon.read"), handle(async (_req, res) => {
+  res.json(await svc.listRecon());
+}));

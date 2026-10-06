@@ -1,4 +1,5 @@
 import { mkdirSync } from "fs";
+import { AppError } from "../../app/errors/AppError.js";
 import { open, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -136,9 +137,9 @@ function wrapMulter(mw: RequestHandler, maxBytes: number): RequestHandler {
       if (!err) return next();
       if (err instanceof multer.MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
-          return res.status(413).json({ error: "FILE_TOO_LARGE", message: `File quá lớn (tối đa ${Math.round(maxBytes / MB)}MB)` });
+          return next(new AppError("FILE_TOO_LARGE", 413, `File quá lớn (tối đa ${Math.round(maxBytes / MB)}MB)`));
         }
-        return res.status(400).json({ error: "BAD_REQUEST", message: err.message });
+        return next(new AppError("BAD_REQUEST", 400, err.message));
       }
       next(err);
     });

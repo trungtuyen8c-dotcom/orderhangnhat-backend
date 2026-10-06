@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { eventBus } from "../../app/events/EventBus.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 export type Actor = { id: string; requestId?: string };
 
@@ -58,9 +58,9 @@ export async function setVnTotalWeight(id: string, vnTotalWeightKg: number | nul
 // Sale/NV mua xác nhận đã hỏi lại kho Nhật, chấp nhận mức lệch cân hiện tại - mở khóa cân từng mã lẻ.
 export async function confirmWeight(id: string, actor: Actor) {
   const carton = await prisma.carton.findUnique({ where: { id }, select: { declaredWeightKg: true, vnTotalWeightKg: true } });
-  if (!carton) throw new LegacyError(404, "NOT_FOUND");
+  if (!carton) throw new AppError("NOT_FOUND", 404);
   if (carton.declaredWeightKg == null || carton.vnTotalWeightKg == null) {
-    throw new LegacyError(400, "MISSING_TOTALS", "Cần đủ cân tổng kho Nhật và tổng cân VN trước khi xác nhận");
+    throw new AppError("MISSING_TOTALS", 400, "Cần đủ cân tổng kho Nhật và tổng cân VN trước khi xác nhận");
   }
   const c = await prisma.carton.update({ where: { id }, data: { weightConfirmedAt: new Date() } });
   const metadata = { declaredWeightKg: String(carton.declaredWeightKg), vnTotalWeightKg: String(carton.vnTotalWeightKg) };
@@ -77,8 +77,8 @@ export function setElectronicsCount(id: string, electronicsCount: number | null)
 // Kho VN xác nhận đã đếm thực tế khớp đúng electronicsCount đã điền.
 export async function confirmElectronics(id: string, actor: Actor) {
   const carton = await prisma.carton.findUnique({ where: { id }, select: { electronicsCount: true } });
-  if (!carton) throw new LegacyError(404, "NOT_FOUND");
-  if (carton.electronicsCount == null) throw new LegacyError(400, "MISSING_COUNT", "Cần điền số thiết bị trước khi xác nhận");
+  if (!carton) throw new AppError("NOT_FOUND", 404);
+  if (carton.electronicsCount == null) throw new AppError("MISSING_COUNT", 400, "Cần điền số thiết bị trước khi xác nhận");
   const c = await prisma.carton.update({ where: { id }, data: { electronicsConfirmedAt: new Date() } });
   await logAudit({ actorId: actor.id, targetId: c.id, action: "carton.electronics_confirmed", metadata: { electronicsCount: String(carton.electronicsCount) }, requestId: actor.requestId });
   return c;

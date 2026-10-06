@@ -177,7 +177,7 @@ describe("ext /reports dispatcher", () => {
     const res = await request(buildApp()).get("/api/ext/reports?report=nope").set("x-api-key", RAW);
     expect(res.status).toBe(501);
     expect(res.body.error).toBe("NOT_IMPLEMENTED");
-    expect(res.body.available).toEqual(Object.keys(REPORTS));
+    expect(res.body.detail.available).toEqual(Object.keys(REPORTS));
   });
 
   it("reports_everyReportHasAScope", () => {

@@ -17,7 +17,7 @@ vi.mock("../auth/password.js", () => ({ hashPassword: vi.fn().mockResolvedValue(
 import { buildAuditWhere, listAudit, deleteUser, findEditableRole, createUser, assignRoles } from "./admin.service.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { invalidatePermissions } from "../../middlewares/authorize.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 const mp = prisma as any;
 const actor = { id: "admin-1" };
@@ -78,7 +78,7 @@ describe("deleteUser", () => {
 
   it("deleteUser_notFound_throws404", async () => {
     mp.user.findUnique.mockResolvedValue(null);
-    await expect(deleteUser("u2", actor)).rejects.toBeInstanceOf(LegacyError);
+    await expect(deleteUser("u2", actor)).rejects.toBeInstanceOf(AppError);
   });
 });
 
@@ -88,7 +88,7 @@ describe("findEditableRole", () => {
   it("findEditableRole_superAdminRole_throws403Protected", async () => {
     mp.role.findUnique.mockResolvedValue({ id: 1, key: "super_admin" });
     const err = await findEditableRole("super_admin").catch((e) => e);
-    expect((err as LegacyError).toBody()).toEqual({ error: "PROTECTED", message: "Không sửa được super_admin" });
+    expect((err as AppError).toBody()).toEqual({ error: "PROTECTED", message: "Không sửa được super_admin" });
   });
 });
 

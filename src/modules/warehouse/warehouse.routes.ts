@@ -1,6 +1,8 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
-import { handle, parseOr400, LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
+import { asyncHandler } from "../../app/http/asyncHandler.js";
+import { parseOr400 } from "../../app/http/parse.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import * as cartons from "../cartons/carton.service.js";
@@ -12,7 +14,7 @@ const actor = (req: Request): svc.Actor => ({ id: req.user!.id, requestId: req.r
 
 // Webhook cho Apps Script (KHÔNG qua JWT) — xác thực bằng key bí mật. Đặt TRƯỚC authenticate.
 // Key: header X-Warehouse-Webhook-Key (khuyến nghị) | ?key= / X-Hook-Key (Apps Script hiện tại vẫn gửi).
-warehouseRouter.post("/sync-hook", handle(async (req, res) => {
+warehouseRouter.post("/sync-hook", asyncHandler(async (req, res) => {
   const keys = [req.query.key, req.headers["x-warehouse-webhook-key"], req.headers["x-hook-key"]]
     .filter((k): k is string => typeof k === "string" && k.length > 0);
   res.json(await svc.handleSyncHook(keys, req.body));
@@ -34,46 +36,46 @@ const vnSchema = z.object({ orderId: z.string().uuid(), vnWeight: z.number().non
 
 const customerQuery = (req: Request) => String(req.query.customer ?? "").trim() || undefined;
 
-warehouseRouter.get("/vn-board", authorize("trackings.list"), handle(async (req, res) => {
+warehouseRouter.get("/vn-board", authorize("trackings.list"), asyncHandler(async (req, res) => {
   res.json(await svc.getVnBoard(customerQuery(req)));
 }));
 
 // Cân VN + Tracking VN (nội địa) — quyền warehouse.weigh_vn; sửa cân JP thì cần thêm trackings.update (kiểm trong service).
-warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.patch("/tracking/:id/vn", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(vnWeighSchema, req.body);
   res.json(await svc.weighVn(req.params.id, body, actor(req)));
 }));
 
-warehouseRouter.patch("/cartons/:id/vn-total", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.patch("/cartons/:id/vn-total", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(vnTotalSchema, req.body);
   res.json(await cartons.setVnTotalWeight(req.params.id, body.vnTotalWeightKg, actor(req)));
 }));
 
-warehouseRouter.post("/cartons/:id/confirm-weight", authorize("trackings.update"), handle(async (req, res) => {
+warehouseRouter.post("/cartons/:id/confirm-weight", authorize("trackings.update"), asyncHandler(async (req, res) => {
   res.json(await cartons.confirmWeight(req.params.id, actor(req)));
 }));
 
-warehouseRouter.patch("/cartons/:id/electronics", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.patch("/cartons/:id/electronics", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(electronicsSchema, req.body);
   res.json(await cartons.setElectronicsCount(req.params.id, body.electronicsCount));
 }));
 
-warehouseRouter.post("/cartons/:id/confirm-electronics", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.post("/cartons/:id/confirm-electronics", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   res.json(await cartons.confirmElectronics(req.params.id, actor(req)));
 }));
 
-warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.post("/store", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(storeSchema, req.body);
   res.json(await svc.storeTrackings(body.ids, actor(req)));
 }));
 
-warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), handle(async (req, res) => {
+warehouseRouter.get("/stored", authorize("warehouse.weigh_vn", "warehouse.stored.read"), asyncHandler(async (req, res) => {
   res.json(await svc.listStored(customerQuery(req)));
 }));
 
 // Tra cứu kho VN: toàn bộ tracking từng qua kho (đã ship lẫn chưa ship), lọc theo ngày lưu kho / mã tracking VN / mã tracking Nhật.
 // Khác /stored (chỉ hàng CHƯA ship) - đây là lịch sử tra cứu, không giới hạn trạng thái.
-warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.history.read"), handle(async (req, res) => {
+warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.history.read"), asyncHandler(async (req, res) => {
   res.json(await svc.searchHistory({
     date: String(req.query.date ?? "").trim() || undefined,
     vnTrackingCode: String(req.query.vnTrackingCode ?? "").trim() || undefined,
@@ -82,73 +84,73 @@ warehouseRouter.get("/history", authorize("warehouse.weigh_vn", "warehouse.histo
 }));
 
 // Thêm tracking tay vào kiện — chỉ sale/buyer/admin (trackings.create), Kho VN KHÔNG có quyền này vì là việc nội bộ gán đơn.
-warehouseRouter.post("/tracking", authorize("trackings.create"), handle(async (req, res) => {
+warehouseRouter.post("/tracking", authorize("trackings.create"), asyncHandler(async (req, res) => {
   const body = parseOr400(addManualSchema, req.body);
   res.status(201).json(await svc.addManualTracking(body, actor(req)));
 }));
 
-warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), handle(async (req, res) => {
+warehouseRouter.delete("/tracking/:id", authorize("trackings.delete"), asyncHandler(async (req, res) => {
   await svc.removeFromVnWarehouse(req.params.id, actor(req));
   res.json({ ok: true });
 }));
 
-warehouseRouter.get("/pack-config", authorize("system.manage_settings"), handle(async (req, res) => {
+warehouseRouter.get("/pack-config", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   res.json(await svc.getPackConfig(`${req.protocol}://${req.get("host")}`));
 }));
 
-warehouseRouter.put("/pack-config", authorize("system.manage_settings"), handle(async (req, res) => {
+warehouseRouter.put("/pack-config", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   const body = parseOr400(packCfgSchema, req.body);
   res.json(await svc.setPackConfig(body.sheetUrl, actor(req)));
 }));
 
-warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), handle(async (req, res) => {
+warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   res.json(await svc.syncPackNow(actor(req)));
 }));
 
 // Đọc (không sửa) - mở cho shipments.list dùng để lọc "Cần lấy thuế" theo ngày chuyến/chốt hải quan.
-warehouseRouter.get("/day-locks", authorize("shipments.list"), handle(async (_req, res) => {
+warehouseRouter.get("/day-locks", authorize("shipments.list"), asyncHandler(async (_req, res) => {
   res.json(await svc.listDayLocks());
 }));
 
-warehouseRouter.post("/day-locks", authorize("system.manage_settings"), handle(async (req, res) => {
+warehouseRouter.post("/day-locks", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   const body = parseOr400(dayLockSchema, req.body);
   res.status(201).json(await svc.lockDay(body.date, actor(req)));
 }));
 
-warehouseRouter.delete("/day-locks/:date", authorize("system.manage_settings"), handle(async (req, res) => {
-  if (!DATE_RE.test(req.params.date)) throw new LegacyError(400, "BAD_REQUEST");
+warehouseRouter.delete("/day-locks/:date", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
+  if (!DATE_RE.test(req.params.date)) throw new AppError("BAD_REQUEST", 400);
   await svc.unlockDay(req.params.date, actor(req));
   res.json({ ok: true });
 }));
 
 // Danh sách tracking quét sau khi ngày đã chốt - cần khai bổ sung hải quan riêng
-warehouseRouter.get("/late-after-lock", authorize("system.manage_settings"), handle(async (_req, res) => {
+warehouseRouter.get("/late-after-lock", authorize("system.manage_settings"), asyncHandler(async (_req, res) => {
   res.json(await svc.listLateAfterLock());
 }));
 
-warehouseRouter.post("/late-after-lock/:id/resolve", authorize("system.manage_settings"), handle(async (req, res) => {
+warehouseRouter.post("/late-after-lock/:id/resolve", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   await svc.resolveLateAfterLock(req.params.id);
   res.json({ ok: true });
 }));
 
 // Kho VN: nhập mã tracking nội địa VN cho 1 tracking
-warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.post("/vn-tracking", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(vnTrackSchema, req.body);
   res.json(await svc.setVnTrackingCode(body.trackingId, body.vnTrackingCode, actor(req)));
 }));
 
 // Cân Nhật: cập nhật cân cho tracking
-warehouseRouter.post("/jp-weight", authorize("warehouse.weigh_jp"), handle(async (req, res) => {
+warehouseRouter.post("/jp-weight", authorize("warehouse.weigh_jp"), asyncHandler(async (req, res) => {
   const body = parseOr400(jpSchema, req.body);
   res.json(await svc.setJpWeight(body.trackingId, body.jpWeightKg, actor(req)));
 }));
 
 // Cân VN + đối soát chênh cân (so với tổng cân Nhật của đơn)
-warehouseRouter.post("/vn-weight", authorize("warehouse.weigh_vn"), handle(async (req, res) => {
+warehouseRouter.post("/vn-weight", authorize("warehouse.weigh_vn"), asyncHandler(async (req, res) => {
   const body = parseOr400(vnSchema, req.body);
   res.status(201).json(await svc.reconcileOrderWeight(body, actor(req)));
 }));
 
-warehouseRouter.get("/recon", authorize("warehouse.weigh_vn", "warehouse.recon.read"), handle(async (_req, res) => {
+warehouseRouter.get("/recon", authorize("warehouse.weigh_vn", "warehouse.recon.read"), asyncHandler(async (_req, res) => {
   res.json(await svc.listRecon());
 }));

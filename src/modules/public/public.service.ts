@@ -1,5 +1,5 @@
 import { prisma } from "../../infrastructure/prisma.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 // Khách tra cứu trạng thái đơn (read-only) - select whitelist, KHÔNG lộ giá vốn/ví.
 export async function getPublicOrder(token: string) {
@@ -12,6 +12,6 @@ export async function getPublicOrder(token: string) {
       trackings: { select: { code: true, status: true } },
     },
   });
-  if (!order) throw new LegacyError(404, "NOT_FOUND");
+  if (!order) throw new AppError("NOT_FOUND", 404);
   return order;
 }

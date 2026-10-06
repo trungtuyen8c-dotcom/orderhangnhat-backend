@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { handle, parseOr400 } from "../../app/http/legacyError.js";
+import { asyncHandler } from "../../app/http/asyncHandler.js";
+import { parseOr400 } from "../../app/http/parse.js";
 import { logError } from "../../infrastructure/systemLog.js";
 
 export const clientLogsRouter = Router();
@@ -14,7 +15,7 @@ const bodySchema = z.object({
   userEmail: z.string().max(200).optional(),
 });
 
-clientLogsRouter.post("/", handle((req, res) => {
+clientLogsRouter.post("/", asyncHandler((req, res) => {
   const { message, ...meta } = parseOr400(bodySchema, req.body);
   logError({ source: "frontend", request_id: req.requestId, ...meta }, message);
   res.status(202).json({ ok: true });

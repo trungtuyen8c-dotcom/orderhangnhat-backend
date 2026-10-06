@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { errorHandler } from "../app/errors/errorHandler.js";
 
 vi.mock("../infrastructure/prisma.js", () => ({
   prisma: { permission: { findMany: vi.fn() } },
@@ -26,22 +27,27 @@ function fakeRes() {
   return res;
 }
 
+// next giả như app thật: next(err) đi vào errorHandler (nơi duy nhất serialize lỗi); next() = cho qua.
+function fakeNext(req: any, res: any) {
+  return vi.fn((err?: unknown) => { if (err) errorHandler(err, req, res, () => {}); });
+}
+
 describe("authorize middleware", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("authorize_noUser_returns401", async () => {
     const req: any = { user: undefined, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("orders.list")(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authorize_superAdminNonSensitivePermission_callsNextWithoutAudit", async () => {
     const req: any = { user: { id: "u1", roles: ["super_admin"] }, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("orders.list")(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(mockLogAudit).not.toHaveBeenCalled();
@@ -50,7 +56,7 @@ describe("authorize middleware", () => {
   it("authorize_superAdminSystemPermission_callsNextAndLogsAudit", async () => {
     const req: any = { user: { id: "u1", roles: ["super_admin"] }, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("system.manage_settings")(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "permission.checked.allowed" }));
@@ -59,7 +65,7 @@ describe("authorize middleware", () => {
   it("authorize_superAdminRefundPermission_callsNextAndLogsAudit", async () => {
     const req: any = { user: { id: "u1", roles: ["super_admin"] }, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("accounting.refund")(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "permission.checked.allowed" }));
@@ -69,7 +75,7 @@ describe("authorize middleware", () => {
     mockRedis.get.mockResolvedValue(JSON.stringify(["orders.list"]));
     const req: any = { user: { id: "u2", roles: ["staff"] }, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("orders.list")(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
@@ -79,10 +85,10 @@ describe("authorize middleware", () => {
     mockRedis.get.mockResolvedValue(JSON.stringify(["orders.list"]));
     const req: any = { user: { id: "u2", roles: ["staff"] }, ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("system.manage_settings")(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
     expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "permission.checked.denied" }));
   });
 
@@ -90,10 +96,10 @@ describe("authorize middleware", () => {
   it("authorize_apiKeyScopeMissingRequiredScope_returns403EvenIfRealPermissionGranted", async () => {
     const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("accounting.reconcile")(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
     // Chặn ngay từ scope check, không đi tới loadPermissions (redis.get chưa từng bị gọi).
     expect(mockRedis.get).not.toHaveBeenCalled();
   });
@@ -102,10 +108,10 @@ describe("authorize middleware", () => {
   it("authorize_apiKeyScopeMissingRequiredScope_blocksEvenSuperAdminUser", async () => {
     const req: any = { user: { id: "u1", roles: ["super_admin"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("system.manage_settings")(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   // apiKeyScope riêng cho route đọc, tách khỏi permission thật (dùng chung với route ghi) - đúng cơ chế
@@ -115,7 +121,7 @@ describe("authorize middleware", () => {
     mockRedis.get.mockResolvedValue(JSON.stringify(["accounting.reconcile"]));
     const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["accounting.reconcile_list.read"], ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("accounting.reconcile", "accounting.reconcile_list.read")(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
@@ -125,10 +131,10 @@ describe("authorize middleware", () => {
     mockRedis.get.mockResolvedValue(JSON.stringify([]));
     const req: any = { user: { id: "u3", roles: ["staff"] }, apiKeyScopes: ["orders.list"], ip: "1.1.1.1" };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authorize("orders.list")(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 });
 

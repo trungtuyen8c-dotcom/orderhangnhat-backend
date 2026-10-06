@@ -1,6 +1,8 @@
 import { Router, type Request } from "express";
+import { AppError } from "../../app/errors/AppError.js";
 import { z } from "zod";
-import { handle, parseOr400 } from "../../app/http/legacyError.js";
+import { asyncHandler } from "../../app/http/asyncHandler.js";
+import { parseOr400 } from "../../app/http/parse.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import * as payroll from "./payroll.service.js";
 
@@ -9,7 +11,7 @@ payrollRouter.use(authenticate);
 
 // Chỉ super_admin xem/sửa lương
 payrollRouter.use((req, res, next) => {
-  if (!req.user!.roles.includes("super_admin")) return res.status(403).json({ error: "FORBIDDEN", message: "Chỉ super admin" });
+  if (!req.user!.roles.includes("super_admin")) return next(new AppError("FORBIDDEN", 403, "Chỉ super admin"));
   next();
 });
 
@@ -24,26 +26,26 @@ const schema = z.object({
   note: z.string().optional(),
 });
 
-payrollRouter.get("/", handle(async (req, res) => {
+payrollRouter.get("/", asyncHandler(async (req, res) => {
   const month = typeof req.query.month === "string" && MONTH_RE.test(req.query.month) ? req.query.month : undefined;
   res.json(await payroll.listPayroll(month));
 }));
 
 // Danh sách nhân viên để chọn
-payrollRouter.get("/users", handle(async (_req, res) => {
+payrollRouter.get("/users", asyncHandler(async (_req, res) => {
   res.json(await payroll.listStaff());
 }));
 
-payrollRouter.post("/", handle(async (req, res) => {
+payrollRouter.post("/", asyncHandler(async (req, res) => {
   const body = parseOr400(schema, req.body);
   res.status(201).json(await payroll.createPayroll(body, actor(req)));
 }));
 
-payrollRouter.patch("/:id/paid", handle(async (req, res) => {
+payrollRouter.patch("/:id/paid", asyncHandler(async (req, res) => {
   res.json(await payroll.togglePaid(req.params.id, actor(req)));
 }));
 
-payrollRouter.delete("/:id", handle(async (req, res) => {
+payrollRouter.delete("/:id", asyncHandler(async (req, res) => {
   await payroll.deletePayroll(req.params.id, actor(req));
   res.json({ ok: true });
 }));

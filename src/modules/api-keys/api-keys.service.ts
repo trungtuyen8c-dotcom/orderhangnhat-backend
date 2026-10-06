@@ -1,6 +1,6 @@
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { loadPermissions } from "../../middlewares/authorize.js";
 import type { AuthUser } from "../../middlewares/authenticate.js";
 import { generateApiKey, API_KEY_SCOPE_TO_PERMISSION } from "./apiKey.js";
@@ -29,7 +29,7 @@ export async function createKey(
   ctx: Ctx,
 ) {
   const overScope = await findOverScope(user, input.scopes);
-  if (overScope) throw new LegacyError(403, "FORBIDDEN", `Bạn không có quyền: ${API_KEY_SCOPE_TO_PERMISSION[overScope]}`);
+  if (overScope) throw new AppError("FORBIDDEN", 403, `Bạn không có quyền: ${API_KEY_SCOPE_TO_PERMISSION[overScope]}`);
 
   const { plain, prefix, hash } = generateApiKey();
   const record = await prisma.apiKey.create({
@@ -51,7 +51,7 @@ export async function createKey(
 
 async function findOwnKey(userId: string, id: string) {
   const key = await prisma.apiKey.findUnique({ where: { id } });
-  if (!key || key.userId !== userId) throw new LegacyError(404, "NOT_FOUND");
+  if (!key || key.userId !== userId) throw new AppError("NOT_FOUND", 404);
   return key;
 }
 
@@ -65,7 +65,7 @@ export async function revokeKey(userId: string, id: string, ctx: Ctx) {
 // Xoá hẳn - chỉ cho key đã thu hồi, tránh xoá nhầm key đang hoạt động.
 export async function purgeKey(userId: string, id: string, ctx: Ctx) {
   const key = await findOwnKey(userId, id);
-  if (!key.revokedAt) throw new LegacyError(400, "NOT_REVOKED", "Chỉ xoá được key đã thu hồi");
+  if (!key.revokedAt) throw new AppError("NOT_REVOKED", 400, "Chỉ xoá được key đã thu hồi");
   await prisma.apiKey.delete({ where: { id: key.id } });
   await logAudit({ actorId: userId, action: "api_key.purged", metadata: { apiKeyId: key.id }, ip: ctx.ip, requestId: ctx.requestId, entity: "api_key" });
 }

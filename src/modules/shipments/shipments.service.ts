@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Readable } from "stream";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
 import { getObjectStream, putObjectFromFile, removeObjectQuietly } from "../../integrations/minio/documentStorage.js";
 import { readInvoiceTaxRows, readInvoiceTaxRowsFromExcel } from "../sheets/invoiceTaxSheet.service.js";
@@ -15,7 +15,7 @@ import {
 export type Actor = { id: string; requestId?: string };
 
 const TAX_SHEET_KEY = "invoice_tax_sheet_id";
-const badRequest = () => new LegacyError(400, "BAD_REQUEST");
+const badRequest = () => new AppError("BAD_REQUEST", 400);
 
 // "YYYY-MM" -> [start, end) giờ VN; sai định dạng -> null (route tự quyết định body lỗi).
 export function parseMonth(month: unknown): { start: Date; end: Date } | null {
@@ -32,7 +32,7 @@ export async function getTaxConfig() {
 
 export async function setTaxConfig(sheetUrl: string | null | undefined, actor: Actor) {
   const url = (sheetUrl ?? "").trim();
-  if (url && !parseSheetId(url)) throw new LegacyError(400, "BAD_URL", "Link Google Sheet không hợp lệ");
+  if (url && !parseSheetId(url)) throw new AppError("BAD_URL", 400, "Link Google Sheet không hợp lệ");
   await prisma.appConfig.upsert({ where: { key: TAX_SHEET_KEY }, update: { value: url }, create: { key: TAX_SHEET_KEY, value: url } });
   await logAudit({ actorId: actor.id, action: "shipments.tax_config_set", requestId: actor.requestId });
   return { sheetUrl: url, sheetId: url ? parseSheetId(url) : null };
@@ -174,7 +174,7 @@ export async function listTaxRows(opts: { persist: boolean }): Promise<TaxRowOut
 export async function scanTaxFile(buffer: Buffer): Promise<TaxRowOut[]> {
   let sheetRows: SheetTaxRow[];
   try { sheetRows = await readInvoiceTaxRowsFromExcel(buffer); }
-  catch { throw new LegacyError(400, "BAD_FILE", "Không đọc được file Excel"); }
+  catch { throw new AppError("BAD_FILE", 400, "Không đọc được file Excel"); }
   return matchTaxRows(sheetRows, { persist: true });
 }
 
@@ -308,11 +308,11 @@ export function listDocumentsPublic(orderId?: string) {
 
 export async function openDocument(id: string): Promise<{ filename: string; stream: Readable }> {
   const doc = await prisma.document.findUnique({ where: { id } });
-  if (!doc) throw new LegacyError(404, "NOT_FOUND");
+  if (!doc) throw new AppError("NOT_FOUND", 404);
   try {
     const stream = await getObjectStream(doc.objectKey);
     return { filename: doc.objectKey.split("/").pop() ?? "file", stream };
   } catch {
-    throw new LegacyError(500, "DOWNLOAD_FAILED");
+    throw new AppError("DOWNLOAD_FAILED", 500);
   }
 }

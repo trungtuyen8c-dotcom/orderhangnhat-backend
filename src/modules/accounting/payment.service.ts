@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import { computeDebtBalance } from "../orders/order.totals.js";
 import { queueAccountingSheetSync } from "../sheets/sheet.jobs.js";
@@ -37,20 +37,20 @@ export async function recordPayment(orderId: string, input: PaymentInput, actor:
   const result = await prisma.$transaction(async (tx) => {
     // Khoá đơn: các payment đồng thời của cùng đơn chạy lần lượt -> công nợ tính lại không bị lệch.
     const order = await lockOrder(tx, orderId);
-    if (!order) throw new LegacyError(404, "NOT_FOUND");
+    if (!order) throw new AppError("NOT_FOUND", 404);
     if (input.type === "refund" && !(actor.roles ?? []).some((r) => PRIVILEGED.includes(r))) {
-      if (!(await userHasPermission(tx, actor.id, "accounting.refund"))) throw new LegacyError(403, "FORBIDDEN", "Thiếu quyền accounting.refund");
+      if (!(await userHasPermission(tx, actor.id, "accounting.refund"))) throw new AppError("FORBIDDEN", 403, "Thiếu quyền accounting.refund");
     }
 
     // Quy đổi sang VND để tính công nợ (công nợ luôn theo VND)
-    if (input.currency === "JPY" && !input.exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Thu JPY cần nhập tỉ giá");
+    if (input.currency === "JPY" && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Thu JPY cần nhập tỉ giá");
     const amountVnd = input.currency === "JPY" ? Math.round(input.amount * input.exchangeRate!) : input.amount;
 
     // Ví phải cùng tiền tệ với khoản thu
     if (input.walletId) {
       const wallet = await tx.wallet.findUnique({ where: { id: input.walletId } });
-      if (!wallet) throw new LegacyError(404, "WALLET_NOT_FOUND");
-      if (wallet.currency !== input.currency) throw new LegacyError(400, "CURRENCY_MISMATCH", `Ví ${wallet.name} là ${wallet.currency}, không nhận ${input.currency}`);
+      if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
+      if (wallet.currency !== input.currency) throw new AppError("CURRENCY_MISMATCH", 400, `Ví ${wallet.name} là ${wallet.currency}, không nhận ${input.currency}`);
     }
 
     const payment = await tx.payment.create({
@@ -107,7 +107,7 @@ export type ExpenseInput = {
 };
 
 export async function createExpense(input: ExpenseInput, actor: Actor) {
-  if (input.currency === "JPY" && !input.exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Nhập JPY cần tỉ giá");
+  if (input.currency === "JPY" && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Nhập JPY cần tỉ giá");
   const amountVnd = input.currency === "JPY" ? Math.round(input.amount * input.exchangeRate!) : input.amount;
   const e = await prisma.expense.create({ data: {
     id: uuid(), orderId: input.orderId ?? null, kind: input.kind, amountVnd, currency: input.currency,

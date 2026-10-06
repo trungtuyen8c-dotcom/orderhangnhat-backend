@@ -10,7 +10,7 @@ import {
   ACTION_LABEL, type OrderAction,
 } from "./order.state.js";
 import { prisma } from "../../infrastructure/prisma.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 const mockPrisma = prisma as unknown as { order: { updateMany: ReturnType<typeof vi.fn> } };
 
@@ -149,9 +149,9 @@ describe("assertUserTransition", () => {
       assertUserTransition(from as any, action);
       expect.unreachable();
     } catch (e) {
-      expect(e).toBeInstanceOf(LegacyError);
-      expect((e as LegacyError).status).toBe(409);
-      expect((e as LegacyError).toBody()).toMatchObject({ error: "STATE_INVALID_TRANSITION", detail: { from, action } });
+      expect(e).toBeInstanceOf(AppError);
+      expect((e as AppError).status).toBe(409);
+      expect((e as AppError).toBody()).toMatchObject({ error: "STATE_INVALID_TRANSITION", detail: { from, action } });
     }
   });
 });
@@ -164,7 +164,7 @@ describe("checkTransitionPrerequisites", () => {
 
   it("prerequisites_givenOrderNotAtFrom_whenChecked_thenThrows409", () => {
     const t = assertUserTransition("quoted", "deposit");
-    expect(() => checkTransitionPrerequisites({ status: "purchasing" }, t)).toThrow(LegacyError);
+    expect(() => checkTransitionPrerequisites({ status: "purchasing" }, t)).toThrow(AppError);
   });
 });
 

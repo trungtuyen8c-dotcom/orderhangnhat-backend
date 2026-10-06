@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
+import { errorHandler } from "../../app/errors/errorHandler.js";
 
 vi.mock("../../middlewares/authenticate.js", () => ({
   authenticate: (req: any, _res: any, next: any) => { req.user = { id: "u1", roles: ["accountant"] }; next(); },
@@ -14,7 +15,7 @@ import { meRouter } from "./me.routes.js";
 import { inAppNotifications } from "../notifications/notification.service.js";
 
 const svc = inAppNotifications as any;
-const app = () => { const a = express(); a.use(express.json()); a.use("/api/me", meRouter); return a; };
+const app = () => { const a = express(); a.use(express.json()); a.use("/api/me", meRouter); a.use(errorHandler); return a; };
 
 describe("me notification routes", () => {
   beforeEach(() => vi.clearAllMocks());

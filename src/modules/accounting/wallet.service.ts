@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { countWalletRefs, writeAudit, type Actor, type Tx } from "./accounting.repository.js";
 
 // Nơi DUY NHẤT đổi Wallet.balance. Mọi hàm nhận `tx` -> caller bọc trong prisma.$transaction để
@@ -94,7 +94,7 @@ export function walletsBasic() {
 
 export async function createWallet(input: { name: string; currency: string; balance?: number }, actor: Actor) {
   return prisma.$transaction(async (tx) => {
-    if (await tx.wallet.findUnique({ where: { name: input.name } })) throw new LegacyError(409, "WALLET_EXISTS");
+    if (await tx.wallet.findUnique({ where: { name: input.name } })) throw new AppError("WALLET_EXISTS", 409);
     // Số dư ban đầu nhập tay (không có dòng sổ) - giữ như cũ, báo cáo ngày bám mốc wallet.balance.
     const w = await tx.wallet.create({ data: { id: uuid(), name: input.name, currency: input.currency, balance: input.balance ?? 0 } });
     await writeAudit(tx, { actorId: actor.id, targetId: w.id, action: "wallet.created", requestId: actor.requestId, metadata: { balance: input.balance ?? 0 } });
@@ -118,7 +118,7 @@ export async function updateWallet(id: string, data: { name?: string; currency?:
 export async function deleteWallet(id: string, actor: Actor) {
   await prisma.$transaction(async (tx) => {
     // Cọc khách / giao dịch quỹ trỏ tới ví (FK Restrict) cũng tính là "còn giao dịch".
-    if ((await countWalletRefs(tx, id)) > 0) throw new LegacyError(409, "HAS_TXNS", "Ví còn giao dịch, không xóa được");
+    if ((await countWalletRefs(tx, id)) > 0) throw new AppError("HAS_TXNS", 409, "Ví còn giao dịch, không xóa được");
     await tx.wallet.delete({ where: { id } });
     await writeAudit(tx, { actorId: actor.id, targetId: id, action: "wallet.deleted", requestId: actor.requestId });
   });
@@ -126,7 +126,7 @@ export async function deleteWallet(id: string, actor: Actor) {
 
 export async function setDailyActual(walletId: string, input: { date: string; actualBalance: number }, actor: Actor) {
   const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
-  if (!wallet) throw new LegacyError(404, "WALLET_NOT_FOUND");
+  if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
   const date = new Date(`${input.date}T00:00:00`);
   const row = await prisma.walletDailyActual.upsert({
     where: { walletId_date: { walletId: wallet.id, date } },

@@ -73,7 +73,7 @@ vi.mock("../../app/audit.js", async (orig) => ({ ...(await orig<typeof import(".
 vi.mock("../sheets/sheet.jobs.js", () => ({ queueAccountingSheetSync: vi.fn() }));
 
 import { eventBus } from "../../app/events/EventBus.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { queueAccountingSheetSync } from "../sheets/sheet.jobs.js";
 import { recordPayment } from "./payment.service.js";
 import { confirmDeposit, deleteDeposit, editDeposit, unconfirmDeposit } from "./deposit.service.js";
@@ -163,7 +163,7 @@ describe("recordPayment", () => {
 
   it("recordPayment_refundWithoutPermission_returns403AndWritesNothing", async () => {
     const err = await recordPayment("o1", { type: "refund", amount: 100, currency: "VND", walletId: W_VND }, { id: "u2", roles: ["sale"] }).catch((e) => e);
-    expect(err).toBeInstanceOf(LegacyError);
+    expect(err).toBeInstanceOf(AppError);
     expect(err.toBody()).toEqual({ error: "FORBIDDEN", message: "Thiếu quyền accounting.refund" });
     expect(err.status).toBe(403);
     expect(st().payments).toHaveLength(0);

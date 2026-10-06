@@ -1,14 +1,14 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import { lockFundTxn, writeAudit, type Actor, type Tx } from "./accounting.repository.js";
 import { postWalletTxn, reverseFundWalletTxn } from "./wallet.service.js";
 
 // ===== Quỹ tổng (JPY): NV ghi -> CHỜ xác nhận (chưa đụng số dư) -> kế toán Xác nhận thì tiền mới thực đổi =====
 
-const notFound = () => new LegacyError(404, "NOT_FOUND");
+const notFound = () => new AppError("NOT_FOUND", 404);
 
 function getFund(db: Tx = prisma) {
   return db.fund.upsert({ where: { id: "main" }, update: {}, create: { id: "main", balance: 0 } });
@@ -74,7 +74,7 @@ export async function recordFundTxn(input: FundRecord, audit: { action: string; 
   const t = await prisma.$transaction(async (tx) => {
     if (input.walletId) {
       const wallet = await tx.wallet.findUnique({ where: { id: input.walletId } });
-      if (!wallet) throw new LegacyError(404, "WALLET_NOT_FOUND");
+      if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
     }
     // "set" ghi đè tuyệt đối -> lưu số dư quỹ lúc ghi để hủy xác nhận hoàn đúng.
     const prevBalance = input.type === "set" ? (await getFund(tx)).balance : undefined;

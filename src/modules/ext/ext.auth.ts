@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { AppError } from "../../app/errors/AppError.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { redis } from "../../infrastructure/redis.js";
 import { logWarn } from "../../infrastructure/systemLog.js";
@@ -25,22 +26,22 @@ export function requireExtScope(scope: string) {
 
 async function checkKey(scope: string, req: Request, res: Response, next: NextFunction) {
   const raw = readRawKey(req);
-  if (!raw) return res.status(401).json({ error: "UNAUTHORIZED", message: "Thiếu API key" });
+  if (!raw) throw new AppError("UNAUTHORIZED", 401, "Thiếu API key");
 
   const key = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(raw) }, include: { user: { select: { isActive: true } } } });
   // Chủ key bị khoá thì key cũng mất hiệu lực, giống luồng API key ở authenticate.ts
   if (!key || key.revokedAt || (key.expiresAt && key.expiresAt < new Date()) || !key.user?.isActive) {
-    return res.status(401).json({ error: "UNAUTHORIZED", message: "API key không hợp lệ" });
+    throw new AppError("UNAUTHORIZED", 401, "API key không hợp lệ");
   }
   if (scope && !key.scopes.includes(scope)) {
-    return res.status(403).json({ error: "FORBIDDEN", message: `Key thiếu scope: ${scope}` });
+    throw new AppError("FORBIDDEN", 403, `Key thiếu scope: ${scope}`);
   }
 
   const rlKey = `rl:ext:${key.id}`;
   const count = await redis.incr(rlKey);
   if (count === 1) await redis.expire(rlKey, 60);
   if (count > key.rateLimit) {
-    return res.status(429).json({ error: "RATE_LIMITED", message: `Vượt giới hạn ${key.rateLimit} request/phút` });
+    throw new AppError("RATE_LIMITED", 429, `Vượt giới hạn ${key.rateLimit} request/phút`);
   }
 
   // lastUsedAt chỉ để tham khảo - ghi lỗi thì log, không chặn request đọc.

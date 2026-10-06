@@ -4,7 +4,7 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { redis } from "../../infrastructure/redis.js";
 import { config } from "../../app/config.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { signAccess } from "./jwt.js";
 import { verifyPassword, hashPassword, sha256 } from "./password.js";
 import type { AuthUser } from "../../middlewares/authenticate.js";
@@ -40,7 +40,7 @@ export async function login(email: string, password: string, ctx: Ctx): Promise<
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user || !user.isActive || !(await verifyPassword(password, user.passwordHash))) {
     await logAudit({ action: "auth.login.failed", metadata: { email }, ip: ctx.ip, requestId: ctx.requestId });
-    throw new LegacyError(401, "INVALID_CREDENTIALS");
+    throw new AppError("INVALID_CREDENTIALS", 401);
   }
   const tokens = await issueTokens(prisma, user.id, user.tokenVersion);
   await logAudit({ actorId: user.id, action: "auth.login.success", ip: ctx.ip, requestId: ctx.requestId });
@@ -49,15 +49,15 @@ export async function login(email: string, password: string, ctx: Ctx): Promise<
 
 // Rotation: refresh token chỉ dùng 1 lần. Gửi lại token đã dùng = nghi bị đánh cắp -> thu hồi toàn bộ phiên.
 export async function renew(refresh: string | undefined, ctx: Ctx): Promise<TokenPair> {
-  if (!refresh) throw new LegacyError(401, "NO_REFRESH");
+  if (!refresh) throw new AppError("NO_REFRESH", 401);
 
   const row = await prisma.refreshToken.findFirst({ where: { tokenHash: sha256(refresh) } });
-  if (!row || row.expiresAt < new Date()) throw new LegacyError(401, "INVALID_REFRESH");
+  if (!row || row.expiresAt < new Date()) throw new AppError("INVALID_REFRESH", 401);
 
   if (row.used) {
     await prisma.$transaction((tx) => revokeAllSessions(tx, row.userId));
     await logAudit({ actorId: row.userId, action: "auth.refresh.reuse_detected", ip: ctx.ip, requestId: ctx.requestId });
-    throw new LegacyError(401, "TOKEN_REUSE");
+    throw new AppError("TOKEN_REUSE", 401);
   }
 
   // Token cũ luôn bị đánh dấu used (kể cả khi user đã bị khoá) - không để lại token còn tái dùng được.
@@ -67,7 +67,7 @@ export async function renew(refresh: string | undefined, ctx: Ctx): Promise<Toke
     if (!user || !user.isActive) return null;
     return issueTokens(tx, user.id, user.tokenVersion);
   });
-  if (!tokens) throw new LegacyError(401, "UNAUTHORIZED");
+  if (!tokens) throw new AppError("UNAUTHORIZED", 401);
   return tokens;
 }
 
@@ -81,7 +81,7 @@ export async function logout(user: AuthUser, refresh: string | undefined, ctx: C
 export async function changePassword(userId: string, oldPassword: string, newPassword: string, ctx: Ctx): Promise<void> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user || !(await verifyPassword(oldPassword, user.passwordHash))) {
-    throw new LegacyError(400, "WRONG_OLD_PASSWORD");
+    throw new AppError("WRONG_OLD_PASSWORD", 400);
   }
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction((tx) => revokeAllSessions(tx, userId, { passwordHash }));

@@ -1,7 +1,7 @@
 import { effKg } from "../tracking/tracking.weight.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import * as cartonService from "../cartons/carton.service.js";
 
 export type Actor = { id: string; requestId?: string };
@@ -61,7 +61,7 @@ export async function deleteCarton(id: string, actor: Actor) {
 // Gán tracking vào kiện theo mã (dán nhiều mã, mỗi dòng 1 mã)
 export async function assignToCarton(id: string, rawCodes: string[]) {
   const carton = await prisma.carton.findUnique({ where: { id } });
-  if (!carton) throw new LegacyError(404, "NOT_FOUND");
+  if (!carton) throw new AppError("NOT_FOUND", 404);
   const codes = rawCodes.map((c) => c.trim()).filter(Boolean);
   const r = await prisma.tracking.updateMany({ where: { code: { in: codes } }, data: { cartonId: carton.id, cartonManual: true } });
   return { assigned: r.count };

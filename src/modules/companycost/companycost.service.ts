@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { vnMonthKey } from "../../app/vnTime.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { lockOrder, writeAudit } from "../accounting/accounting.repository.js";
@@ -128,7 +128,7 @@ export type EntryInput = {
   orderCode?: string;
 };
 
-const bad = (message: string) => new LegacyError(400, "BAD_REQUEST", message);
+const bad = (message: string) => new AppError("BAD_REQUEST", 400, message);
 
 // 着払い: tìm tracking gắn khoản này - theo mã tracking, hoặc theo mã đơn nếu đơn có ĐÚNG 1 tracking.
 async function resolveChakubaraiTracking(tx: Tx, trackingCode?: string, orderCode?: string): Promise<string | null> {
@@ -198,7 +198,7 @@ export async function createEntry(input: EntryInput, actor: Actor) {
 export async function togglePaid(id: string) {
   return prisma.$transaction(async (tx) => {
     const c = await tx.companyCost.findUnique({ where: { id } });
-    if (!c) throw new LegacyError(404, "NOT_FOUND");
+    if (!c) throw new AppError("NOT_FOUND", 404);
     return tx.companyCost.update({ where: { id: c.id }, data: { paid: !c.paid } });
   });
 }
@@ -206,7 +206,7 @@ export async function togglePaid(id: string) {
 export async function deleteEntry(id: string, actor: Actor) {
   const customerId = await prisma.$transaction(async (tx) => {
     const c = await tx.companyCost.findUnique({ where: { id } });
-    if (!c) throw new LegacyError(404, "NOT_FOUND");
+    if (!c) throw new AppError("NOT_FOUND", 404);
     await tx.companyCost.delete({ where: { id } });
     // Gắn tracking (着払い) -> xóa khoản này phải tự trừ lại công nợ + sheet khách, không được giữ nguyên số cũ.
     const cid = c.refId ? await applyTrackingCost(tx, c.refId) : null;

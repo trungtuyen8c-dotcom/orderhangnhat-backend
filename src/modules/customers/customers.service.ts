@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Customer } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { paged, type PageParams } from "../../app/http/pagination.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
@@ -93,8 +93,8 @@ export async function updateCustomer(id: string, input: CustomerInput, actor: Ac
 // Đẩy lại toàn bộ đơn + sổ cọc cũ vào sheet khách (dùng khi mới đổi link sheet) - chạy đồng bộ vì FE chờ kết quả.
 export async function resyncSheet(id: string) {
   const c = await prisma.customer.findUnique({ where: { id } });
-  if (!c) throw new LegacyError(404, "NOT_FOUND");
-  if (!c.sheetId) throw new LegacyError(400, "NO_SHEET", "Khách chưa có link Sheet");
+  if (!c) throw new AppError("NOT_FOUND", 404);
+  if (!c.sheetId) throw new AppError("NO_SHEET", 400, "Khách chưa có link Sheet");
   await syncCustomerOrders(c.id);
   return { ok: true };
 }
@@ -103,9 +103,9 @@ export async function resyncSheet(id: string) {
 export async function deleteCustomer(id: string, actor: Actor) {
   await prisma.$transaction(async (tx) => {
     const refs = await repo.countCustomerRefs(tx, id);
-    if (refs.orders > 0) throw new LegacyError(409, "HAS_ORDERS", "Khách còn đơn, không xóa được");
-    if (refs.deposits > 0) throw new LegacyError(409, "HAS_DEPOSITS", "Khách còn lịch sử cọc, không xóa được");
-    if (refs.debts > 0) throw new LegacyError(409, "HAS_DEBTS", "Khách còn công nợ, không xóa được");
+    if (refs.orders > 0) throw new AppError("HAS_ORDERS", 409, "Khách còn đơn, không xóa được");
+    if (refs.deposits > 0) throw new AppError("HAS_DEPOSITS", 409, "Khách còn lịch sử cọc, không xóa được");
+    if (refs.debts > 0) throw new AppError("HAS_DEBTS", 409, "Khách còn công nợ, không xóa được");
     await tx.customer.delete({ where: { id } });
   });
   await logAudit({ actorId: actor.id, targetId: id, action: "customer.deleted", requestId: actor.requestId });

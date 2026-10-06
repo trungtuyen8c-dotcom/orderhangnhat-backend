@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import { writeAudit, type Actor } from "./accounting.repository.js";
 import { recordFundTxn } from "./fund.service.js";
@@ -24,11 +24,11 @@ export type CardTxnInput = { walletId: string; category: string; amount: number;
 
 export async function recordCardTxn(input: CardTxnInput, actor: Actor) {
   const dir = TXN_CATEGORIES[input.category];
-  if (!dir) throw new LegacyError(400, "BAD_CATEGORY", "Loại giao dịch không hợp lệ");
+  if (!dir) throw new AppError("BAD_CATEGORY", 400, "Loại giao dịch không hợp lệ");
   const signed = dir === "out" ? -input.amount : input.amount;
   const { txn, wallet } = await prisma.$transaction(async (tx) => {
     const w = await tx.wallet.findUnique({ where: { id: input.walletId } });
-    if (!w) throw new LegacyError(404, "WALLET_NOT_FOUND");
+    if (!w) throw new AppError("WALLET_NOT_FOUND", 404);
     const r = await postWalletTxn(tx, {
       walletId: w.id, amount: signed, type: input.category, category: input.category,
       note: input.note ?? null, refOrderId: input.refOrderId ?? null, createdAt: input.date ?? new Date(),
@@ -44,7 +44,7 @@ export type TransferInput = { fromWalletId: string; toWalletId: string; amount: 
 
 // Chuyển tiền giữa 2 thẻ: 1 lần ghi -> thẻ nguồn trừ, thẻ đích cộng (+ phí nếu có), cùng 1 transaction.
 export async function transfer(input: TransferInput, actor: Actor) {
-  if (input.fromWalletId === input.toWalletId) throw new LegacyError(400, "SAME_WALLET", "Thẻ nguồn và đích phải khác nhau");
+  if (input.fromWalletId === input.toWalletId) throw new AppError("SAME_WALLET", 400, "Thẻ nguồn và đích phải khác nhau");
   const ref = uuid();
   const at = input.date ?? new Date();
   await prisma.$transaction(async (tx) => {
@@ -52,8 +52,8 @@ export async function transfer(input: TransferInput, actor: Actor) {
       tx.wallet.findUnique({ where: { id: input.fromWalletId } }),
       tx.wallet.findUnique({ where: { id: input.toWalletId } }),
     ]);
-    if (!from || !to) throw new LegacyError(404, "WALLET_NOT_FOUND");
-    if (from.currency !== to.currency) throw new LegacyError(400, "CURRENCY_MISMATCH", "Hai thẻ khác đơn vị tiền, không chuyển trực tiếp được");
+    if (!from || !to) throw new AppError("WALLET_NOT_FOUND", 404);
+    if (from.currency !== to.currency) throw new AppError("CURRENCY_MISMATCH", 400, "Hai thẻ khác đơn vị tiền, không chuyển trực tiếp được");
     await postWalletTxn(tx, { walletId: from.id, amount: -input.amount, type: "Chuyển khoản", category: "Chuyển khoản", note: input.note ?? `Chuyển sang ${to.name}`, transferRef: ref, createdAt: at });
     await postWalletTxn(tx, { walletId: to.id, amount: input.amount, type: "Nhập tiền", category: "Nhập tiền", note: input.note ?? `Nhận từ ${from.name}`, transferRef: ref, createdAt: at });
     // Phí chuyển (nếu có) -> trừ thêm thẻ nguồn, cùng nhóm transferRef để xóa hoàn cả cụm
@@ -69,7 +69,7 @@ export async function transfer(input: TransferInput, actor: Actor) {
 export async function deleteCardTxn(id: string, actor: Actor) {
   await prisma.$transaction(async (tx) => {
     const txn = await tx.walletTxn.findUnique({ where: { id } });
-    if (!txn) throw new LegacyError(404, "NOT_FOUND");
+    if (!txn) throw new AppError("NOT_FOUND", 404);
     const group = txn.transferRef ? await tx.walletTxn.findMany({ where: { transferRef: txn.transferRef } }) : [txn];
     await deleteWalletTxnsById(tx, group);
     await writeAudit(tx, { actorId: actor.id, targetId: txn.walletId, action: "wallet.txn_deleted", requestId: actor.requestId, metadata: { category: txn.category } });

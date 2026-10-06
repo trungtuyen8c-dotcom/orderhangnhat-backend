@@ -3,7 +3,7 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import type { BusinessEventName } from "../../app/events/businessEvents.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { paged, type PageParams } from "../../app/http/pagination.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { createOrphanTrackingSafe } from "../sheets/orphanTracking.js";
@@ -168,7 +168,7 @@ export async function updateTracking(id: string, input: UpdateTrackingInput, act
 // Xử lý tracking lạ / không khớp: sửa + ghi log (1 transaction)
 export async function resolveTracking(id: string, input: { orderId?: string | null; code?: string; reason: string }, actor: Actor) {
   const old = await prisma.tracking.findUnique({ where: { id } });
-  if (!old) throw new LegacyError(404, "NOT_FOUND");
+  if (!old) throw new AppError("NOT_FOUND", 404);
   const updated = await prisma.$transaction(async (tx) => {
     const updated = await tx.tracking.update({
       where: { id: old.id },
@@ -201,12 +201,12 @@ export async function resolveTracking(id: string, input: { orderId?: string | nu
 export const TRACKING_HAS_COMPANY_COST_MESSAGE = "Tracking đang có khoản chi phí công ty (chakubarai) gắn vào - xóa khoản đó ở Chi phí công ty trước";
 
 export async function assertTrackingDeletable(id: string): Promise<void> {
-  if (await repo.countCompanyCostsOfTracking(id)) throw new LegacyError(409, "TRACKING_HAS_COMPANY_COST", TRACKING_HAS_COMPANY_COST_MESSAGE);
+  if (await repo.countCompanyCostsOfTracking(id)) throw new AppError("TRACKING_HAS_COMPANY_COST", 409, TRACKING_HAS_COMPANY_COST_MESSAGE);
 }
 
 export async function deleteTracking(id: string, actor: Actor) {
   const t = await prisma.tracking.findUnique({ where: { id } });
-  if (!t) throw new LegacyError(404, "NOT_FOUND");
+  if (!t) throw new AppError("NOT_FOUND", 404);
   await assertTrackingDeletable(id);
   await prisma.$transaction(async (tx) => {
     await tx.trackingLog.deleteMany({ where: { trackingId: id } });

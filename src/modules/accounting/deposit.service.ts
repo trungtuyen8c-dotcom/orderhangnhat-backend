@@ -1,14 +1,14 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import { vnDayEnd, vnDayStart } from "../../app/vnTime.js";
 import { queueAccountingSheetSync } from "../sheets/sheet.jobs.js";
 import { lockCustomer, lockDeposit, writeAudit, type Actor } from "./accounting.repository.js";
 import { adjustDepositWalletTxn, postWalletTxn, reverseWalletTxns } from "./wallet.service.js";
 
-const notFound = () => new LegacyError(404, "NOT_FOUND");
+const notFound = () => new AppError("NOT_FOUND", 404);
 
 export type DepositInput = {
   amount: number;
@@ -26,12 +26,12 @@ export async function createDeposit(customerId: string, input: DepositInput, act
   const dep = await prisma.$transaction(async (tx) => {
     const customer = await tx.customer.findUnique({ where: { id: customerId } });
     if (!customer) throw notFound();
-    if (input.currency === "JPY" && !input.exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Cọc JPY cần nhập tỉ giá");
+    if (input.currency === "JPY" && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Cọc JPY cần nhập tỉ giá");
     const amountVnd = input.currency === "JPY" ? Math.round(input.amount * input.exchangeRate!) : input.amount;
     if (input.walletId) {
       const w = await tx.wallet.findUnique({ where: { id: input.walletId } });
-      if (!w) throw new LegacyError(404, "WALLET_NOT_FOUND");
-      if (w.currency !== "VND") throw new LegacyError(400, "CURRENCY_MISMATCH", "Cọc khách phải vào ví VND");
+      if (!w) throw new AppError("WALLET_NOT_FOUND", 404);
+      if (w.currency !== "VND") throw new AppError("CURRENCY_MISMATCH", 400, "Cọc khách phải vào ví VND");
     }
     const d = await tx.customerDeposit.create({
       data: { id: uuid(), customerId, amountVnd, currency: input.currency, amountOrig: input.amount, exchangeRate: input.exchangeRate ?? null, payerName: input.payerName || null, method: input.method || null, walletId: input.walletId || null, note: input.note || null, paidAt: input.paidAt ?? new Date(), recordedBy: actor.id },
@@ -106,7 +106,7 @@ export async function editDeposit(id: string, input: DepositEditInput, actor: Ac
       const currency = input.currency ?? dep.currency ?? "VND";
       const amount = input.amount ?? Number(dep.amountOrig);
       const exchangeRate = input.exchangeRate ?? (dep.exchangeRate != null ? Number(dep.exchangeRate) : undefined);
-      if (currency === "JPY" && !exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Cọc JPY cần nhập tỉ giá");
+      if (currency === "JPY" && !exchangeRate) throw new AppError("BAD_REQUEST", 400, "Cọc JPY cần nhập tỉ giá");
       newAmountVnd = currency === "JPY" ? Math.round(amount * exchangeRate!) : amount;
       data.currency = currency; data.amountOrig = amount; data.exchangeRate = exchangeRate ?? null; data.amountVnd = newAmountVnd;
     }
@@ -214,7 +214,7 @@ export async function setOpeningBalance(
     // Khoá khách: 2 lần lưu đồng thời không tạo ra 2 dòng đầu kỳ.
     const customer = await lockCustomer(tx, customerId);
     if (!customer) throw notFound();
-    if (input.currency === "JPY" && !input.exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Đầu kỳ JPY cần nhập tỉ giá");
+    if (input.currency === "JPY" && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Đầu kỳ JPY cần nhập tỉ giá");
     const amountVnd = input.currency === "JPY" ? Math.round(input.amount * input.exchangeRate!) : input.amount;
     await tx.customerDeposit.deleteMany({ where: { customerId, isOpening: true } });
     let d = null;

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
+import { errorHandler } from "../../app/errors/errorHandler.js";
 
 vi.mock("../../infrastructure/prisma.js", () => {
   const prisma: any = {
@@ -61,6 +62,7 @@ function buildApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/warehouse", warehouseRouter);
+  app.use(errorHandler);
   return app;
 }
 

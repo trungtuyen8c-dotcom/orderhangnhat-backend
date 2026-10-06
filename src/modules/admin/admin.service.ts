@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import type { PageParams } from "../../app/http/pagination.js";
 import { invalidatePermissions } from "../../middlewares/authorize.js";
 import { hashPassword } from "../auth/password.js";
@@ -10,7 +10,7 @@ import { hashPassword } from "../auth/password.js";
 type Tx = Prisma.TransactionClient;
 export type Actor = { id: string; requestId?: string };
 
-const notFound = () => new LegacyError(404, "NOT_FOUND");
+const notFound = () => new AppError("NOT_FOUND", 404);
 
 // ---- Users ----
 
@@ -31,7 +31,7 @@ export async function createUser(
   input: { email: string; password: string; fullName?: string; roleKeys: string[] },
   actor: Actor,
 ) {
-  if (await prisma.user.findUnique({ where: { email: input.email } })) throw new LegacyError(409, "EMAIL_EXISTS");
+  if (await prisma.user.findUnique({ where: { email: input.email } })) throw new AppError("EMAIL_EXISTS", 409);
   const passwordHash = await hashPassword(input.password);
   const user = await prisma.$transaction(async (tx) => {
     const u = await tx.user.create({ data: { id: uuid(), email: input.email, passwordHash, fullName: input.fullName } });
@@ -50,10 +50,10 @@ export async function updateUser(id: string, data: { fullName?: string; isActive
 }
 
 export async function deleteUser(id: string, actor: Actor) {
-  if (id === actor.id) throw new LegacyError(400, "CANNOT_DELETE_SELF");
+  if (id === actor.id) throw new AppError("CANNOT_DELETE_SELF", 400);
   const target = await prisma.user.findUnique({ where: { id }, include: { roles: { include: { role: true } } } });
   if (!target) throw notFound();
-  if (target.roles.some((r) => r.role.key === "super_admin")) throw new LegacyError(403, "PROTECTED", "Không xóa được super admin");
+  if (target.roles.some((r) => r.role.key === "super_admin")) throw new AppError("PROTECTED", 403, "Không xóa được super admin");
   await prisma.user.delete({ where: { id: target.id } });
   await logAudit({ actorId: actor.id, targetId: target.id, action: "user.deleted", requestId: actor.requestId, entity: "user" });
 }
@@ -90,7 +90,7 @@ async function setRolePermissions(tx: Tx, roleId: number, keys: string[]) {
 }
 
 export async function createRole(input: { key: string; name: string; permissionKeys: string[] }, actor: Actor) {
-  if (await prisma.role.findUnique({ where: { key: input.key } })) throw new LegacyError(409, "ROLE_EXISTS");
+  if (await prisma.role.findUnique({ where: { key: input.key } })) throw new AppError("ROLE_EXISTS", 409);
   const role = await prisma.$transaction(async (tx) => {
     const r = await tx.role.create({ data: { key: input.key, name: input.name, isSystem: false } });
     await setRolePermissions(tx, r.id, input.permissionKeys);
@@ -104,7 +104,7 @@ export async function createRole(input: { key: string; name: string; permissionK
 export async function findEditableRole(key: string) {
   const role = await prisma.role.findUnique({ where: { key } });
   if (!role) throw notFound();
-  if (role.key === "super_admin") throw new LegacyError(403, "PROTECTED", "Không sửa được super_admin");
+  if (role.key === "super_admin") throw new AppError("PROTECTED", 403, "Không sửa được super_admin");
   return role;
 }
 
@@ -122,7 +122,7 @@ export async function updateRole(role: { id: number; key: string }, input: { nam
 export async function deleteRole(key: string, actor: Actor) {
   const role = await prisma.role.findUnique({ where: { key } });
   if (!role) throw notFound();
-  if (role.isSystem) throw new LegacyError(403, "PROTECTED", "Không xóa được vai trò hệ thống");
+  if (role.isSystem) throw new AppError("PROTECTED", 403, "Không xóa được vai trò hệ thống");
   await prisma.role.delete({ where: { id: role.id } });
   await logAudit({ actorId: actor.id, action: "role.deleted", metadata: { key: role.key }, requestId: actor.requestId, entity: "role" });
 }

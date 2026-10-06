@@ -4,7 +4,7 @@ import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { eventBus } from "../../app/events/EventBus.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { loadPermissions } from "../../middlewares/authorize.js";
 import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
 import { bumpOrderStatus } from "../orders/order.state.js";
@@ -36,7 +36,7 @@ export type SyncHookBody = { dayLock?: unknown; tab?: unknown; code?: unknown; r
 // Kết quả trả về phụ thuộc kết quả khớp sheet -> chạy đồng bộ (không đưa vào queue).
 export async function handleSyncHook(candidateKeys: string[], body: SyncHookBody | undefined) {
   const expected = (await prisma.appConfig.findUnique({ where: { key: HOOK_KEY } }))?.value;
-  if (!expected || !candidateKeys.some((k) => hookKeyMatches(k, expected))) throw new LegacyError(401, "BAD_KEY");
+  if (!expected || !candidateKeys.some((k) => hookKeyMatches(k, expected))) throw new AppError("BAD_KEY", 401);
   // Kho tick Z1 (checkbox "Đã nộp hải quan") của tab -> khóa/mở khóa ngày đó ngay, không cần vào app bấm "Chốt ngày".
   if (typeof body?.dayLock === "boolean" && body?.tab) {
     await setDayLockFromTab(String(body.tab), body.dayLock);
@@ -73,7 +73,7 @@ export async function getPackConfig(baseUrl: string) {
 
 export async function setPackConfig(sheetUrl: string | null | undefined, actor: Actor) {
   const url = (sheetUrl ?? "").trim();
-  if (url && !parseSheetId(url)) throw new LegacyError(400, "BAD_URL", "Link Google Sheet không hợp lệ");
+  if (url && !parseSheetId(url)) throw new AppError("BAD_URL", 400, "Link Google Sheet không hợp lệ");
   await prisma.appConfig.upsert({ where: { key: "warehouse_sheet_id" }, update: { value: url }, create: { key: "warehouse_sheet_id", value: url } });
   await logAudit({ actorId: actor.id, action: "warehouse.pack_config_set", requestId: actor.requestId });
   return { sheetUrl: url, sheetId: url ? parseSheetId(url) : null };
@@ -137,15 +137,15 @@ export async function weighVn(id: string, input: { vnWeightKg?: number; vnTracki
     where: { id },
     select: { vnTrackingCode: true, cartonId: true, carton: { select: { declaredWeightKg: true, vnTotalWeightKg: true, weightConfirmedAt: true } } },
   });
-  if (!before) throw new LegacyError(404, "NOT_FOUND");
+  if (!before) throw new AppError("NOT_FOUND", 404);
   // Cân JP (kho Nhật) là việc của Sale/NV mua (trackings.update), Kho VN chỉ cân/gán tracking VN - không được sửa cân Nhật.
   if (input.jpWeightKg !== undefined && !actor.roles.includes("super_admin")) {
     const perms = await loadPermissions(actor.id);
-    if (!perms.includes("trackings.update")) throw new LegacyError(403, "FORBIDDEN", "Thiếu quyền: trackings.update");
+    if (!perms.includes("trackings.update")) throw new AppError("FORBIDDEN", 403, "Thiếu quyền: trackings.update");
   }
   // Kiện đang khóa (thiếu tổng cân hoặc lệch >=1kg chưa xác nhận) - chặn điền cân VN từng mã lẻ, vẫn cho điền Tracking VN.
   if (input.vnWeightKg !== undefined && before.carton && cartonWeightLocked(before.carton)) {
-    throw new LegacyError(423, "CARTON_LOCKED", "Kiện đang khóa cân - đối soát tổng cân Nhật/VN (hoặc xác nhận lệch) trước");
+    throw new AppError("CARTON_LOCKED", 423, "Kiện đang khóa cân - đối soát tổng cân Nhật/VN (hoặc xác nhận lệch) trước");
   }
   const data: typeof input & { deliveredAt?: Date | null } = { ...input };
   // Điền Tracking VN lần đầu -> ghi nhận đúng ngày này là "Ngày giao cho khách hàng" trên sheet khách.
@@ -194,7 +194,7 @@ export async function storeTrackings(ids: string[], actor: Actor) {
 // Thêm tracking tay vào kiện (khi seller/kho quét sai mã, đơn không tự khớp).
 export async function addManualTracking(input: { orderCode: string; code: string; jpWeightKg?: number; cartonId?: string }, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { code: input.orderCode.trim() }, select: { id: true, customerId: true } });
-  if (!order) throw new LegacyError(404, "ORDER_NOT_FOUND");
+  if (!order) throw new AppError("ORDER_NOT_FOUND", 404);
   const code = input.code.trim();
   // Đơn đã có sẵn tracking đúng mã này (vd gõ lại mã đã nhập ở ô "Điền mã" trang đơn) -> cập nhật, không tạo bản ghi trùng
   // (trước đây tạo thẳng bản ghi mới, khiến 1 đơn có 2 tracking cùng mã, hiện lặp "mã +mã" ngoài danh sách đơn).
@@ -224,7 +224,7 @@ export async function addManualTracking(input: { orderCode: string; code: string
 // để biến mất khỏi board, quét sheet lại vẫn tự nhảy vào bình thường.
 export async function removeFromVnWarehouse(id: string, actor: Actor) {
   const t = await prisma.tracking.findUnique({ where: { id } });
-  if (!t) throw new LegacyError(404, "NOT_FOUND");
+  if (!t) throw new AppError("NOT_FOUND", 404);
   if (!t.orderId) await assertTrackingDeletable(t.id);
   // Gỡ qua APP (không phải kho tự xóa mã trong sheet) - cron quét file kho sẽ không còn cơ hội tự dọn màu/nội
   // dung dòng vật lý từng chiếm nữa (nhất là sau khi packedAt/packRow reset), nên phải tự dọn ngay ở đây.

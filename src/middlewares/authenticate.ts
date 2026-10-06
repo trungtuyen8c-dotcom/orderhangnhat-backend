@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { AppError } from "../app/errors/AppError.js";
 import { verifyAccess } from "../modules/auth/jwt.js";
 import { hashApiKey } from "../modules/api-keys/apiKey.js";
 import { prisma } from "../infrastructure/prisma.js";
@@ -43,7 +44,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
 async function authenticateJwt(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "UNAUTHORIZED" });
+    throw new AppError("UNAUTHORIZED", 401);
   }
   const token = header.slice(7);
 
@@ -52,14 +53,14 @@ async function authenticateJwt(req: Request, res: Response, next: NextFunction) 
     payload = verifyAccess(token);
   } catch (e: any) {
     if (e?.name === "TokenExpiredError") {
-      return res.status(401).json({ error: "TOKEN_EXPIRED" });
+      throw new AppError("TOKEN_EXPIRED", 401);
     }
-    return res.status(401).json({ error: "INVALID_TOKEN" });
+    throw new AppError("INVALID_TOKEN", 401);
   }
 
   // JTI blacklist
   if (await redis.get(`revoked_jti:${payload.jti}`)) {
-    return res.status(401).json({ error: "REVOKED" });
+    throw new AppError("REVOKED", 401);
   }
 
   // token_version + roles
@@ -68,7 +69,7 @@ async function authenticateJwt(req: Request, res: Response, next: NextFunction) 
     include: { roles: { include: { role: true } } },
   });
   if (!user || !user.isActive || user.tokenVersion !== payload.token_version) {
-    return res.status(401).json({ error: "UNAUTHORIZED" });
+    throw new AppError("UNAUTHORIZED", 401);
   }
 
   req.user = {
@@ -95,16 +96,16 @@ export async function authenticateApiKey(req: Request, res: Response, next: Next
 async function authenticateByApiKey(req: Request, res: Response, next: NextFunction) {
   const header = req.headers["x-api-key"];
   const key = typeof header === "string" ? header : Array.isArray(header) ? header[0] : undefined;
-  if (!key) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!key) throw new AppError("UNAUTHORIZED", 401);
 
   const record = await prisma.apiKey.findUnique({
     where: { keyHash: hashApiKey(key) },
     include: { user: { include: { roles: { include: { role: true } } } } },
   });
   if (!record || record.revokedAt || (record.expiresAt && record.expiresAt < new Date())) {
-    return res.status(401).json({ error: "INVALID_API_KEY" });
+    throw new AppError("INVALID_API_KEY", 401);
   }
-  if (!record.user.isActive) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!record.user.isActive) throw new AppError("UNAUTHORIZED", 401);
 
   req.user = {
     id: record.user.id,

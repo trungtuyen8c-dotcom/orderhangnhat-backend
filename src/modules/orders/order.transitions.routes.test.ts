@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
+import { errorHandler } from "../../app/errors/errorHandler.js";
 
 vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
@@ -51,6 +52,7 @@ function buildApp() {
   app.use(express.json());
   app.use((req: any, _res, next) => { req.requestId = "req-1"; next(); });
   app.use("/api/orders", ordersRouter);
+  app.use(errorHandler);
   return app;
 }
 
@@ -148,7 +150,7 @@ describe("POST /orders/:id/:action", () => {
 
   it("transition_givenMissingOrder_whenPost_then404", async () => {
     mockPrisma.order.findUnique.mockResolvedValue(null);
-    await request(buildApp()).post(`/api/orders/${ORDER_ID}/deposit`).expect(404, { error: "NOT_FOUND" });
+    await request(buildApp()).post(`/api/orders/${ORDER_ID}/deposit`).expect(404, { error: "NOT_FOUND", requestId: "req-1" });
   });
 
   it("transition_givenConcurrentChange_whenUpdateManyCountZero_then409StateConflictNoHistoryNoEvent", async () => {
@@ -185,7 +187,7 @@ describe("POST /orders/:id/:action", () => {
   it("transition_givenExistingPayRoute_whenPost_thenNotShadowedByActionRoute", async () => {
     // /:id/pay vẫn tới handler thanh toán (400 vì body thiếu walletId), không phải handler chuyển bước
     const res = await request(buildApp()).post(`/api/orders/${ORDER_ID}/pay`).send({}).expect(400);
-    expect(res.body).toEqual({ error: "BAD_REQUEST" });
+    expect(res.body).toEqual({ error: "BAD_REQUEST", requestId: "req-1" });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
   });
 });

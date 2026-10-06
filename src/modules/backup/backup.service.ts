@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { BackupRun } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { enqueue } from "../../jobs/queues.js";
 import { logger } from "../../infrastructure/logger.js";
 import { logWarn } from "../../infrastructure/systemLog.js";
@@ -32,7 +32,7 @@ export async function connectDrive(token: string, actor: Actor) {
   try {
     await setRcloneToken(token);
   } catch {
-    throw new LegacyError(400, "BAD_TOKEN", "Token không hợp lệ");
+    throw new AppError("BAD_TOKEN", 400, "Token không hợp lệ");
   }
   await logAudit({ actorId: actor.id, action: "backup.connect_drive", requestId: actor.requestId, entity: "backup" });
   return { connected: await rcloneConnected() };
@@ -56,7 +56,7 @@ async function createAndEnqueueRun(kind: "manual" | "scheduled", triggeredBy: st
 
 export async function startManualBackup(actor: Actor) {
   const run = await createAndEnqueueRun("manual", actor.id);
-  if (!run) throw new LegacyError(409, "BUSY", "Đang có bản backup chạy");
+  if (!run) throw new AppError("BUSY", 409, "Đang có bản backup chạy");
   await logAudit({ actorId: actor.id, targetId: run.id, action: "backup.run", requestId: actor.requestId, entity: "backup_run" });
   return serializeRun(run);
 }

@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 type Actor = { id: string; requestId?: string };
 
@@ -30,7 +30,7 @@ export async function createPayroll(
 
 export async function togglePaid(id: string, actor: Actor) {
   const r = await prisma.payroll.findUnique({ where: { id } });
-  if (!r) throw new LegacyError(404, "NOT_FOUND");
+  if (!r) throw new AppError("NOT_FOUND", 404);
   const updated = await prisma.payroll.update({ where: { id: r.id }, data: { paid: !r.paid, paidAt: r.paid ? null : new Date() } });
   await logAudit({
     actorId: actor.id, targetId: r.id, action: "payroll.paid_toggled", requestId: actor.requestId, entity: "payroll",

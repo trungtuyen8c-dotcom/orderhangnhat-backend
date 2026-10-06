@@ -1,11 +1,11 @@
 // Report shipments_* - đọc qua shipments.service. Khác luồng nội bộ: khớp dòng vàng ở chế độ persist=false
 // (không bật needsTax / không đăng ký khóa ghi chú) - kênh ext chỉ đọc, không có side-effect ẩn khi AI gọi 1 GET.
-import { LegacyError } from "../../../app/http/legacyError.js";
+import { AppError } from "../../../app/errors/AppError.js";
 import * as shipments from "../../shipments/shipments.service.js";
 
 const monthRange = (month?: string) => {
   const range = shipments.parseMonth(month);
-  if (!range) throw new LegacyError(400, "BAD_REQUEST", "month phải dạng YYYY-MM");
+  if (!range) throw new AppError("BAD_REQUEST", 400, "month phải dạng YYYY-MM");
   return range;
 };
 

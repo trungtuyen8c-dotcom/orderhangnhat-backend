@@ -19,7 +19,7 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { lockOrder, writeAudit } from "../accounting/accounting.repository.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 const mp = prisma as any;
 const actor = { id: "u1" };
@@ -39,7 +39,7 @@ beforeEach(() => {
 });
 
 async function rejection(p: Promise<unknown>) {
-  try { await p; } catch (e) { return e as LegacyError; }
+  try { await p; } catch (e) { return e as AppError; }
   throw new Error("expected rejection");
 }
 

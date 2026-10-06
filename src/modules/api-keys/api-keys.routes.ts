@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
-import { handle, parseOr400 } from "../../app/http/legacyError.js";
+import { asyncHandler } from "../../app/http/asyncHandler.js";
+import { parseOr400 } from "../../app/http/parse.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import { API_KEY_ALLOWED_SCOPES } from "./apiKey.js";
 import * as apiKeys from "./api-keys.service.js";
@@ -18,21 +19,21 @@ const createSchema = z.object({
   rateLimit: z.number().int().positive().max(1000).optional(),
 });
 
-apiKeysRouter.get("/", handle(async (req, res) => {
+apiKeysRouter.get("/", asyncHandler(async (req, res) => {
   res.json(await apiKeys.listKeys(req.user!.id));
 }));
 
-apiKeysRouter.post("/", handle(async (req, res) => {
+apiKeysRouter.post("/", asyncHandler(async (req, res) => {
   const body = parseOr400(createSchema, req.body, true);
   res.status(201).json(await apiKeys.createKey(req.user!, body, ctx(req)));
 }));
 
-apiKeysRouter.delete("/:id", handle(async (req, res) => {
+apiKeysRouter.delete("/:id", asyncHandler(async (req, res) => {
   await apiKeys.revokeKey(req.user!.id, req.params.id, ctx(req));
   res.json({ ok: true });
 }));
 
-apiKeysRouter.delete("/:id/purge", handle(async (req, res) => {
+apiKeysRouter.delete("/:id/purge", asyncHandler(async (req, res) => {
   await apiKeys.purgeKey(req.user!.id, req.params.id, ctx(req));
   res.json({ ok: true });
 }));

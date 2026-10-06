@@ -25,7 +25,7 @@ import * as warehouse from "../../warehouse/warehouse.service.js";
 import * as ccReports from "./companycost.js";
 import * as shipments from "../../shipments/shipments.service.js";
 import * as cc from "../../companycost/companycost.service.js";
-import { LegacyError } from "../../../app/http/legacyError.js";
+import { AppError } from "../../../app/errors/AppError.js";
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -38,8 +38,8 @@ describe("ext shipments reports", () => {
   it("taxAudit_invalidMonth_throwsLegacyBadRequestWithMessage", () => {
     let err: unknown;
     try { shipmentsReports.shipments_tax_audit({ month: "2026-3" }); } catch (e) { err = e; }
-    expect(err).toBeInstanceOf(LegacyError);
-    expect((err as LegacyError).toBody()).toEqual({ error: "BAD_REQUEST", message: "month phải dạng YYYY-MM" });
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).toBody()).toEqual({ error: "BAD_REQUEST", message: "month phải dạng YYYY-MM" });
     expect(shipments.taxAudit).not.toHaveBeenCalled();
   });
 

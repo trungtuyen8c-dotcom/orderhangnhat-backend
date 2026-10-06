@@ -1,5 +1,5 @@
 import { Prisma, type OrderStatus } from "@prisma/client";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { vnDayEnd, vnDayStart, vnMonthRange } from "../../app/vnTime.js";
 import { ORDER_STATUSES } from "./order.state.js";
 import { isPayLater } from "./order.validation.js";
@@ -32,7 +32,7 @@ const SORT_FIELDS: OrderSortField[] = ["orderDate", "code", "totalVnd", "created
 
 const str = (v: unknown) => (v === undefined || v === null ? "" : String(v)).trim();
 const list = (v: unknown) => str(v).split(",").map((s) => s.trim()).filter(Boolean);
-const bad = (field: string) => new LegacyError(400, "BAD_REQUEST", `Tham số không hợp lệ: ${field}`);
+const bad = (field: string) => new AppError("BAD_REQUEST", 400, `Tham số không hợp lệ: ${field}`);
 
 function statuses(v: unknown, field: string): OrderStatus[] {
   const xs = list(v);

@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { AppError } from "../app/errors/AppError.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
 import { logAudit } from "../app/audit.js";
@@ -50,13 +51,13 @@ export function authorize(required: string, apiKeyScope?: string) {
 
 async function check(required: string, apiKeyScope: string | undefined, req: Request, res: Response, next: NextFunction) {
   const user = req.user;
-  if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!user) throw new AppError("UNAUTHORIZED", 401);
 
   // API key luôn bị ép giao với scopes đã cấp lúc tạo key, kể cả khi user sở hữu là super_admin
   const scope = apiKeyScope ?? required;
   if (req.apiKeyScopes && !req.apiKeyScopes.includes(scope)) {
     await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: scope, via: "api_key_scope" }, ip: req.ip, requestId: req.requestId });
-    return res.status(403).json({ error: "FORBIDDEN", message: `API key thiếu scope: ${scope}` });
+    throw new AppError("FORBIDDEN", 403, `API key thiếu scope: ${scope}`);
   }
 
   if (user.roles.includes("super_admin")) {
@@ -69,7 +70,7 @@ async function check(required: string, apiKeyScope: string | undefined, req: Req
   const perms = await loadPermissions(user.id);
   if (!perms.includes(required)) {
     await logAudit({ actorId: user.id, action: "permission.checked.denied", metadata: { permission: required }, ip: req.ip, requestId: req.requestId });
-    return res.status(403).json({ error: "FORBIDDEN", message: `Thiếu quyền: ${required}` });
+    throw new AppError("FORBIDDEN", 403, `Thiếu quyền: ${required}`);
   }
   next();
 }

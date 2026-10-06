@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Order, OrderStatus, Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit, logAuditTx, logOrder } from "../../app/audit.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { paged, type PageParams } from "../../app/http/pagination.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import type { BusinessEventName } from "../../app/events/businessEvents.js";
@@ -26,7 +26,7 @@ import {
 type Tx = Prisma.TransactionClient;
 export type Actor = { id: string; roles: string[]; requestId?: string };
 
-const notFound = () => new LegacyError(404, "NOT_FOUND");
+const notFound = () => new AppError("NOT_FOUND", 404);
 
 function publish(eventName: BusinessEventName, actor: Actor, orderId: string, metadata?: Record<string, unknown>) {
   eventBus.publish({ eventName, actorId: actor.id, entityType: "order", entityId: orderId, metadata });
@@ -48,7 +48,7 @@ export function findWrongMarketplaceUrl(source: string, items: { url?: string }[
 
 function assertMarketplaceMatches(source: string, items: { url?: string }[]) {
   const wrongUrl = findWrongMarketplaceUrl(source, items);
-  if (wrongUrl) throw new LegacyError(400, "WRONG_MARKETPLACE", `Link không khớp: ${wrongUrl}`);
+  if (wrongUrl) throw new AppError("WRONG_MARKETPLACE", 400, `Link không khớp: ${wrongUrl}`);
 }
 
 // Tạo đơn với mã JA tăng dần; trùng mã do tạo đồng thời (P2002) -> chạy lại cả transaction (tối đa 5 lần).
@@ -195,7 +195,7 @@ export async function createOrder(d: CreateOrderInput, actor: Actor) {
 }
 
 export async function createConsignment(d: ConsignmentInput, actor: Actor) {
-  if (d.shipRateCurrency === "JPY" && !d.exchangeRate) throw new LegacyError(400, "BAD_REQUEST", "Đơn giá JPY/kg cần nhập tỉ giá");
+  if (d.shipRateCurrency === "JPY" && !d.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Đơn giá JPY/kg cần nhập tỉ giá");
   const { order, totals } = await createWithNextCode(async (tx, code) => {
     const o = await tx.order.create({ data: {
       id: uuid(), customerId: d.customerId, saleId: actor.id, status: INITIAL_STATUS.consignment,
@@ -237,7 +237,7 @@ async function commitStatusChange(order: Order, to: OrderStatus, actor: Actor, c
     // WHERE status = from: 2 request song song / bấm 2 lần -> request sau count 0 -> 409, không ghi đè.
     const r = await tx.order.updateMany({ where: { id: order.id, status: from }, data: { status: to } });
     if (r.count === 0) {
-      throw new LegacyError(409, "STATE_CONFLICT", "Đơn vừa được đổi trạng thái bởi thao tác khác - tải lại để xem trạng thái mới", { from, to });
+      throw new AppError("STATE_CONFLICT", 409, "Đơn vừa được đổi trạng thái bởi thao tác khác - tải lại để xem trạng thái mới", { from, to });
     }
     await logAuditTx(tx, {
       actorId: actor.id, targetId: order.id, action: c.auditAction, entity: "order", requestId: actor.requestId,
@@ -278,7 +278,7 @@ export async function changeStatus(id: string, to: OrderStatus, actor: Actor) {
 
 // Admin sửa sai: đặt bất kỳ trạng thái, bắt buộc lý do (validate ở route), audit before/after + lý do.
 export async function correctOrderStatus(id: string, to: OrderStatus, reason: string, actor: Actor) {
-  if (!isAdmin(actor.roles)) throw new LegacyError(403, "FORBIDDEN", "Chỉ Admin được sửa trạng thái đơn");
+  if (!isAdmin(actor.roles)) throw new AppError("FORBIDDEN", 403, "Chỉ Admin được sửa trạng thái đơn");
   const order = await loadForStatus(id);
   return commitStatusChange(order, to, actor, {
     auditAction: "order.status_corrected",
@@ -298,7 +298,7 @@ export async function getTransitions(id: string, canUpdateStatus: boolean, actor
 export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id }, include: { items: true, trackings: true } });
   if (!order) throw notFound();
-  if (!isEditable(order.status)) throw new LegacyError(409, "LOCKED", "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá");
+  if (!isEditable(order.status)) throw new AppError("LOCKED", 409, "Chỉ sửa được đơn ở trạng thái nháp/đã báo giá");
   if (d.items) assertMarketplaceMatches(order.source, d.items);
 
   const changes: { field: string; old: unknown; new: unknown }[] = [];
@@ -335,7 +335,7 @@ export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
     if (costs.length) {
       const ids = new Set(costs.map((c) => c.refId));
       const codes = order.trackings.filter((t) => ids.has(t.id)).map((t) => t.code || "(chưa có mã)").join(", ");
-      throw new LegacyError(409, "TRACKING_HAS_COST",
+      throw new AppError("TRACKING_HAS_COST", 409,
         `Kiện ${codes} đã có khoản phải trả kho/cty (着払い...) - xóa khoản đó ở "Phải trả kho/cty" trước khi bỏ kiện khỏi đơn`);
     }
   }
@@ -378,16 +378,16 @@ export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
 export async function payLaterOrder(id: string, input: { walletId: string; paidAt?: Date }, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
   if (!order) throw notFound();
-  if (!isPayLater(order.source)) throw new LegacyError(409, "NOT_YAHOO", "Chỉ đơn Yahoo/Mercari mới thanh toán sau");
-  if (order.yahooPaidAt) throw new LegacyError(409, "ALREADY_PAID", "Đơn đã thanh toán");
+  if (!isPayLater(order.source)) throw new AppError("NOT_YAHOO", 409, "Chỉ đơn Yahoo/Mercari mới thanh toán sau");
+  if (order.yahooPaidAt) throw new AppError("ALREADY_PAID", 409, "Đơn đã thanh toán");
   const wallet = await prisma.wallet.findUnique({ where: { id: input.walletId } });
-  if (!wallet) throw new LegacyError(404, "WALLET_NOT_FOUND");
+  if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
   const paidAt = input.paidAt ?? new Date();
   const items = order.items.map((i) => ({ unitPriceJpy: i.unitPriceJpy, qty: i.qty, shipJpy: i.shipJpy, paymentMethod: wallet.name, purchaseDate: i.purchaseDate }));
   await prisma.$transaction(async (tx) => {
     // Chốt yahooPaidAt có điều kiện trước -> bấm 2 lần / 2 request song song không trừ thẻ 2 lần.
     const claimed = await tx.order.updateMany({ where: { id: order.id, yahooPaidAt: null }, data: { yahooPaidAt: paidAt } });
-    if (claimed.count === 0) throw new LegacyError(409, "ALREADY_PAID", "Đơn đã thanh toán");
+    if (claimed.count === 0) throw new AppError("ALREADY_PAID", 409, "Đơn đã thanh toán");
     // gán thẻ vào tất cả món rồi trừ (dùng chung logic auto-charge)
     await tx.orderItem.updateMany({ where: { orderId: order.id }, data: { paymentMethod: wallet.name } });
     // Ngày ghi sổ ưu tiên: ngày mua món (nếu có) -> ngày đặt đơn -> KHÔNG dùng ngày bấm "Đã thanh toán"
@@ -403,7 +403,7 @@ export async function payLaterOrder(id: string, input: { walletId: string; paidA
 export async function unpayLaterOrder(id: string, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id } });
   if (!order) throw notFound();
-  const notPaid = () => new LegacyError(409, "NOT_PAID", "Đơn chưa thanh toán");
+  const notPaid = () => new AppError("NOT_PAID", 409, "Đơn chưa thanh toán");
   if (!isPayLater(order.source) || !order.yahooPaidAt) throw notPaid();
   await prisma.$transaction(async (tx) => {
     const released = await tx.order.updateMany({ where: { id: order.id, yahooPaidAt: { not: null } }, data: { yahooPaidAt: null } });
@@ -440,10 +440,10 @@ export async function deleteOrder(id: string, force: boolean, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id }, include: { payments: true, trackings: true } });
   if (!order) throw notFound();
   if (order.payments.length > 0) {
-    if (!force) throw new LegacyError(409, "HAS_PAYMENTS", "Đơn đã có giao dịch, không xóa được");
+    if (!force) throw new AppError("HAS_PAYMENTS", 409, "Đơn đã có giao dịch, không xóa được");
     // Force chỉ cho admin/super_admin: xóa cả giao dịch + hoàn lại số dư ví
     if (!isAdmin(actor.roles))
-      throw new LegacyError(403, "FORBIDDEN", "Chỉ Admin được xóa đơn đã có giao dịch");
+      throw new AppError("FORBIDDEN", 403, "Chỉ Admin được xóa đơn đã có giao dịch");
     await prisma.$transaction(async (tx) => {
       await reversePaymentWallets(tx, order.payments);
       await reverseOrderCardCharges(tx, order.id);

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
+import { errorHandler } from "../../app/errors/errorHandler.js";
 
 vi.mock("../../infrastructure/prisma.js", () => {
   const p: any = {
@@ -41,6 +42,7 @@ function buildApp() {
   app.use(express.json());
   app.use(cookieParser());
   app.use("/api/auth", authRouter);
+  app.use(errorHandler);
   return app;
 }
 

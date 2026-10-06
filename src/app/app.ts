@@ -1,4 +1,5 @@
 import express from "express";
+import { AppError } from "./errors/AppError.js";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { config } from "./config.js";
@@ -71,7 +72,7 @@ export function createApp() {
   app.use("/api/client-logs", clientLogsRouter);
   app.use("/api/backup", backupRouter);
 
-  app.use("/api", (_req, res) => res.status(404).json({ error: "NOT_FOUND", message: "API không tồn tại" }));
+  app.use("/api", (_req, _res, next) => next(new AppError("NOT_FOUND", 404, "API không tồn tại")));
   app.use(errorHandler);
   return app;
 }

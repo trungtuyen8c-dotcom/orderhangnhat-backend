@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { errorHandler } from "../app/errors/errorHandler.js";
 
 vi.mock("../infrastructure/prisma.js", () => ({
   prisma: { user: { findUnique: vi.fn() }, apiKey: { findUnique: vi.fn(), update: vi.fn() } },
@@ -29,26 +30,31 @@ function fakeRes() {
   return res;
 }
 
+// next giả như app thật: next(err) đi vào errorHandler (nơi duy nhất serialize lỗi); next() = cho qua.
+function fakeNext(req: any, res: any) {
+  return vi.fn((err?: unknown) => { if (err) errorHandler(err, req, res, () => {}); });
+}
+
 describe("authenticate middleware", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("authenticate_noAuthorizationHeader_returns401Unauthorized", async () => {
     const req: any = { headers: {} };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "UNAUTHORIZED" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_headerNotBearerScheme_returns401Unauthorized", async () => {
     const req: any = { headers: { authorization: "Basic abc123" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_verifyAccessThrowsTokenExpiredError_returns401TokenExpired", async () => {
@@ -59,11 +65,11 @@ describe("authenticate middleware", () => {
     });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "TOKEN_EXPIRED" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_verifyAccessThrowsOtherError_returns401InvalidToken", async () => {
@@ -72,11 +78,11 @@ describe("authenticate middleware", () => {
     });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "INVALID_TOKEN" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_jtiRevokedInRedis_returns401Revoked", async () => {
@@ -84,12 +90,12 @@ describe("authenticate middleware", () => {
     mockRedis.get.mockResolvedValue("1");
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(mockRedis.get).toHaveBeenCalledWith("revoked_jti:j1");
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "REVOKED" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_userNotFound_returns401Unauthorized", async () => {
@@ -98,11 +104,11 @@ describe("authenticate middleware", () => {
     mockPrisma.user.findUnique.mockResolvedValue(null);
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "UNAUTHORIZED" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_userInactive_returns401Unauthorized", async () => {
@@ -111,10 +117,10 @@ describe("authenticate middleware", () => {
     mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", isActive: false, tokenVersion: 1, roles: [] });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_tokenVersionMismatch_returns401Unauthorized", async () => {
@@ -123,10 +129,10 @@ describe("authenticate middleware", () => {
     mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", isActive: true, tokenVersion: 2, roles: [] });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticate_validTokenActiveUser_setsReqUserWithRolesAndCallsNext", async () => {
@@ -138,7 +144,7 @@ describe("authenticate middleware", () => {
     });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(req.user).toEqual({ id: "u1", tokenVersion: 1, jti: "j1", exp: 9999999999, roles: ["staff", "sale"] });
     expect(next).toHaveBeenCalled();
@@ -151,7 +157,7 @@ describe("authenticate middleware", () => {
     mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", isActive: true, tokenVersion: 1, roles: [] });
     const req: any = { headers: { authorization: "Bearer sometoken" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticate(req, res, next);
     expect(mockRedis.set).toHaveBeenCalledWith("online:u1", "1", "EX", 90);
   });
@@ -163,10 +169,10 @@ describe("authenticateApiKey middleware", () => {
   it("authenticateApiKey_noXApiKeyHeader_returns401", async () => {
     const req: any = { headers: {} };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateApiKey(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it.each([
@@ -177,11 +183,11 @@ describe("authenticateApiKey middleware", () => {
     mockPrisma.apiKey.findUnique.mockResolvedValue(record);
     const req: any = { headers: { "x-api-key": "oak_test" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateApiKey(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "INVALID_API_KEY" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticateApiKey_userInactive_returns401Unauthorized", async () => {
@@ -191,11 +197,11 @@ describe("authenticateApiKey middleware", () => {
     });
     const req: any = { headers: { "x-api-key": "oak_test" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateApiKey(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "UNAUTHORIZED" });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalledWith();
   });
 
   it("authenticateApiKey_validKey_setsReqUserAndApiKeyScopesAndCallsNext", async () => {
@@ -206,7 +212,7 @@ describe("authenticateApiKey middleware", () => {
     mockPrisma.apiKey.update.mockResolvedValue({});
     const req: any = { headers: { "x-api-key": "oak_test" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateApiKey(req, res, next);
     expect(req.user).toEqual(expect.objectContaining({ id: "u1", tokenVersion: 2, jti: "apikey:k1", roles: ["sale"] }));
     expect(req.apiKeyScopes).toEqual(["orders.list", "customers.list"]);
@@ -221,7 +227,7 @@ describe("authenticateEither middleware", () => {
     mockPrisma.apiKey.findUnique.mockResolvedValue(null);
     const req: any = { headers: { "x-api-key": "oak_bad" } };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateEither(req, res, next);
     // Lỗi đặc trưng của nhánh API key (INVALID_API_KEY), không phải nhánh JWT (UNAUTHORIZED) -> chứng minh đúng route.
     expect(res.json).toHaveBeenCalledWith({ error: "INVALID_API_KEY" });
@@ -230,7 +236,7 @@ describe("authenticateEither middleware", () => {
   it("authenticateEither_noXApiKeyHeader_routesToJwtPath", async () => {
     const req: any = { headers: {} };
     const res = fakeRes();
-    const next = vi.fn();
+    const next = fakeNext(req, res);
     await authenticateEither(req, res, next);
     expect(res.json).toHaveBeenCalledWith({ error: "UNAUTHORIZED" });
   });

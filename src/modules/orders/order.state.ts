@@ -1,6 +1,6 @@
 import type { Order, OrderStatus, Prisma } from "@prisma/client";
 import { prisma } from "../../infrastructure/prisma.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 
 // Nguồn sự thật duy nhất cho Order.status. Mọi chỗ ghi status (module orders + sự kiện kho) đi qua file này.
 // 3 chế độ ghi:
@@ -94,9 +94,9 @@ export const findTransition = (from: OrderStatus, action: OrderAction) =>
 export const findTransitionTo = (from: OrderStatus, to: OrderStatus) =>
   USER_TRANSITIONS.find((t) => t.from === from && t.to === to);
 
-export function invalidTransition(from: OrderStatus, to: OrderStatus | null, action: string | null): LegacyError {
+export function invalidTransition(from: OrderStatus, to: OrderStatus | null, action: string | null): AppError {
   const target = to ?? "?";
-  return new LegacyError(409, "STATE_INVALID_TRANSITION",
+  return new AppError("STATE_INVALID_TRANSITION", 409,
     `Không chuyển được trạng thái đơn ${from} -> ${target}${action ? ` (bước "${action}")` : ""}`,
     { from, to, action });
 }

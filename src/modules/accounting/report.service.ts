@@ -1,5 +1,5 @@
 import { prisma } from "../../infrastructure/prisma.js";
-import { LegacyError } from "../../app/http/legacyError.js";
+import { AppError } from "../../app/errors/AppError.js";
 import { vnDayEnd, vnDayStart, vnMonthKey } from "../../app/vnTime.js";
 
 // Báo cáo chỉ đọc. Mốc ngày/tháng luôn theo giờ VN (vnMonthKey / vnDayStart / vnDayEnd).
@@ -153,7 +153,7 @@ export async function expensesMonthly(monthQ: unknown) {
 // ban đầu nhập tay lúc tạo ví không có dòng sổ tương ứng) rồi lùi theo giao dịch, KHÔNG cộng dồn từ 0.
 export async function walletDailySummary(walletId: string, monthQ: unknown) {
   const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
-  if (!wallet) throw new LegacyError(404, "WALLET_NOT_FOUND");
+  if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
 
   const monthStr = String(monthQ ?? "");
   const month = /^\d{4}-\d{2}$/.test(monthStr) ? monthStr : vnMonthKey(new Date());

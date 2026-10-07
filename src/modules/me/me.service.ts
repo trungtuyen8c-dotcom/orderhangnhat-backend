@@ -1,14 +1,16 @@
 import { prisma } from "../../infrastructure/prisma.js";
 import { redis } from "../../infrastructure/redis.js";
 import type { AuthUser } from "../../middlewares/authenticate.js";
+import { needsTwoFactorSetup } from "../auth/twoFactor.policy.js";
 
 const ONLINE_PREFIX = "online:";
 
 export async function getMe(u: AuthUser) {
-  const user = await prisma.user.findUnique({
+  const row = await prisma.user.findUnique({
     where: { id: u.id },
-    select: { id: true, email: true, fullName: true },
+    select: { id: true, email: true, fullName: true, totpEnabledAt: true },
   });
+  const { totpEnabledAt = null, ...user } = row ?? {};
   const isSuper = u.roles.includes("super_admin");
   const perms = isSuper
     ? []
@@ -16,7 +18,11 @@ export async function getMe(u: AuthUser) {
         where: { roles: { some: { role: { users: { some: { userId: u.id } } } } } },
         select: { key: true },
       });
-  return { ...user, roles: u.roles, permissions: isSuper ? ["*"] : perms.map((p) => p.key) };
+  return {
+    ...user, roles: u.roles, permissions: isSuper ? ["*"] : perms.map((p) => p.key),
+    twoFactorEnabled: !!totpEnabledAt,
+    twoFactorSetupRequired: needsTwoFactorSetup({ totpEnabledAt }, u.roles),
+  };
 }
 
 // SCAN thay KEYS (KEYS chặn Redis khi nhiều key - plan P1-09).

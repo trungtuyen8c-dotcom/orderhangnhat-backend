@@ -8,10 +8,16 @@ import { AppError } from "../../app/errors/AppError.js";
 import { signAccess } from "./jwt.js";
 import { verifyPassword, hashPassword, sha256 } from "./password.js";
 import type { AuthUser } from "../../middlewares/authenticate.js";
+import { createChallenge, completeChallenge, type SecondFactor } from "./twoFactor.service.js";
+import { needsTwoFactorSetup } from "./twoFactor.policy.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 type Ctx = { ip?: string | null; requestId?: string };
 export type TokenPair = { access: string; refresh: string };
+// Bật 2FA -> chưa cấp token, trả challenge cho bước 2 (POST /login/2fa).
+export type LoginResult =
+  | { kind: "tokens"; tokens: TokenPair; twoFactorSetupRequired: boolean }
+  | { kind: "challenge"; challengeToken: string };
 
 async function issueTokens(db: Db, userId: string, tokenVersion: number): Promise<TokenPair> {
   const jti = uuid();
@@ -36,14 +42,30 @@ async function revokeAllSessions(db: Db, userId: string, extra: Prisma.UserUpdat
   await db.user.update({ where: { id: userId }, data: { ...extra, tokenVersion: { increment: 1 } } });
 }
 
-export async function login(email: string, password: string, ctx: Ctx): Promise<TokenPair> {
-  const user = await prisma.user.findUnique({ where: { email } });
+export async function login(email: string, password: string, ctx: Ctx): Promise<LoginResult> {
+  const user = await prisma.user.findUnique({ where: { email }, include: { roles: { include: { role: true } } } });
   if (!user || !user.isActive || !(await verifyPassword(password, user.passwordHash))) {
     await logAudit({ action: "auth.login.failed", metadata: { email }, ip: ctx.ip, requestId: ctx.requestId });
     throw new AppError("INVALID_CREDENTIALS", 401);
   }
+  if (user.totpEnabledAt && user.totpSecret) {
+    const challengeToken = await createChallenge(user.id);
+    await logAudit({ actorId: user.id, action: "auth.login.2fa_challenge", ip: ctx.ip, requestId: ctx.requestId });
+    return { kind: "challenge", challengeToken };
+  }
   const tokens = await issueTokens(prisma, user.id, user.tokenVersion);
-  await logAudit({ actorId: user.id, action: "auth.login.success", ip: ctx.ip, requestId: ctx.requestId });
+  const twoFactorSetupRequired = needsTwoFactorSetup(user, user.roles.map((r) => r.role.key));
+  await logAudit({
+    actorId: user.id, action: "auth.login.success",
+    metadata: twoFactorSetupRequired ? { twoFactorSetupRequired } : undefined, ip: ctx.ip, requestId: ctx.requestId,
+  });
+  return { kind: "tokens", tokens, twoFactorSetupRequired };
+}
+
+export async function loginSecondFactor(challengeToken: string, factor: SecondFactor, ctx: Ctx): Promise<TokenPair> {
+  const { user, method } = await completeChallenge(challengeToken, factor, ctx);
+  const tokens = await issueTokens(prisma, user.id, user.tokenVersion);
+  await logAudit({ actorId: user.id, action: "auth.login.success", metadata: { method }, ip: ctx.ip, requestId: ctx.requestId });
   return tokens;
 }
 

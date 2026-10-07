@@ -5,6 +5,7 @@ import { asyncHandler } from "../../app/http/asyncHandler.js";
 import { parseOr400 } from "../../app/http/parse.js";
 import { authenticate } from "../../middlewares/authenticate.js";
 import * as auth from "./auth.service.js";
+import { twoFactorRouter } from "./twoFactor.routes.js";
 
 export const authRouter = Router();
 
@@ -23,14 +24,31 @@ const ctx = (req: Request) => ({ ip: req.ip, requestId: req.requestId });
 const refreshCookie = (req: Request): string | undefined => req.cookies?.[REFRESH_COOKIE];
 
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+// Đúng 1 trong 2: code (TOTP 6 số) hoặc recoveryCode.
+const login2faSchema = z.object({
+  challengeToken: z.string().min(20).max(200),
+  code: z.string().trim().regex(/^\d{6}$/).optional(),
+  recoveryCode: z.string().trim().min(16).max(40).optional(),
+}).refine((v) => !!v.code !== !!v.recoveryCode);
 const changePwSchema = z.object({ oldPassword: z.string().min(1), newPassword: z.string().min(6) });
 
 authRouter.post("/login", asyncHandler(async (req, res) => {
   const { email, password } = parseOr400(loginSchema, req.body);
-  const { access, refresh } = await auth.login(email, password, ctx(req));
+  const result = await auth.login(email, password, ctx(req));
+  // 2FA bật: chưa cấp token/cookie, client gửi challengeToken + mã ở POST /login/2fa.
+  if (result.kind === "challenge") return void res.json({ twoFactorRequired: true, challengeToken: result.challengeToken });
+  res.cookie(REFRESH_COOKIE, result.tokens.refresh, cookieOpts);
+  res.json({ accessToken: result.tokens.access, ...(result.twoFactorSetupRequired ? { twoFactorSetupRequired: true } : {}) });
+}));
+
+authRouter.post("/login/2fa", asyncHandler(async (req, res) => {
+  const p = parseOr400(login2faSchema, req.body);
+  const { access, refresh } = await auth.loginSecondFactor(p.challengeToken, { code: p.code, recoveryCode: p.recoveryCode }, ctx(req));
   res.cookie(REFRESH_COOKIE, refresh, cookieOpts);
   res.json({ accessToken: access });
 }));
+
+authRouter.use("/2fa", twoFactorRouter);
 
 authRouter.post("/renew", asyncHandler(async (req, res) => {
   const { access, refresh } = await auth.renew(refreshCookie(req), ctx(req));

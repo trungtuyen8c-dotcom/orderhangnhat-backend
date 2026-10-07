@@ -31,4 +31,9 @@ export const config = {
   workersEnabled: (process.env.WORKERS_ENABLED ?? "true") === "true",
   // Lịch backup tự động (cú pháp node-cron, giờ Asia/Ho_Chi_Minh). Đặt rỗng để tắt.
   backupCron: process.env.BACKUP_CRON ?? "0 2 * * *",
+  // 2FA: khoá AES-256-GCM mã hoá TOTP secret (32 byte, base64 hoặc hex 64 ký tự). Production bắt buộc khi có user bật 2FA.
+  totpEncKey: process.env.TOTP_ENC_KEY ?? "",
+  totpIssuer: process.env.TOTP_ISSUER || "Order Hang Nhat",
+  // Vai trò bắt buộc bật 2FA (phân cách dấu phẩy). Rỗng = 2FA tuỳ chọn cho mọi user.
+  require2faRoles: list("REQUIRE_2FA_ROLES"),
 };

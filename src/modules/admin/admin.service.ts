@@ -17,9 +17,9 @@ const notFound = () => new AppError("NOT_FOUND", 404);
 export async function listUsers() {
   const users = await prisma.user.findMany({
     orderBy: { createdAt: "desc" },
-    select: { id: true, email: true, fullName: true, isActive: true, roles: { select: { role: { select: { key: true, name: true } } } } },
+    select: { id: true, email: true, fullName: true, isActive: true, totpEnabledAt: true, roles: { select: { role: { select: { key: true, name: true } } } } },
   });
-  return users.map((u) => ({ ...u, roles: u.roles.map((r) => r.role.key) }));
+  return users.map(({ totpEnabledAt, ...u }) => ({ ...u, twoFactorEnabled: !!totpEnabledAt, roles: u.roles.map((r) => r.role.key) }));
 }
 
 async function grantRoles(tx: Tx, userId: string, roleKeys: string[], grantedBy: string) {

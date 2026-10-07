@@ -50,7 +50,7 @@ describe("getMe", () => {
   it("getMe_superAdmin_returnsWildcardPermissionWithoutQueryingPermissions", async () => {
     mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", email: "a@b.c", fullName: null });
     const me = await getMe(user(["super_admin"]));
-    expect(me).toEqual({ id: "u1", email: "a@b.c", fullName: null, roles: ["super_admin"], permissions: ["*"] });
+    expect(me).toEqual({ id: "u1", email: "a@b.c", fullName: null, roles: ["super_admin"], permissions: ["*"], twoFactorEnabled: false, twoFactorSetupRequired: false });
     expect(mockPrisma.permission.findMany).not.toHaveBeenCalled();
   });
 

@@ -10,6 +10,7 @@ import "./modules/notifications/notification.jobs.js";
 import "./modules/notifications/notification.subscribers.js";
 import { logger } from "./infrastructure/logger.js";
 import { logError } from "./infrastructure/systemLog.js";
+import { checkTotpKeyAtStartup } from "./modules/auth/twoFactor.service.js";
 
 const app = createApp();
 
@@ -20,6 +21,7 @@ const server = app.listen(config.port, async () => {
   catch (e) { logError({ err: (e as Error).message }, "startup_backfill_needs_tax_failed"); }
   // Worker + cron trong process API trừ khi WORKERS_ENABLED=false (khi đó chạy src/worker.ts riêng).
   await startBackground({ role: "api" });
+  await checkTotpKeyAtStartup();
   logger.info({ port: config.port }, "api_listening");
 });
 

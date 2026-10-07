@@ -8,18 +8,35 @@ datasource db {
 }
 
 model User {
-  id            String         @id @default(uuid()) @db.Uuid
-  email         String         @unique
-  passwordHash  String         @map("password_hash")
-  fullName      String?        @map("full_name")
-  tokenVersion  Int            @default(0) @map("token_version")
-  isActive      Boolean        @default(true) @map("is_active")
-  createdAt     DateTime       @default(now()) @map("created_at")
+  id            String             @id @default(uuid()) @db.Uuid
+  email         String             @unique
+  passwordHash  String             @map("password_hash")
+  fullName      String?            @map("full_name")
+  tokenVersion  Int                @default(0) @map("token_version")
+  isActive      Boolean            @default(true) @map("is_active")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  // 2FA (TOTP): secret mã hoá AES-256-GCM bằng TOTP_ENC_KEY. Có secret + totpEnabledAt null = đang setup chờ xác nhận.
+  totpSecret    String?            @map("totp_secret")
+  totpEnabledAt DateTime?          @map("totp_enabled_at")
   roles         UserRole[]
   refreshTokens RefreshToken[]
   apiKeys       ApiKey[]
+  recoveryCodes UserRecoveryCode[]
 
   @@map("users")
+}
+
+// Mã khôi phục 2FA dùng 1 lần - chỉ lưu sha256 (mã ngẫu nhiên 80 bit), hiện cho user đúng 1 lần lúc tạo.
+model UserRecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @unique @map("code_hash")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_recovery_codes")
 }
 
 model Role {

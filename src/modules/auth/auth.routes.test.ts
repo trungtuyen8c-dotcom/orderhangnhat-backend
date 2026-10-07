@@ -87,7 +87,7 @@ describe("POST /api/auth/login", () => {
   });
 
   it("login_validCredentials_returnsAccessTokenSetsRefreshCookieAndCreatesRefreshRow", async () => {
-    mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", isActive: true, passwordHash: "hash", tokenVersion: 0 });
+    mockPrisma.user.findUnique.mockResolvedValue({ id: "u1", isActive: true, passwordHash: "hash", tokenVersion: 0, roles: [], totpEnabledAt: null });
     mockVerifyPassword.mockResolvedValue(true);
     const res = await request(buildApp()).post("/api/auth/login").send({ email: "a@b.com", password: "right" });
     expect(res.status).toBe(200);
@@ -97,6 +97,37 @@ describe("POST /api/auth/login", () => {
       expect.objectContaining({ data: expect.objectContaining({ userId: "u1", used: false }) }),
     );
     expect(mockLogAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "auth.login.success", actorId: "u1" }));
+    expect(res.body.twoFactorSetupRequired).toBeUndefined();
+  });
+
+  it("login_twoFactorEnabled_returnsChallengeWithoutTokensOrCookie", async () => {
+    // Given: user đã bật 2FA
+    mockPrisma.user.findUnique.mockResolvedValue({
+      id: "u1", isActive: true, passwordHash: "hash", tokenVersion: 0, roles: [], totpEnabledAt: new Date(), totpSecret: "v1:a:b:c",
+    });
+    mockVerifyPassword.mockResolvedValue(true);
+    // When
+    const res = await request(buildApp()).post("/api/auth/login").send({ email: "a@b.com", password: "right" });
+    // Then: chỉ có challengeToken (lưu Redis 5 phút, key là hash của token), không token/cookie
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ twoFactorRequired: true, challengeToken: expect.any(String) });
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(mockPrisma.refreshToken.create).not.toHaveBeenCalled();
+    expect(mockRedis.set).toHaveBeenCalledWith(expect.stringMatching(/^2fa:challenge:[0-9a-f]{64}$/), "u1", "EX", 300);
+    expect(mockRedis.set.mock.calls[0][0]).not.toContain(res.body.challengeToken);
+  });
+
+  it("login_2faInvalidBody_bothCodeAndRecovery_returns400", async () => {
+    const res = await request(buildApp()).post("/api/auth/login/2fa")
+      .send({ challengeToken: "x".repeat(43), code: "123456", recoveryCode: "AAAA-BBBB-CCCC-DDDD" });
+    expect(res.status).toBe(400);
+  });
+
+  it("login_2faUnknownChallenge_returns401ChallengeInvalid", async () => {
+    mockRedis.get.mockResolvedValue(null);
+    const res = await request(buildApp()).post("/api/auth/login/2fa").send({ challengeToken: "x".repeat(43), code: "123456" });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("TWO_FACTOR_CHALLENGE_INVALID");
   });
 });
 

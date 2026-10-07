@@ -6,6 +6,7 @@ import { paged, readPage } from "../../app/http/pagination.js";
 import { authenticateEither } from "../../middlewares/authenticate.js";
 import { authorize } from "../../middlewares/authorize.js";
 import * as admin from "./admin.service.js";
+import { adminReset as resetTwoFactor } from "../auth/twoFactor.service.js";
 
 export const adminRouter = Router();
 adminRouter.use(authenticateEither);
@@ -49,6 +50,12 @@ adminRouter.patch("/users/:id", authorize("users.update"), asyncHandler(async (r
 
 adminRouter.delete("/users/:id", authorize("users.delete"), asyncHandler(async (req, res) => {
   await admin.deleteUser(req.params.id, actor(req));
+  res.json({ ok: true });
+}));
+
+// Reset 2FA (user mất điện thoại + mã khôi phục): xoá secret + mã khôi phục, user đăng nhập lại chỉ bằng mật khẩu.
+adminRouter.post("/users/:id/2fa/reset", authorize("users.update"), asyncHandler(async (req, res) => {
+  await resetTwoFactor(req.params.id, { id: req.user!.id, roles: req.user!.roles, requestId: req.requestId });
   res.json({ ok: true });
 }));
 

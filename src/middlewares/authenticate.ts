@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { AppError } from "../app/errors/AppError.js";
 import { verifyAccess } from "../modules/auth/jwt.js";
 import { hashApiKey } from "../modules/api-keys/apiKey.js";
+import { enforceTwoFactorPolicy } from "../modules/auth/twoFactor.policy.js";
 import { prisma } from "../infrastructure/prisma.js";
 import { redis } from "../infrastructure/redis.js";
 import { logger } from "../infrastructure/logger.js";
@@ -72,12 +73,16 @@ async function authenticateJwt(req: Request, res: Response, next: NextFunction) 
     throw new AppError("UNAUTHORIZED", 401);
   }
 
+  const roles = user.roles.map((ur) => ur.role.key);
+  // REQUIRE_2FA_ROLES: user thuộc vai trò bắt buộc mà chưa bật 2FA -> 403 trừ /api/me, /api/auth/*
+  enforceTwoFactorPolicy(req, user, roles);
+
   req.user = {
     id: user.id,
     tokenVersion: user.tokenVersion,
     jti: payload.jti,
     exp: payload.exp,
-    roles: user.roles.map((ur) => ur.role.key),
+    roles,
   };
   background(redis.set(`online:${user.id}`, "1", "EX", 90), "online_heartbeat_failed", { user_id: user.id });
   next();

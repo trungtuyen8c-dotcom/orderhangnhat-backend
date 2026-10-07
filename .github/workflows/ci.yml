@@ -3,7 +3,7 @@ name: CI Backend
 # Chan loi truoc khi build image: typecheck + test + build. Khong deploy.
 on:
   push:
-    branches: [main, rewrite]
+    branches: [main, rewrite, "v*"]
   pull_request:
 
 jobs:

@@ -27,7 +27,7 @@ const ROLES: Record<string, { name: string; system: boolean; perms: string[] | "
   accountant: { name: "Kế toán", system: false, perms: ["orders.list", "orders.read", "orders.update_status", "accounting.note_deposit", "accounting.record_payment", "accounting.refund", "accounting.reconcile", "wallets.manage", "companycost.view", "stats.view"] },
   buyer: { name: "NV mua", system: false, perms: ["orders.list", "orders.read", "orders.create", "orders.update", "orders.update_status", "customers.list", "customers.create", "customers.update", "accounting.note_deposit", "trackings.list", "trackings.create", "trackings.update", "trackings.resolve", "trackings.delete", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "warehouse.weigh_vn", "media.upload", "control.view", "companycost.view", "stats.view"] },
   jp_warehouse: { name: "Kho Nhật", system: false, perms: ["orders.list", "trackings.list", "trackings.update", "trackings.resolve", "shipments.list", "shipments.upload_doc", "warehouse.weigh_jp", "media.upload", "control.view", "stats.view"] },
-  vn_warehouse: { name: "Kho VN", system: false, perms: ["trackings.list", "warehouse.weigh_vn", "stats.view"] },
+  vn_warehouse: { name: "Kho VN", system: false, perms: ["trackings.list", "trackings.update", "warehouse.weigh_vn", "stats.view"] },
   customs: { name: "Hải quan", system: false, perms: ["orders.list", "orders.update_status", "shipments.list", "stats.view"] },
   delivery: { name: "Giao hàng", system: false, perms: ["orders.list", "orders.update_status", "stats.view"] },
   viewer: { name: "Viewer", system: false, perms: ["orders.list", "orders.read", "stats.view"] },

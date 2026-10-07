@@ -41,7 +41,9 @@ async function loadLockedDates(): Promise<Set<string>> {
 // Ngày ĐÃ chốt thì KHÔNG tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
 // Trả các dòng bị xóa trắng hẳn cần dọn màu/nội dung trên sheet.
 async function unpackStaleRowClaims(rows: WarehousePackRow[], lockedDates: Set<string>, recentDays?: number): Promise<BlankedRow[]> {
-  const cutoff = recentDays ? new Date(Date.now() - recentDays * 86400000) : null;
+  // Reader chỉ quét tab có 0h ngày >= mốc -> làm tròn mốc LÊN đầu ngày để chỉ xét tracking thuộc đúng các tab đã quét.
+  // Không làm tròn thì tracking có giờ trong ngày biên (tab bị bỏ qua) bị coi là dòng đã xóa và bị gỡ/xóa nhầm.
+  const cutoff = recentDays ? new Date(Math.ceil((Date.now() - recentDays * 86400000) / 86400000) * 86400000) : null;
   const packRowCandidates = await prisma.tracking.findMany({ where: { packRow: { not: null }, ...(cutoff ? { packedAt: { gte: cutoff } } : {}) } });
   const claimByRowDay = new Map<string, typeof packRowCandidates>();
   for (const cand of packRowCandidates) {

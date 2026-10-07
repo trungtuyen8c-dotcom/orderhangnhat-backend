@@ -186,7 +186,8 @@ export async function overview() {
   ]);
   const cartonMismatch = cartons.filter((c) => {
     const actual = c.trackings.reduce((s, t) => s + effKg(t), 0);
-    return Math.abs(actual - Number(c.declaredWeightKg)) > 0.1;
+    // So theo gam (số nguyên) - so số thực trực tiếp làm lệch đúng 0.1kg (1.1 - 1 = 0.10000000000000009) bị tính là lệch.
+    return Math.abs(Math.round(actual * 1000) - Math.round(Number(c.declaredWeightKg) * 1000)) > 100;
   }).length;
   return {
     lateOrdersMercari, lateOrdersYahoo, lateOrdersNormal, notReviewed, pendingDeposits, unmatched, missingPrice, cartonMismatch,

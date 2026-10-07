@@ -148,3 +148,67 @@ describe("togglePaid", () => {
     expect((await rejection(togglePaid("x"))).status).toBe(404);
   });
 });
+
+describe("createEntry - validation gaps", () => {
+  it("createEntry_orderCodeNotFound_throws400", async () => {
+    mp.order.findUnique.mockResolvedValue(null);
+    const e = await rejection(createEntry({ ...base, orderCode: "OD404" }, actor));
+    expect(e.toBody()).toEqual({ error: "BAD_REQUEST", message: "Không tìm thấy mã đơn này" });
+  });
+
+  it("createEntry_orderCodeWithoutTrackings_throws400", async () => {
+    mp.order.findUnique.mockResolvedValue({ trackings: [] });
+    const e = await rejection(createEntry({ ...base, orderCode: "OD1" }, actor));
+    expect(e.message).toBe("Đơn chưa có tracking nào");
+  });
+
+  it("createEntry_bothTrackingAndOrderCode_trackingCodeWinsAndOrderNotLookedUp", async () => {
+    mp.tracking.findFirst.mockResolvedValue({ id: "t1", orderId: "o1" });
+    const c = await createEntry({ ...base, trackingCode: "T1", orderCode: "OD1" }, actor);
+    expect(c).toMatchObject({ refId: "t1" });
+    expect(mp.order.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("createEntry_chakubaraiWithBlankCodes_savedUnlinkedWithoutTouchingDebt", async () => {
+    const c = await createEntry({ ...base, trackingCode: "  ", orderCode: "" }, actor);
+    expect(c).toMatchObject({ refId: null, lateAfterLock: false });
+    expect(recomputeOrderTotals).not.toHaveBeenCalled();
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
+  });
+
+  it("createEntry_jpyWithZeroRate_throws400", async () => {
+    const e = await rejection(createEntry({ ...base, kind: "other", currency: "JPY", exchangeRate: 0 }, actor));
+    expect(e.message).toBe("Nhập JPY cần tỉ giá");
+    expect(mp.companyCost.create).not.toHaveBeenCalled();
+  });
+
+  it("createEntry_success_writesCreatedAuditWithAmountAndRef", async () => {
+    mp.tracking.findFirst.mockResolvedValue({ id: "t1", orderId: "o1" });
+    await createEntry({ ...base, trackingCode: "T1" }, { id: "u1", requestId: "r1" });
+    expect((writeAudit as any).mock.calls[0][1]).toMatchObject({
+      actorId: "u1", action: "company_cost.created", requestId: "r1", metadata: { kind: "chakubarai", amountVnd: 50000, refId: "t1", lateAfterLock: false },
+    });
+  });
+
+  it("createEntry_linkedOrderVanishedBeforeLock_doesNotRecomputeOrQueueSheet", async () => {
+    mp.tracking.findFirst.mockResolvedValue({ id: "t1", orderId: "o1" });
+    (lockOrder as any).mockResolvedValue(null);
+    await createEntry({ ...base, trackingCode: "T1" }, actor);
+    expect(recomputeOrderTotals).not.toHaveBeenCalled();
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("deleteEntry - audit", () => {
+  it("deleteEntry_success_writesDeletedAudit", async () => {
+    mp.companyCost.findUnique.mockResolvedValue({ id: "cc1", refId: null });
+    await deleteEntry("cc1", { id: "u1", requestId: "r1" });
+    expect((writeAudit as any).mock.calls[0][1]).toEqual({ actorId: "u1", targetId: "cc1", action: "company_cost.deleted", requestId: "r1" });
+  });
+
+  it("deleteEntry_missing_doesNotDelete", async () => {
+    mp.companyCost.findUnique.mockResolvedValue(null);
+    await rejection(deleteEntry("x", actor));
+    expect(mp.companyCost.delete).not.toHaveBeenCalled();
+  });
+});

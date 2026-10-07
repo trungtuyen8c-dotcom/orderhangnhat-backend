@@ -254,17 +254,51 @@ describe("syncCustomerOrders - rows per month", () => {
     expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 3", "A4", { majorDimension: "ROWS", values: [["ORD1"]] });
   });
 
-  it("syncCustomerOrders_mãLinkHeaderNotInColumnA_overwritesRow1WithDefaultTemplate", async () => {
+  it("syncCustomerOrders_mãLinkHeaderNotInColumnA_writesUnderFoundHeaderWithoutTemplate", async () => {
     setup({
       orders: [order({ code: "ORDX" })],
       tabs: { "Tháng 3": { grid: [["Ghi chú riêng", "Mã Link"]], sheetId: 7 } },
     });
 
-    // findHeaderRow chỉ dò cột A -> không thấy -> ghi template mặc định đè lên dòng 1
     await syncCustomerOrders("c1");
 
-    expect(mClient.updateValues.mock.calls.find(([, , a1]) => a1 === "A1")?.[3].values[0][1]).toBe("Ngày đặt");
-    expect(written("Tháng 3", "A")).toEqual(["ORDX"]);
+    expect(mClient.updateValues.mock.calls.find(([, , a1]) => a1 === "A1")).toBeUndefined();
+    expect(written("Tháng 3", "B")).toEqual(["ORDX"]);
+  });
+
+  it("syncCustomerOrders_tabHasContentButNoHeader_writesNothingToTab", async () => {
+    setup({
+      orders: [order({ code: "ORDX" })],
+      tabs: { "Tháng 3": { grid: [["Ghi chú riêng"], ["dữ liệu khách"]], sheetId: 7 } },
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(mClient.updateValues.mock.calls.filter(([, t]) => t === "Tháng 3")).toEqual([]);
+    expect(mClient.clearValues.mock.calls.filter(([, t]) => t === "Tháng 3")).toEqual([]);
+    expect(logWarn).toHaveBeenCalledWith({ tab: "Tháng 3" }, "gsheets_customer_tab_header_missing_skipped");
+  });
+
+  it("syncCustomerOrders_sameMonthTwoYears_laterYearGoesToOwnYearTab", async () => {
+    setup({
+      orders: [
+        order({ id: "o1", code: "OLD", items: [item({ purchaseDate: new Date("2025-03-10T03:00:00Z") })] }),
+        order({ id: "o2", code: "NEW", items: [item({ purchaseDate: MAR15 })] }),
+      ],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "A")).toEqual(["OLD"]);
+    expect(written("Tháng 3/2026", "A")).toEqual(["NEW"]);
+  });
+
+  it("syncCustomerOrders_jpySurchargeWithoutRate_keepsYenAmount", async () => {
+    setup({ orders: [order({ exchangeRate: null, surchargeAmount: 1500, surchargeCurrency: "JPY" })] });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "K")).toEqual(["¥1,500"]);
   });
 
   it("syncCustomerOrders_customColumnShiftsTracking_writesTrackingUnderItsHeader", async () => {

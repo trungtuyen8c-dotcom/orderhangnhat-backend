@@ -51,12 +51,17 @@ function loadDeposits(customerId: string) {
 // Trả field-key -> giá trị (không phải mảng theo vị trí cột) - runCustomerSync tự dò đúng cột theo tiêu đề thực
 // của từng khách để ghi, tránh lệch cột khi khách chèn thêm cột riêng.
 // Trả map: tháng -> { rows, jpyTotal: tổng ¥ (mirror "Tổng tiền"), vndTotal: tổng quy đổi ₫ các món có tỉ giá }.
-function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>, custShipRateVnd?: number | null): Map<number, MonthRows> {
-  const byMonth = new Map<number, { date: Date; row: FieldRow; jpy: number; vnd: number }[]>();
-  const bucket = (m: number) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
+// Khóa tháng có năm ("2026-03") - đơn tháng 3/2025 và 3/2026 là 2 tháng khác nhau, không dồn chung 1 tab.
+const monthKeyOf = (d: Date) => { const v = vnDate(d); return `${v.getUTCFullYear()}-${String(v.getUTCMonth() + 1).padStart(2, "0")}`; };
+
+function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>, custShipRateVnd?: number | null): Map<string, MonthRows> {
+  const byMonth = new Map<string, { date: Date; row: FieldRow; jpy: number; vnd: number }[]>();
+  const bucket = (m: string) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
   for (const o of orders) {
     const rate = Number(o.exchangeRate ?? 0);
     const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
+    // Phụ thu ¥ mà đơn chưa có tỉ giá -> không quy đổi được: giữ nguyên số ¥ (ghi rõ "¥"), không để thành 0.
+    const surchargeJpyRaw = o.surchargeCurrency === "JPY" && !rate ? Number(o.surchargeAmount ?? 0) : 0;
     // % công (order.commissionPercent) - tính trên giá món + ship món (không gồm ship cả đơn), giống recomputeOrderTotals.
     const commissionPercent = Number(o.commissionPercent ?? 0);
     o.items.forEach((it, idx) => {
@@ -65,7 +70,7 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       const commissionJpy = (giaWeb + ship) * (commissionPercent / 100);
       const trk = o.trackings[idx];
       const purchaseDate = it.purchaseDate ?? o.createdAt;
-      const m = vnDate(purchaseDate).getUTCMonth() + 1;
+      const m = monthKeyOf(purchaseDate);
       // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
       const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
       const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
@@ -100,7 +105,9 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
         giaWeb: giaWeb || "", ship: shipCell, total: jpy,
         rate: rate || "", vndConverted: vnd || "",
         weight: weight ?? "",
-        surcharge: surchargeCell ? Math.round(surchargeCell) : "",
+        surcharge: idx === 0 && surchargeJpyRaw
+          ? `¥${surchargeJpyRaw.toLocaleString("ja-JP")}${codVnd ? ` + ${Math.round(codVnd)}` : ""}`
+          : (surchargeCell ? Math.round(surchargeCell) : ""),
         shipRate: shipVndPerKg ? Math.round(shipVndPerKg) : "",
         shipTotal: shipTotal ? Math.round(shipTotal) : "",
         tracking: String(trk?.code ?? ""), review: String(trk?.review ?? ""),
@@ -114,7 +121,7 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
       bucket(m).push({ date: purchaseDate, row, jpy, vnd });
     });
   }
-  const result = new Map<number, MonthRows>();
+  const result = new Map<string, MonthRows>();
   for (const [m, entries] of byMonth) {
     entries.sort((a, b) => a.date.getTime() - b.date.getTime());
     result.set(m, {
@@ -126,21 +133,53 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
   return result;
 }
 
-// Liệt kê mọi tab dạng tháng -> map {số tháng: tên tab}
-async function listMonthTabs(sid: string): Promise<Map<number, string>> {
-  const map = new Map<number, string>();
+// Liệt kê tab tháng: không ghi năm ("Tháng 3", "T3", "3") và có năm ("Tháng 3/2027", "T3.2027", "3-2027").
+type MonthTabs = { noYear: Map<number, string>; withYear: Map<string, string> };
+async function listMonthTabs(sid: string): Promise<MonthTabs> {
+  const noYear = new Map<number, string>();
+  const withYear = new Map<string, string>();
   for (const title of await listSheetTitles(sid)) {
-    const mm = title.trim().toLowerCase().match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})$/);
-    if (mm) map.set(Number(mm[1]), title);
+    const t = title.trim().toLowerCase();
+    const my = t.match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})\s*[./-]\s*(\d{4})$/);
+    if (my && Number(my[1]) >= 1 && Number(my[1]) <= 12) { withYear.set(`${my[2]}-${my[1].padStart(2, "0")}`, title); continue; }
+    const mm = t.match(/^(?:tháng|thang|t)?\s*0*(\d{1,2})$/);
+    if (mm) noYear.set(Number(mm[1]), title);
   }
-  return map;
+  return { noYear, withYear };
 }
 
-// Dò dòng tiêu đề (ô A == "Mã Link") trong tab; trả 0 nếu không thấy.
-async function findHeaderRow(sid: string, tab: string): Promise<number> {
-  const rows = await getValues(sid, tab, "A1:A20");
-  for (let i = 0; i < rows.length; i++) if ((rows[i]?.[0] ?? "").trim() === "Mã Link") return i + 1;
-  return 0;
+// Gán tab cho từng tháng-năm có dữ liệu. Tab không ghi năm ("Tháng 3") thuộc về năm SỚM NHẤT có dữ liệu tháng đó
+// (năm nó được tạo ra) mà chưa có tab riêng ghi năm; các năm sau dùng/tạo "Tháng 3/2027" -> mỗi tháng của mỗi năm
+// 1 tab riêng, năm mới không ghi đè tab năm cũ. Tab tháng không còn dữ liệu vẫn được trả về (để dọn dòng cũ).
+export function planMonthTabs(dataKeys: Iterable<string>, tabs: MonthTabs): { key: string; tab: string; create: boolean }[] {
+  const keys = [...new Set(dataKeys)].sort();
+  const plan: { key: string; tab: string; create: boolean }[] = [];
+  const usedNoYear = new Set<number>();
+  for (const key of keys) {
+    const [y, mm] = key.split("-");
+    const m = Number(mm);
+    const own = tabs.withYear.get(key);
+    if (own) { plan.push({ key, tab: own, create: false }); continue; }
+    if (!usedNoYear.has(m)) {
+      usedNoYear.add(m);
+      const plain = tabs.noYear.get(m);
+      plan.push({ key, tab: plain ?? `Tháng ${m}`, create: !plain });
+      continue;
+    }
+    plan.push({ key, tab: `Tháng ${m}/${y}`, create: true });
+  }
+  const planned = new Set(plan.map((p) => p.tab));
+  for (const [m, tab] of tabs.noYear) if (!planned.has(tab)) plan.push({ key: `----${m}`, tab, create: false });
+  for (const [key, tab] of tabs.withYear) if (!planned.has(tab)) plan.push({ key, tab, create: false });
+  return plan;
+}
+
+// Dò dòng tiêu đề (có ô "Mã Link" ở BẤT KỲ cột nào - khách có thể chèn cột trước nó) trong 20 dòng đầu.
+// Trả { row: 0, empty } nếu không thấy; empty = 20 dòng đầu trống hẳn (tab mới, được phép ghi template).
+async function findHeaderRow(sid: string, tab: string): Promise<{ row: number; empty: boolean }> {
+  const rows = await getValues(sid, tab, "A1:AZ20");
+  for (let i = 0; i < rows.length; i++) if ((rows[i] ?? []).some((v) => (v ?? "").trim() === "Mã Link")) return { row: i + 1, empty: false };
+  return { row: 0, empty: rows.every((r) => (r ?? []).every((v) => !(v ?? "").trim())) };
 }
 
 // Dò đúng cột (0-based) của từng field theo TÊN tiêu đề thực tế ở dòng header - khách chèn/xóa/đổi vị trí cột
@@ -228,16 +267,18 @@ async function loadCodByTracking(orders: OrderFull[]): Promise<Map<string, numbe
   return codByTracking;
 }
 
-function groupDepositsByMonth(deposits: Deposit[]): Map<number, Deposit[]> {
-  const depsByMonth = new Map<number, Deposit[]>();
-  for (const d of deposits) { const m = vnDate(d.paidAt).getUTCMonth() + 1; (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
+function groupDepositsByMonth(deposits: Deposit[]): Map<string, Deposit[]> {
+  const depsByMonth = new Map<string, Deposit[]>();
+  for (const d of deposits) { const m = monthKeyOf(d.paidAt); (depsByMonth.get(m) ?? depsByMonth.set(m, []).get(m)!).push(d); }
   return depsByMonth;
 }
 
-// Dòng tiêu đề đơn hàng; tab chưa có thì ghi template mặc định ở dòng 1.
+// Dòng tiêu đề đơn hàng. Tab trống hẳn -> ghi template mặc định ở dòng 1. Tab đã có nội dung mà không thấy
+// "Mã Link" -> trả 0: KHÔNG ghi gì vào tab đó (không đè nội dung khách), để người dùng tự sửa tiêu đề.
 async function ensureOrderHeader(sid: string, tab: string): Promise<number> {
   const header = await findHeaderRow(sid, tab);
-  if (header) return header;
+  if (header.row) return header.row;
+  if (!header.empty) return 0;
   await updateValues(sid, tab, "A1", { values: [ORDER_HEADER] });
   return 1;
 }
@@ -309,12 +350,12 @@ async function writeTotals(sid: string, tab: string, gsid: number | null, jpyTot
   }
 }
 
-async function syncMonthTab(sid: string, m: number, existingTab: string | null, monthRows: MonthRows, monthDeposits: Deposit[]): Promise<void> {
-  let tab = existingTab;
-  if (!tab) { tab = `Tháng ${m}`; await ensureSheetTab(sid, tab); }
+async function syncMonthTab(sid: string, tab: string, create: boolean, monthRows: MonthRows, monthDeposits: Deposit[]): Promise<void> {
+  if (create) await ensureSheetTab(sid, tab);
   const { rows: fieldRows, jpyTotal, vndTotal } = monthRows;
 
   const header = await ensureOrderHeader(sid, tab);
+  if (!header) { logWarn({ tab }, "gsheets_customer_tab_header_missing_skipped"); return; }
   const start = header + 1;
   const headerCols = await readHeaderColumns(sid, tab, header);
   const gsid = await getSheetIdByTitle(sid, tab);
@@ -349,10 +390,9 @@ async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
     const depsByMonth = groupDepositsByMonth(deposits);
 
     // Gồm cả các tab tháng đang tồn tại -> tháng không còn dữ liệu sẽ được dọn (tránh dòng cũ ở lại khi món đổi tháng theo ngày mua)
-    const existingTabs = await listMonthTabs(sid);
-    const months = new Set<number>([...rowsByMonth.keys(), ...depsByMonth.keys(), ...existingTabs.keys()]);
-    for (const m of months) {
-      await syncMonthTab(sid, m, existingTabs.get(m) ?? null, rowsByMonth.get(m) ?? { rows: [], jpyTotal: 0, vndTotal: 0 }, depsByMonth.get(m) ?? []);
+    const plan = planMonthTabs([...rowsByMonth.keys(), ...depsByMonth.keys()], await listMonthTabs(sid));
+    for (const { key, tab, create } of plan) {
+      await syncMonthTab(sid, tab, create, rowsByMonth.get(key) ?? { rows: [], jpyTotal: 0, vndTotal: 0 }, depsByMonth.get(key) ?? []);
     }
   } catch (e) {
     // Còn 1 phần dở dang (lỗi API giữa chừng) -> thử lại cả lượt sync 1 lần, tránh để lại dữ liệu cũ trên sheet khách

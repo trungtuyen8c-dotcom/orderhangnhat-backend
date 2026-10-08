@@ -35,13 +35,13 @@ vi.mock("../../middlewares/authorize.js", () => ({
 }));
 vi.mock("../../app/audit.js", () => ({ logAudit: vi.fn(), logAuditTx: vi.fn(), logOrder: vi.fn() }));
 vi.mock("./order.totals.js", () => ({ recomputeOrderTotals: vi.fn() }));
-vi.mock("../accounting/orderCard.js", () => ({ applyOrderCardCharges: vi.fn(), reverseOrderCardCharges: vi.fn() }));
+vi.mock("../accounting/orderCard.js", () => ({ applyOrderCardCharges: vi.fn(), reverseOrderCardCharges: vi.fn(), hasOrderCardCharges: vi.fn() }));
 vi.mock("../sheets/sheet.jobs.js", () => ({ queueCustomerSheetSync: vi.fn() }));
 vi.mock("../tracking/tracking.repository.js", () => ({ claimOrCreateTracking: vi.fn() }));
 
 import { findWrongMarketplaceUrl, ordersRouter } from "./orders.routes.js";
 import { prisma } from "../../infrastructure/prisma.js";
-import { applyOrderCardCharges, reverseOrderCardCharges } from "../accounting/orderCard.js";
+import { applyOrderCardCharges, hasOrderCardCharges, reverseOrderCardCharges } from "../accounting/orderCard.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import { recomputeOrderTotals } from "./order.totals.js";
 import { claimOrCreateTracking } from "../tracking/tracking.repository.js";
@@ -50,6 +50,7 @@ import { logOrder } from "../../app/audit.js";
 const mockPrisma = prisma as any;
 const mockReverseOrderCardCharges = reverseOrderCardCharges as ReturnType<typeof vi.fn>;
 const mockApplyOrderCardCharges = applyOrderCardCharges as ReturnType<typeof vi.fn>;
+const mockHasOrderCardCharges = hasOrderCardCharges as ReturnType<typeof vi.fn>;
 
 function buildApp() {
   const app = express();
@@ -408,6 +409,19 @@ describe("PATCH /orders/:id", () => {
     expect(mockPrisma.tracking.deleteMany).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["has auto charges", true, 1],
+    ["old order without auto charges", false, 0],
+  ])("ordersEdit_mercari_%s_rechargesOnlyWhenAlreadyCharged", async (_n, hasCharges, applyCalls) => {
+    mockPrisma.order.findUnique.mockResolvedValueOnce({ ...baseOrder, source: "mercari", trackings: [] }).mockResolvedValueOnce({ id: ORDER_ID });
+    mockHasOrderCardCharges.mockResolvedValue(hasCharges);
+    (recomputeOrderTotals as any).mockResolvedValue({ totalQuote: 100, totalVnd: 18000 });
+
+    await request(buildApp()).patch(`/api/orders/${ORDER_ID}`).send({ items: [{ name: "A", qty: 1, unitPriceJpy: 100, paymentMethod: "Card" }] }).expect(200);
+
+    expect(mockApplyOrderCardCharges).toHaveBeenCalledTimes(applyCalls);
+  });
+
   it("ordersEdit_newItems_replacesItemsAndRechargesCardInsideTransaction", async () => {
     mockPrisma.order.findUnique.mockResolvedValueOnce({ ...baseOrder, trackings: [] }).mockResolvedValueOnce({ id: ORDER_ID });
     (recomputeOrderTotals as any).mockResolvedValue({ totalQuote: 100, totalVnd: 18000 });
@@ -460,6 +474,16 @@ describe("POST /orders", () => {
       .send({ customerId: CUSTOMER_ID, source: "yahoo", skipVnWeighing: false, items: [{ name: "A", unitPriceJpy: 1000 }] }).expect(201);
 
     expect(mockApplyOrderCardCharges).not.toHaveBeenCalled();
+  });
+
+  it("ordersCreate_mercariSource_chargesCardImmediately", async () => {
+    mockPrisma.order.findFirst.mockResolvedValue(null);
+    mockPrisma.order.create.mockImplementation(async ({ data }: any) => data);
+
+    await request(buildApp()).post("/api/orders")
+      .send({ customerId: CUSTOMER_ID, source: "mercari", skipVnWeighing: false, exchangeRate: 170, items: [{ name: "A", unitPriceJpy: 1000, paymentMethod: "Card" }] }).expect(201);
+
+    expect(mockApplyOrderCardCharges).toHaveBeenCalledTimes(1);
   });
 
   it("ordersCreate_duplicateCodeRace_retriesWholeTransaction", async () => {
@@ -531,6 +555,13 @@ describe("POST /orders/:id/pay", () => {
     expect(mockApplyOrderCardCharges).toHaveBeenCalledWith(mockPrisma, expect.objectContaining({ fallbackDate: order.orderDate }));
   });
 
+  it("ordersPay_mercariBuyNow_returns409NotYahoo", async () => {
+    mockPrisma.order.findUnique.mockResolvedValue({ ...order, source: "mercari" });
+    const res = await request(buildApp()).post(`/api/orders/${ORDER_ID}/pay`).send({ walletId: WALLET_ID }).expect(409);
+    expect(res.body.error).toBe("NOT_YAHOO");
+    expect(mockApplyOrderCardCharges).not.toHaveBeenCalled();
+  });
+
   it("ordersPay_notPayLaterSource_returns409NotYahoo", async () => {
     mockPrisma.order.findUnique.mockResolvedValue({ ...order, source: "normal" });
     const res = await request(buildApp()).post(`/api/orders/${ORDER_ID}/pay`).send({ walletId: WALLET_ID }).expect(409);
@@ -540,7 +571,7 @@ describe("POST /orders/:id/pay", () => {
 
 describe("POST /orders/:id/unpay", () => {
   it("ordersUnpay_paid_clearsPaidAtAndRefundsCardInTransaction", async () => {
-    mockPrisma.order.findUnique.mockResolvedValue({ id: ORDER_ID, source: "mercari", yahooPaidAt: new Date() });
+    mockPrisma.order.findUnique.mockResolvedValue({ id: ORDER_ID, source: "yahoo", yahooPaidAt: new Date() });
     mockPrisma.order.updateMany.mockResolvedValue({ count: 1 });
 
     await request(buildApp()).post(`/api/orders/${ORDER_ID}/unpay`).expect(200, { ok: true });

@@ -61,6 +61,11 @@ export async function applyOrderCardCharges(
 }
 
 // Hoàn lại số dư + xóa các giao dịch "Mua hàng" auto của đơn.
+// Đơn đã có giao dịch trừ thẻ tự động chưa (đơn Mercari cũ tạo trước khi trừ thẻ ngay thì chưa có).
+export async function hasOrderCardCharges(db: Client, orderId: string): Promise<boolean> {
+  return (await db.walletTxn.count({ where: { refOrderId: orderId, statementRef: AUTO_REF } })) > 0;
+}
+
 export async function reverseOrderCardCharges(db: Client, orderId: string) {
   await inTx(db, (tx) => reverseWalletTxns(tx, { refOrderId: orderId, statementRef: AUTO_REF }));
 }

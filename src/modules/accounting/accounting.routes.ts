@@ -17,6 +17,8 @@ import * as statementImports from "./statementImport.service.js";
 import { MAX_ROWS, mappingSchema } from "./statementImport.parse.js";
 import { MAX_TOLERANCE_DAYS } from "./statementImport.match.js";
 import { readFile } from "fs/promises";
+import { readPage } from "../../app/http/pagination.js";
+import { listCustomers } from "../customers/customers.service.js";
 import {
   STATEMENT_KINDS, checkFile, decodeOriginalName, documentUpload, fileExt, readHead, removeTempFile, sanitizeFilename,
 } from "../shipments/documentUpload.js";
@@ -140,6 +142,13 @@ const openingSchema = z.object({ amount: z.number(), currency: z.enum(["VND", "J
 
 accountingRouter.get("/opening-balances", authorize("orders.read"), asyncHandler(async (_req, res) => {
   res.json(await deposits.listOpeningBalances());
+}));
+
+// Danh sách khách rút gọn (id/mã/tên) cho trang Số dư đầu kỳ - kế toán không có customers.list (xem đủ thông tin khách)
+// nhưng vẫn cần chọn khách để nhập số dư. Phân trang + tìm như GET /customers?lite=1.
+accountingRouter.get("/customer-options", authorize("accounting.reconcile"), asyncHandler(async (req, res) => {
+  const q = String(req.query.q ?? "").trim() || undefined;
+  res.json(await listCustomers(readPage(req, 30, 100) ?? { page: 1, pageSize: 30, skip: 0, take: 30 }, { q }, { lite: true }));
 }));
 
 accountingRouter.put("/customers/:id/opening-balance", authorize("accounting.record_payment"), asyncHandler(async (req, res) => {

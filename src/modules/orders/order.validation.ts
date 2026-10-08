@@ -4,6 +4,9 @@ import { ORDER_STATUSES } from "./order.state.js";
 // Nguồn "thanh toán sau" (lên đơn trước, trừ thẻ khi bấm Đã thanh toán) - không đụng thẻ lúc tạo
 export const PAY_LATER_SOURCES = ["yahoo", "mercari"] as const;
 export const isPayLater = (source: string) => (PAY_LATER_SOURCES as readonly string[]).includes(source);
+// Trang riêng (PAY_LATER_SOURCES) khác với "trừ thẻ sau": chỉ Yahoo lên đơn trước, bấm "Đã thanh toán" mới trừ thẻ.
+// Mercari là mua ngay -> trừ thẻ lúc tạo đơn theo PTTT từng món như đơn thường.
+export const chargesLater = (source: string) => source === "yahoo";
 
 const curEnum = z.enum(["JPY", "VND"]);
 const pricingSchema = {

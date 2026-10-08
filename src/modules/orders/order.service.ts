@@ -7,7 +7,7 @@ import { paged, type PageParams } from "../../app/http/pagination.js";
 import { eventBus } from "../../app/events/EventBus.js";
 import type { BusinessEventName } from "../../app/events/businessEvents.js";
 import { detectMarketplace } from "../../integrations/marketplace/scrape.js";
-import { applyOrderCardCharges, reverseOrderCardCharges } from "../accounting/orderCard.js";
+import { applyOrderCardCharges, hasOrderCardCharges, reverseOrderCardCharges } from "../accounting/orderCard.js";
 import { reversePaymentWallets } from "../accounting/wallet.service.js";
 import { claimOrCreateTracking } from "../tracking/tracking.repository.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
@@ -19,7 +19,7 @@ import {
 import * as repo from "./order.repository.js";
 import { scopeWhere, toOrderBy, toOrderSql, toOrderWhere, type OrderListFilter, type OrderSort } from "./order.listFilter.js";
 import {
-  isPayLater, PRICING_FIELDS,
+  chargesLater, isPayLater, PRICING_FIELDS,
   type ConsignmentInput, type CreateOrderInput, type EditOrderInput,
 } from "./order.validation.js";
 
@@ -182,8 +182,8 @@ export async function createOrder(d: CreateOrderInput, actor: Actor) {
       // Tự tạo 1 tracking trống gắn đơn -> hiện sẵn ở bảng Chuyến, điền mã tay sau
       await tx.tracking.create({ data: { id: uuid(), orderId: o.id, code: "", status: "linked" } });
     }
-    // Yahoo/Mercari (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán"
-    if (!isPayLater(d.source ?? "normal"))
+    // Yahoo (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán". Mercari/đơn thường: trừ ngay.
+    if (!chargesLater(d.source ?? "normal"))
       await applyOrderCardCharges(tx, { orderId: o.id, code: o.code, items: d.items, exchangeRate: d.exchangeRate, fallbackDate: o.orderDate });
     return { order: o, totals: await recomputeOrderTotals(o.id, tx) };
   });
@@ -354,8 +354,11 @@ export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
       }
     }
     await tx.order.update({ where: { id: order.id }, data: data as Prisma.OrderUncheckedUpdateInput });
-    // Yahoo/Mercari chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới
-    if (d.items && (!isPayLater(order.source) || order.yahooPaidAt)) {
+    // Yahoo chưa thanh toán -> không đụng thẻ; đã TT thì tính lại theo món mới. Mercari cũ (tạo trước khi trừ thẻ
+    // ngay, chưa có giao dịch tự động - có thể kế toán đã ghi tay) -> không tự trừ khi sửa, tránh trừ trùng.
+    const recharge = chargesLater(order.source) ? !!order.yahooPaidAt
+      : order.source === "mercari" ? await hasOrderCardCharges(tx, order.id) : true;
+    if (d.items && recharge) {
       await reverseOrderCardCharges(tx, order.id);
       await applyOrderCardCharges(tx, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate, fallbackDate: d.orderDate ?? order.orderDate });
     }
@@ -378,7 +381,7 @@ export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
 export async function payLaterOrder(id: string, input: { walletId: string; paidAt?: Date }, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
   if (!order) throw notFound();
-  if (!isPayLater(order.source)) throw new AppError("NOT_YAHOO", 409, "Chỉ đơn Yahoo/Mercari mới thanh toán sau");
+  if (!chargesLater(order.source)) throw new AppError("NOT_YAHOO", 409, "Chỉ đơn Yahoo mới thanh toán sau");
   if (order.yahooPaidAt) throw new AppError("ALREADY_PAID", 409, "Đơn đã thanh toán");
   const wallet = await prisma.wallet.findUnique({ where: { id: input.walletId } });
   if (!wallet) throw new AppError("WALLET_NOT_FOUND", 404);
@@ -399,12 +402,12 @@ export async function payLaterOrder(id: string, input: { walletId: string; paidA
   publish("order.updated", actor, order.id, { yahooPaid: true });
 }
 
-// Hủy thanh toán Yahoo/Mercari -> hoàn tiền về thẻ
+// Hủy thanh toán Yahoo -> hoàn tiền về thẻ
 export async function unpayLaterOrder(id: string, actor: Actor) {
   const order = await prisma.order.findUnique({ where: { id } });
   if (!order) throw notFound();
   const notPaid = () => new AppError("NOT_PAID", 409, "Đơn chưa thanh toán");
-  if (!isPayLater(order.source) || !order.yahooPaidAt) throw notPaid();
+  if (!chargesLater(order.source) || !order.yahooPaidAt) throw notPaid();
   await prisma.$transaction(async (tx) => {
     const released = await tx.order.updateMany({ where: { id: order.id, yahooPaidAt: { not: null } }, data: { yahooPaidAt: null } });
     if (released.count === 0) throw notPaid();

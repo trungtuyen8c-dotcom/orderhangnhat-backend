@@ -15,6 +15,9 @@ vi.mock("../../../infrastructure/prisma.js", () => ({
   },
 }));
 
+vi.mock("../../customers/customers.service.js", () => ({ customerVndDebts: vi.fn() }));
+
+import { customerVndDebts } from "../../customers/customers.service.js";
 import {
   accounting_customer_summary, accounting_debts, accounting_deposits, accounting_fund, accounting_monthly_report,
   accounting_opening_balances, accounting_statement,
@@ -27,7 +30,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const model of Object.values(mp) as any[]) for (const fn of Object.values(model) as any[]) fn.mockResolvedValue([]);
   mp.fund.findUnique.mockResolvedValue(null);
+  vi.mocked(customerVndDebts).mockResolvedValue(new Map());
 });
+const debts = (entries: [string, number][]) => vi.mocked(customerVndDebts).mockResolvedValue(new Map(entries));
 afterEach(() => vi.useRealTimers());
 
 describe("accounting_debts", () => {
@@ -37,11 +42,7 @@ describe("accounting_debts", () => {
   });
 
   it("accounting_debts_mixedBalances_dropsZeroAndSortsDescending", async () => {
-    mp.debt.groupBy.mockResolvedValue([
-      { customerId: "c1", _sum: { balance: "100" }, _max: { updatedAt: null } },
-      { customerId: "c2", _sum: { balance: "0" }, _max: { updatedAt: null } },
-      { customerId: "c3", _sum: { balance: "900" }, _max: { updatedAt: null } },
-    ]);
+    debts([["c1", 100], ["c2", 0], ["c3", 900]]);
     mp.customer.findMany.mockResolvedValue([{ id: "c3", name: "Lan", phone: "090" }]);
     const out = await accounting_debts();
     expect(out.map((r) => [r.customerId, r.name, r.balance])).toEqual([["c3", "Lan", 900], ["c1", "?", 100]]);
@@ -133,7 +134,7 @@ describe("accounting_monthly_report", () => {
     ]);
     mp.customerDeposit.findMany.mockResolvedValue([{ customerId: "c1", amountVnd: "1000", paidAt: inMonth }]);
     mp.payment.findMany.mockResolvedValue([{ amountVnd: "100", type: "refund", createdAt: inMonth, order: { customerId: "c1" } }]);
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { balance: "400" } }, { customerId: "c2", _sum: { balance: "0" } }]);
+    debts([["c1", 400], ["c2", 0]]);
     const r = await accounting_monthly_report({ month: "2026-03" });
     expect(r.rows.map((x) => [x.customerId, x.canKg, x.traTrongThang, x.congNo])).toEqual([["c1", 3.5, 900, 400]]);
     expect(r.totals).toEqual({ mua: 0, canKg: 3.5, traTrongThang: 900, congNo: 400 });

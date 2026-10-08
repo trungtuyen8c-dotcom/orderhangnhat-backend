@@ -1,34 +1,27 @@
 import { prisma } from "../../infrastructure/prisma.js";
 import { AppError } from "../../app/errors/AppError.js";
 import { vnDayEnd, vnDayStart, vnMonthKey } from "../../app/vnTime.js";
+import { customerVndDebts } from "../customers/customers.service.js";
 
 // Báo cáo chỉ đọc. Mốc ngày/tháng luôn theo giờ VN (vnMonthKey / vnDayStart / vnDayEnd).
 
 const monthOr = (m: unknown) => (typeof m === "string" && /^\d{4}-\d{2}$/.test(m) ? m : vnMonthKey(new Date()));
 
-// Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu
+// Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu (₫). Tính như trang Khách / Ví khách: tổng đơn - (cọc đã xác nhận
+// + thanh toán), KHÔNG dùng bảng Debt (bảng đó không biết đến cọc ghi qua Ví khách -> nợ hiện cao hơn thực tế).
 export async function debtsByCustomer() {
-  // Bảng này hiển thị số ₫ - chỉ gộp nợ VND, nợ ¥ (khách trả thẳng, chưa có tỉ giá) không trộn vào đây
-  const grouped = await prisma.debt.groupBy({
-    by: ["customerId"],
-    where: { currency: "VND" },
-    _sum: { balance: true },
-    _max: { updatedAt: true },
-  });
-  const ids = grouped.map((g) => g.customerId);
-  const customers = await prisma.customer.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, name: true, phone: true },
-  });
+  const debts = await customerVndDebts();
+  const ids = [...debts.keys()];
+  const customers = ids.length ? await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, phone: true } }) : [];
   const map = new Map(customers.map((c) => [c.id, c]));
-  return grouped
-    .map((g) => ({
-      customerId: g.customerId,
-      code: g.customerId.slice(0, 8).toUpperCase(),
-      name: map.get(g.customerId)?.name ?? "?",
-      phone: map.get(g.customerId)?.phone ?? null,
-      balance: Number(g._sum.balance ?? 0),
-      updatedAt: g._max.updatedAt,
+  return ids
+    .map((id) => ({
+      customerId: id,
+      code: id.slice(0, 8).toUpperCase(),
+      name: map.get(id)?.name ?? "?",
+      phone: map.get(id)?.phone ?? null,
+      balance: debts.get(id) ?? 0,
+      updatedAt: null as Date | null, // nợ tính từ đơn + cọc + thanh toán, không còn 1 mốc "cập nhật" riêng như bảng Debt
     }))
     .filter((r) => r.balance !== 0)
     .sort((a, b) => b.balance - a.balance);
@@ -99,13 +92,13 @@ export async function monthlyReport(monthQ: unknown) {
   const mk = vnMonthKey;
   const month = monthOr(monthQ);
 
-  const [orders, trks, deposits, payments, customers, debtAgg] = await Promise.all([
+  const [orders, trks, deposits, payments, customers, debts] = await Promise.all([
     prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, createdAt: true } }),
     prisma.tracking.findMany({ where: { packedAt: { not: null }, orderId: { not: null } }, select: { jpWeightKg: true, vnWeightKg: true, packedAt: true, order: { select: { customerId: true } } } }),
     prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
     prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
     prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true } }),
+    customerVndDebts(),
   ]);
 
   const cmap = new Map(customers.map((c) => [c.id, c]));
@@ -120,7 +113,7 @@ export async function monthlyReport(monthQ: unknown) {
   for (const t of trks) { const cid = t.order?.customerId; if (cid && t.packedAt && mk(t.packedAt) === month) get(cid).canKg += t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0); }
   for (const d of deposits) if (mk(d.paidAt) === month) get(d.customerId).traTrongThang += Number(d.amountVnd);
   for (const p of payments) { const cid = p.order?.customerId; if (cid && mk(p.createdAt) === month) get(cid).traTrongThang += p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd); }
-  for (const g of debtAgg) { const bal = Number(g._sum.balance ?? 0); if (bal !== 0) get(g.customerId).congNo = bal; }
+  for (const [cid, bal] of debts) if (bal !== 0) get(cid).congNo = bal;
 
   const list = [...rows.values()].filter((r) => r.canKg || r.mua || r.traTrongThang || r.congNo).sort((a, b) => b.mua - a.mua);
   const totals = list.reduce((s, r) => ({ canKg: s.canKg + r.canKg, mua: s.mua + r.mua, traTrongThang: s.traTrongThang + r.traTrongThang, congNo: s.congNo + r.congNo }), { canKg: 0, mua: 0, traTrongThang: 0, congNo: 0 });

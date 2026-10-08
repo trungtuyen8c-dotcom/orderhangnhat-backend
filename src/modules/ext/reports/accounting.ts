@@ -3,18 +3,14 @@ import { prisma } from "../../../infrastructure/prisma.js";
 import { vnDayStart, vnMonthKey } from "../helpers.js";
 
 import { vnDayEnd } from "../../../app/vnTime.js";
+import { debtsByCustomer } from "../../accounting/report.service.js";
+import { customerVndDebts } from "../../customers/customers.service.js";
 const OPENING_CUTOFF = new Date("2026-06-30T00:00:00.000Z");
 void OPENING_CUTOFF; // giữ tham chiếu comment gốc - opening balance nhận diện qua isOpening, không cần lọc theo mốc này ở đây
 
+// Cùng công thức nợ với /accounting/debts (tổng đơn - cọc đã xác nhận - thanh toán).
 export async function accounting_debts() {
-  const grouped = await prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true }, _max: { updatedAt: true } });
-  const ids = grouped.map((g) => g.customerId);
-  const customers = ids.length ? await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, phone: true } }) : [];
-  const cmap = new Map(customers.map((c) => [c.id, c]));
-  return grouped
-    .map((g) => ({ customerId: g.customerId, name: cmap.get(g.customerId)?.name ?? "?", phone: cmap.get(g.customerId)?.phone ?? null, balance: Number(g._sum.balance ?? 0), updatedAt: g._max.updatedAt }))
-    .filter((r) => r.balance !== 0)
-    .sort((a, b) => b.balance - a.balance);
+  return (await debtsByCustomer()).map(({ customerId, name, phone, balance, updatedAt }) => ({ customerId, name, phone, balance, updatedAt }));
 }
 
 export async function accounting_deposits(params: { status?: string; from?: string; to?: string }) {
@@ -82,13 +78,13 @@ export async function accounting_customer_summary() {
 
 export async function accounting_monthly_report(params: { month?: string }) {
   const month = params.month && /^\d{4}-\d{2}$/.test(params.month) ? params.month : vnMonthKey(new Date());
-  const [orders, trks, deposits, payments, customers, debtAgg] = await Promise.all([
+  const [orders, trks, deposits, payments, customers, debts] = await Promise.all([
     prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, createdAt: true } }),
     prisma.tracking.findMany({ where: { packedAt: { not: null }, orderId: { not: null } }, select: { jpWeightKg: true, vnWeightKg: true, packedAt: true, order: { select: { customerId: true } } } }),
     prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
     prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
     prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-    prisma.debt.groupBy({ by: ["customerId"], where: { currency: "VND" }, _sum: { balance: true } }),
+    customerVndDebts(),
   ]);
   const cmap = new Map(customers.map((c) => [c.id, c]));
   type Row = { mua: number; canKg: number; traTrongThang: number; congNo: number };
@@ -98,7 +94,7 @@ export async function accounting_monthly_report(params: { month?: string }) {
   for (const t of trks) { const cid = t.order?.customerId; if (cid && t.packedAt && vnMonthKey(t.packedAt) === month) get(cid).canKg += t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0); }
   for (const d of deposits) if (vnMonthKey(d.paidAt) === month) get(d.customerId).traTrongThang += Number(d.amountVnd);
   for (const p of payments) { const cid = p.order?.customerId; if (cid && vnMonthKey(p.createdAt) === month) get(cid).traTrongThang += p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd); }
-  for (const g of debtAgg) { const bal = Number(g._sum.balance ?? 0); if (bal !== 0) get(g.customerId).congNo = bal; }
+  for (const [cid, bal] of debts) if (bal !== 0) get(cid).congNo = bal;
   const out = [...rows.entries()]
     .filter(([, r]) => r.mua !== 0 || r.canKg !== 0 || r.traTrongThang !== 0 || r.congNo !== 0)
     .map(([id, r]) => ({ customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, ...r }))

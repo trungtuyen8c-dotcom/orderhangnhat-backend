@@ -51,6 +51,14 @@ export function withBalances<C extends { id: string }>(rows: C[], [revenue, debt
   });
 }
 
+// Công nợ VND hiện tại của mọi khách có phát sinh (cùng công thức withBalances) - dùng chung cho báo cáo công nợ.
+export async function customerVndDebts(): Promise<Map<string, number>> {
+  const aggs = await repo.customerMoneyAggregates();
+  const ids = new Set<string>([...aggs[1].map((r) => r.customerId), ...aggs[3].map((d) => d.customerId)]);
+  for (const p of aggs[4]) if (p.order?.customerId) ids.add(p.order.customerId);
+  return new Map(withBalances([...ids].map((id) => ({ id })), aggs).map((r) => [r.id, r.debt]));
+}
+
 // Không có page -> mảng (contract cũ, tối đa 500). Có page -> { items, pagination }, chỉ gộp số liệu cho trang đó.
 // lite (chỉ khi có page) -> items chỉ { id, code, name } cho ô chọn khách, không tính doanh số/công nợ.
 export async function listCustomers(page: PageParams | null, lq: repo.CustomerListQuery = {}, opts: { lite?: boolean } = {}) {

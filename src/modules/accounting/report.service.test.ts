@@ -15,6 +15,9 @@ vi.mock("../../infrastructure/prisma.js", () => ({
   },
 }));
 
+vi.mock("../customers/customers.service.js", () => ({ customerVndDebts: vi.fn() }));
+
+import { customerVndDebts } from "../customers/customers.service.js";
 import { customerLedger, customerSummary, debtsByCustomer, expensesMonthly, monthlyReport, statement, walletDailySummary } from "./report.service.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { AppError } from "../../app/errors/AppError.js";
@@ -25,7 +28,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const model of Object.values(mp) as any[]) for (const fn of Object.values(model) as any[]) fn.mockResolvedValue([]);
   mp.wallet.findUnique.mockResolvedValue(null);
+  vi.mocked(customerVndDebts).mockResolvedValue(new Map());
 });
+const debts = (entries: [string, number][]) => vi.mocked(customerVndDebts).mockResolvedValue(new Map(entries));
 afterEach(() => vi.useRealTimers());
 
 // 2026-03-01 03:00 giờ VN = 2026-02-28 20:00 UTC: tháng hiện tại theo VN là 2026-03, theo UTC là 2026-02.
@@ -41,36 +46,30 @@ async function rejection(p: Promise<unknown>) {
 
 describe("debtsByCustomer", () => {
   it("debtsByCustomer_mixedBalances_dropsZeroAndSortsDescending", async () => {
-    mp.debt.groupBy.mockResolvedValue([
-      { customerId: "aaaaaaaa-1", _sum: { balance: "100" }, _max: { updatedAt: null } },
-      { customerId: "bbbbbbbb-2", _sum: { balance: "0" }, _max: { updatedAt: null } },
-      { customerId: "cccccccc-3", _sum: { balance: "500" }, _max: { updatedAt: null } },
-      { customerId: "dddddddd-4", _sum: { balance: "-20" }, _max: { updatedAt: null } },
-    ]);
+    debts([["aaaaaaaa-1", 100], ["bbbbbbbb-2", 0], ["cccccccc-3", 500], ["dddddddd-4", -20]]);
     const out = await debtsByCustomer();
     expect(out.map((r) => [r.customerId, r.balance])).toEqual([["cccccccc-3", 500], ["aaaaaaaa-1", 100], ["dddddddd-4", -20]]);
   });
 
-  it("debtsByCustomer_any_aggregatesOnlyVndDebts", async () => {
+  it("debtsByCustomer_any_doesNotReadStaleDebtTable", async () => {
     await debtsByCustomer();
-    expect(mp.debt.groupBy.mock.calls[0][0].where).toEqual({ currency: "VND" });
+    expect(mp.debt.groupBy).not.toHaveBeenCalled();
   });
 
   it("debtsByCustomer_customerRecordMissing_nameQuestionMarkAndPhoneNull", async () => {
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "abcdef12-xyz", _sum: { balance: "10" }, _max: { updatedAt: null } }]);
+    debts([["abcdef12-xyz", 10]]);
     const [row] = await debtsByCustomer();
     expect(row).toMatchObject({ name: "?", phone: null });
   });
 
   it("debtsByCustomer_any_codeIsFirst8CharsOfIdUppercased", async () => {
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "abcdef12-3456", _sum: { balance: "10" }, _max: { updatedAt: null } }]);
+    debts([["abcdef12-3456", 10]]);
     mp.customer.findMany.mockResolvedValue([{ id: "abcdef12-3456", name: "Lan", phone: "090" }]);
     const [row] = await debtsByCustomer();
     expect(row).toMatchObject({ code: "ABCDEF12", name: "Lan", phone: "090" });
   });
 
-  it("debtsByCustomer_nullSum_treatedAsZeroAndDropped", async () => {
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { balance: null }, _max: { updatedAt: null } }]);
+  it("debtsByCustomer_noDebts_returnsEmpty", async () => {
     expect(await debtsByCustomer()).toEqual([]);
   });
 });
@@ -206,7 +205,7 @@ describe("monthlyReport", () => {
   });
 
   it("monthlyReport_customerWithOnlyCumulativeDebt_listedWithCongNo", async () => {
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { balance: "750" } }, { customerId: "c2", _sum: { balance: "0" } }]);
+    debts([["c1", 750], ["c2", 0]]);
     const r = await monthlyReport("2026-03");
     expect(r.rows.map((x) => [x.customerId, x.congNo, x.mua])).toEqual([["c1", 750, 0]]);
   });
@@ -217,7 +216,7 @@ describe("monthlyReport", () => {
       { customerId: "c1", totalVnd: "100", createdAt },
       { customerId: "c2", totalVnd: "300", createdAt },
     ]);
-    mp.debt.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { balance: "50" } }]);
+    debts([["c1", 50]]);
     mp.customer.findMany.mockResolvedValue([{ id: "c2", name: "B", code: "K2" }]);
     const r = await monthlyReport("2026-03");
     expect(r.rows.map((x) => x.customerId)).toEqual(["c2", "c1"]);

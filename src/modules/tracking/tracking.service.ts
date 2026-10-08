@@ -6,6 +6,7 @@ import type { BusinessEventName } from "../../app/events/businessEvents.js";
 import { AppError } from "../../app/errors/AppError.js";
 import { paged, type PageParams } from "../../app/http/pagination.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
+import { bumpOrderStatus } from "../orders/order.state.js";
 import { createOrphanTrackingSafe } from "../sheets/orphanTracking.js";
 import { queueCustomerSheetSync, queueTrackingSheetRow, queueTrackingSheetRowRemoval } from "../sheets/sheet.jobs.js";
 import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
@@ -41,13 +42,23 @@ export async function lookupOrderCodeByTracking(code: string): Promise<{ orderCo
 }
 
 // Gộp: gán 1 mã tracking VN cho nhiều kiện hàng (rời khỏi tồn kho)
+// Giống nhập từng món ở Kho VN (warehouse.weighVn): tracking lần đầu có mã VN -> ghi "Ngày giao" + đơn tự tiến tới "delivered".
 export async function assignVnTracking(ids: string[], vnTrackingCode: string, actor: Actor) {
-  await prisma.tracking.updateMany({ where: { id: { in: ids } }, data: { vnTrackingCode: vnTrackingCode.trim(), status: "vn_received" } });
-  const trks = await prisma.tracking.findMany({ where: { id: { in: ids } }, select: { orderId: true, order: { select: { customerId: true } } } });
+  const code = vnTrackingCode.trim();
+  const trks = await prisma.$transaction(async (tx) => {
+    const firstTime = await tx.tracking.findMany({ where: { id: { in: ids }, OR: [{ vnTrackingCode: null }, { vnTrackingCode: "" }] }, select: { id: true } });
+    await tx.tracking.updateMany({ where: { id: { in: ids } }, data: { vnTrackingCode: code, status: "vn_received" } });
+    if (firstTime.length) await tx.tracking.updateMany({ where: { id: { in: firstTime.map((t) => t.id) } }, data: { deliveredAt: new Date() } });
+    const rows = await tx.tracking.findMany({ where: { id: { in: ids } }, select: { id: true, orderId: true, order: { select: { customerId: true } } } });
+    const firstIds = new Set(firstTime.map((t) => t.id));
+    const deliveredOrders = new Set(rows.filter((t) => t.orderId && firstIds.has(t.id)).map((t) => t.orderId!));
+    for (const orderId of deliveredOrders) await bumpOrderStatus(orderId, "delivered", tx);
+    return rows;
+  });
   const customers = new Set(trks.map((t) => t.order?.customerId).filter(Boolean) as string[]);
   for (const c of customers) void queueCustomerSheetSync(c);
   await logAudit({ actorId: actor.id, action: "tracking.assign_vn", metadata: { count: ids.length, vn: vnTrackingCode }, requestId: actor.requestId });
-  for (const id of ids) publish("tracking.updated", actor, id, { vnTrackingCode: vnTrackingCode.trim() });
+  for (const id of ids) publish("tracking.updated", actor, id, { vnTrackingCode: code });
   return { assigned: ids.length };
 }
 

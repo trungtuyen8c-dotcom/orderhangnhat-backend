@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import type { BalanceInputs } from "./customerBalance.js";
 import { prisma } from "../../infrastructure/prisma.js";
 
 type Tx = Prisma.TransactionClient;
@@ -28,26 +29,33 @@ export function listCustomers(page?: { skip: number; take: number }, lq: Custome
 export function listCustomerOptions(page: { skip: number; take: number }, lq: CustomerListQuery = {}) {
   return prisma.customer.findMany({
     where: customerListWhere(lq.q), orderBy: customerOrderBy(lq), skip: page.skip, take: page.take,
-    select: { id: true, code: true, name: true },
+    select: { id: true, code: true, name: true, payCurrency: true, commissionPercentDefault: true },
   });
 }
 
 export const countCustomers = (q?: string) => prisma.customer.count({ where: customerListWhere(q) });
 
-// Số liệu thô để tính doanh số + công nợ theo khách. ids = chỉ lấy cho các khách đó (trang hiện tại);
-// không truyền = toàn bộ (hành vi cũ của GET /customers).
-export function customerMoneyAggregates(ids?: string[]) {
+// Số liệu thô để tính doanh số + công nợ theo khách (đưa vào computeBalances). ids = chỉ lấy cho các khách đó
+// (trang hiện tại); không truyền = toàn bộ.
+export async function customerMoneyAggregates(ids?: string[]): Promise<BalanceInputs> {
   const byCustomer = ids ? { customerId: { in: ids } } : {};
-  return Promise.all([
+  const [revenue, orders, deposits, payments, customers] = await Promise.all([
     prisma.order.groupBy({ by: ["customerId"], where: byCustomer, _sum: { totalVnd: true } }),
-    prisma.order.groupBy({ by: ["customerId"], where: { ...byCustomer, status: { not: "cancelled" } }, _sum: { totalVnd: true } }),
-    prisma.debt.groupBy({ by: ["customerId"], where: { ...byCustomer, currency: "JPY" }, _sum: { balance: true } }),
-    prisma.customerDeposit.groupBy({ by: ["customerId"], where: { ...byCustomer, confirmed: true }, _sum: { amountVnd: true } }),
+    prisma.order.groupBy({ by: ["customerId"], where: { ...byCustomer, status: { not: "cancelled" } }, _sum: { totalVnd: true, dueJpy: true } }),
+    prisma.customerDeposit.groupBy({ by: ["customerId", "currency"], where: { ...byCustomer, confirmed: true }, _sum: { amountVnd: true, amountOrig: true } }),
     prisma.payment.findMany({
       where: ids ? { order: { customerId: { in: ids } } } : undefined,
       select: { amountVnd: true, type: true, order: { select: { customerId: true } } },
     }),
+    prisma.customer.findMany({ where: ids ? { id: { in: ids } } : { payCurrency: { not: "VND" } }, select: { id: true, payCurrency: true } }),
   ]);
+  return {
+    payCurrency: new Map(customers.map((c) => [c.id, c.payCurrency])),
+    revenue: revenue.map((r) => ({ customerId: r.customerId, totalVnd: Number(r._sum.totalVnd ?? 0) })),
+    orders: orders.map((r) => ({ customerId: r.customerId, totalVnd: Number(r._sum.totalVnd ?? 0), dueJpy: Number(r._sum.dueJpy ?? 0) })),
+    deposits: deposits.map((d) => ({ customerId: d.customerId, currency: d.currency, amountVnd: Number(d._sum.amountVnd ?? 0), amountOrig: Number(d._sum.amountOrig ?? 0) })),
+    payments: payments.map((p) => ({ customerId: p.order?.customerId, type: p.type, amountVnd: Number(p.amountVnd) })),
+  };
 }
 
 // Sinh mã KH-0001 tăng dần

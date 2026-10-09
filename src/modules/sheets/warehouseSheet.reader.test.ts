@@ -13,10 +13,10 @@ import { readWarehousePackRows } from "./warehouseSheet.reader.js";
 const mListSheets = vi.mocked(listSheets);
 const mBatchGet = vi.mocked(batchGetValues);
 
-// Cột theo majorDimension=COLUMNS: index 0=A(BILL) 1=B(thùng) 4=E(mã) 5=F(tên) 23=X(đã xử lý).
-function columns(c: { A?: string[]; B?: string[]; E?: string[]; F?: string[]; X?: string[] }): string[][] {
+// Cột theo majorDimension=COLUMNS: index 0=A(BILL) 1=B(thùng) 4=E(mã) 5=F(tên) 9=J(tổng cân) 23=X(đã xử lý).
+function columns(c: { A?: string[]; B?: string[]; E?: string[]; F?: string[]; J?: string[]; X?: string[] }): string[][] {
   const cols: string[][] = Array.from({ length: 24 }, () => []);
-  cols[0] = c.A ?? []; cols[1] = c.B ?? []; cols[4] = c.E ?? []; cols[5] = c.F ?? []; cols[23] = c.X ?? [];
+  cols[0] = c.A ?? []; cols[1] = c.B ?? []; cols[4] = c.E ?? []; cols[5] = c.F ?? []; cols[9] = c.J ?? []; cols[23] = c.X ?? [];
   return cols;
 }
 
@@ -47,7 +47,7 @@ describe("readWarehousePackRows", () => {
     const { rows } = await readWarehousePackRows("sid");
     expect(rows).toEqual([{
       code: "ABC12345", date: new Date("2026-06-26T00:00:00Z"), tab: "26.6", row: 2, sheetId: 9,
-      bill: "GA", thung: "3", sheetName: "Bag", resolved: true,
+      bill: "GA", thung: "3", sheetName: "Bag", resolved: true, route: "air", weightKg: null,
     }]);
   });
 
@@ -103,5 +103,38 @@ describe("readWarehousePackRows", () => {
     mBatchGet.mockImplementation(async (_sid, ranges) => ranges.length === 1 ? [{ values: columns({ E: ["ABC12345"] }) }] : ranges.map(() => ({ values: [] })));
     const { rows } = await readWarehousePackRows("sid");
     expect(rows.map((r) => ({ tab: r.tab, sheetId: r.sheetId }))).toEqual([{ tab: "23.2", sheetId: 150 }]);
+  });
+
+  it.each([
+    ["comma decimal", "12,6", 12.6],
+    ["dot decimal", " 8.5 ", 8.5],
+    ["blank", "", null],
+    ["text", "kg", null],
+    ["zero", "0", null],
+  ])("readWarehousePackRows_weightCell_%s_parsedFromColumnJ", async (_n, j, expected) => {
+    mListSheets.mockResolvedValue([{ title: "26.6", sheetId: 9 }]);
+    mBatchGet.mockResolvedValue([{ values: columns({ E: ["ABC12345"], J: [j] }) }]);
+    const { rows } = await readWarehousePackRows("sid");
+    expect(rows[0].weightKg).toBe(expected);
+  });
+
+  it("readWarehousePackRows_seaTab_routeSeaDatedFirstOfMonth", async () => {
+    mListSheets.mockResolvedValue([{ title: "Biển Tháng6", sheetId: 5 }, { title: "26.6", sheetId: 9 }]);
+    mBatchGet.mockResolvedValue([{ values: columns({ E: ["SEA12345"] }) }, { values: columns({ E: ["AIR12345"] }) }]);
+    const { rows } = await readWarehousePackRows("sid");
+    expect(rows.map((r) => ({ code: r.code, route: r.route, date: r.date, tab: r.tab }))).toEqual([
+      { code: "SEA12345", route: "sea", date: new Date("2026-06-01T00:00:00Z"), tab: "Biển Tháng6" },
+      { code: "AIR12345", route: "air", date: new Date("2026-06-26T00:00:00Z"), tab: "26.6" },
+    ]);
+  });
+
+  it("readWarehousePackRows_recentDays_keepsSeaTabUpTo31DaysOlderThanAirCutoff", async () => {
+    // now 01/07: cut 3 ngày = 28/06; tab biển T6 (01/06) còn trong 31 ngày nới thêm, T5 (01/05) thì không
+    mListSheets.mockResolvedValue([
+      { title: "Biển Tháng5", sheetId: 1 }, { title: "bien t6", sheetId: 2 }, { title: "1.6", sheetId: 3 },
+    ]);
+    mBatchGet.mockResolvedValue([{ values: [] }]);
+    await readWarehousePackRows("sid", 3);
+    expect(mBatchGet).toHaveBeenCalledWith("sid", ["'bien t6'!A1:X100000"], "COLUMNS");
   });
 });

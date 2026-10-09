@@ -71,8 +71,9 @@ function trk(id: string, ord: Ord | null, extra: Partial<TrackingWithOrder> = {}
 function sheetRowState(f = "", x = "") {
   mGet.mockResolvedValue([{ values: f ? [[f]] : [] }, { values: x ? [[x]] : [] }]);
 }
-function setup(o: { group?: TrackingWithOrder[]; locked?: boolean; staleOnRow?: unknown[] } = {}) {
-  db.appConfig.findUnique.mockResolvedValue({ value: "1234567890abcdefghijXYZ" });
+function setup(o: { group?: TrackingWithOrder[]; locked?: boolean; staleOnRow?: unknown[]; readonly?: boolean } = {}) {
+  db.appConfig.findUnique.mockImplementation(async ({ where }: { where: { key: string } }) =>
+    where.key === "warehouse_sheet_readonly" ? (o.readonly ? { value: "true" } : null) : { value: "1234567890abcdefghijXYZ" });
   db.packDayLock.findUnique.mockResolvedValue(o.locked ? { date: DAY } : null);
   db.tracking.findMany.mockImplementation(async (args: { where: { code: unknown } }) =>
     typeof args.where.code === "string" ? (o.group ?? []) : (o.staleOnRow ?? []));
@@ -218,7 +219,7 @@ describe("syncPackedOne - carton", () => {
   it("syncPackedOne_billAndThungGiven_assignsResolvedCarton", async () => {
     const t = trk("t1", null, { packRow: 3 });
     setup({ group: [t] });
-    db.carton.findFirst.mockResolvedValue({ id: "c1" });
+    db.carton.findFirst.mockResolvedValue({ id: "c1", route: "air", declaredWeightKg: null });
     await syncPackedOne(CODE, "26.6", 3, "ga", "2");
     expect(trackingUpdates()).toContainEqual({ where: { id: "t1" }, data: { cartonId: "c1" } });
   });
@@ -226,7 +227,7 @@ describe("syncPackedOne - carton", () => {
   it("syncPackedOne_cartonManualTracking_keepsCartonUntouched", async () => {
     const t = trk("t1", null, { packRow: 3, cartonManual: true, cartonId: "manual" });
     setup({ group: [t] });
-    db.carton.findFirst.mockResolvedValue({ id: "c1" });
+    db.carton.findFirst.mockResolvedValue({ id: "c1", route: "air", declaredWeightKg: null });
     await syncPackedOne(CODE, "26.6", 3, "ga", "2");
     expect(trackingUpdates().some((u) => "cartonId" in u.data)).toBe(false);
   });
@@ -324,5 +325,26 @@ describe("syncPackedOne - write back row", () => {
     mValues.mockRejectedValueOnce(new Error("GSHEET_API 403"));
     expect(await syncPackedOne(CODE, "26.6", 3)).toEqual({ matched: true });
     expect(logError).toHaveBeenCalledWith({ err: "GSHEET_API 403" }, "gsheets_sync_packed_one_failed");
+  });
+});
+
+describe("syncPackedOne - readonly warehouse file", () => {
+  it("syncPackedOne_readonlyUnknownCode_returnsNotMatchedWithoutOrphanOrSheetWrite", async () => {
+    setup({ group: [], readonly: true });
+    expect(await syncPackedOne(CODE, "26.6", 3, "GA", "1")).toEqual({ matched: false });
+    expect(db.tracking.create).not.toHaveBeenCalled();
+    expect(db.carton.create).not.toHaveBeenCalled();
+    expect(mValues).not.toHaveBeenCalled();
+    expect(mFormat).not.toHaveBeenCalled();
+  });
+
+  it("syncPackedOne_readonlyKnownCode_marksPackedButDoesNotWriteBackRow", async () => {
+    const t = trk("t1", order("O1", [{ name: "Bag", price: 1000 }]), { packedAt: null, needsTax: false });
+    setup({ group: [t], readonly: true });
+    expect(await syncPackedOne(CODE, "26.6", 3)).toEqual({ matched: true });
+    expect(trackingUpdates()).toContainEqual({ where: { id: "t1" }, data: { packedAt: DAY, lateAfterLock: false, needsTax: true } });
+    expect(mGet).not.toHaveBeenCalled();
+    expect(mValues).not.toHaveBeenCalled();
+    expect(mFormat).not.toHaveBeenCalled();
   });
 });

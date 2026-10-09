@@ -15,7 +15,7 @@ import { syncTracking, type TrackingRow } from "./trackingSheetSync.service.js";
 import { readWarehousePackRows, type WarehousePackRow, type WarehouseStaleBlankRow } from "./warehouseSheet.reader.js";
 import {
   GREEN, LATE_NOTE, ORANGE, PURPLE, RED, TRACKING_WITH_ORDER, WHITE, YELLOW, blankRowFormatRequests, blankRowValueData, checkNoteOf,
-  getWarehouseSheetId, itemsForRow, itemsNameAndPrice, linkOf, looksLikeOldMerge, resolveCartonId, uniqueOrders, unpackStaleTracking, xCellRange,
+  getWarehouseSheetId, isWarehouseReadonly, itemsForRow, itemsNameAndPrice, linkOf, looksLikeOldMerge, resolveCartonId, uniqueOrders, unpackStaleTracking, xCellRange,
   type TrackingWithOrder,
 } from "./warehouseSheet.shared.js";
 
@@ -165,12 +165,12 @@ function matchRowsToTrackings(trksByCode: Map<string, TrackingWithOrder[]>, rows
 // trừ tracking đã cartonManual (gán/gỡ kiện thủ công trong app) thì giữ nguyên, không đè.
 function cachedCartonResolver() {
   const cartonCache = new Map<string, string>(); // key `${bill thung}|${dayKey}` -> cartonId
-  return async (bill: string, thung: string, date: Date | null): Promise<string | null> => {
+  return async (bill: string, thung: string, date: Date | null, route: "air" | "sea", declaredKg: number | null): Promise<string | null> => {
     const dayKey = date ? date.toISOString().slice(0, 10) : "none";
     const cacheKey = `${bill} ${thung}`.trim().toUpperCase() + "|" + dayKey;
     const cached = cartonCache.get(cacheKey);
     if (cached) return cached;
-    const id = await resolveCartonId(bill, thung, date);
+    const id = await resolveCartonId(bill, thung, date, route, declaredKg);
     if (id) cartonCache.set(cacheKey, id);
     return id;
   };
@@ -178,12 +178,18 @@ function cachedCartonResolver() {
 
 async function assignCartonsFromRows(rows: WarehousePackRow[], rowMatch: Map<string, TrackingWithOrder>, trksByCode: Map<string, TrackingWithOrder[]>): Promise<void> {
   const getCartonId = cachedCartonResolver();
+  const kgByCarton = new Map<string, number>();
+  for (const r of rows) { const k = `${r.tab}|${r.bill} ${r.thung}`.toUpperCase(); if (r.weightKg && !kgByCarton.has(k)) kgByCarton.set(k, r.weightKg); }
   for (const r of rows) {
     if (!r.bill && !r.thung) continue;
-    const cartonId = await getCartonId(r.bill, r.thung, r.date);
-    if (!cartonId) continue;
+    // File Global: chỉ dòng có tracking của mình mới tạo kiện (không tạo kiện rác cho hàng khách khác).
     const single = rowMatch.get(`${r.tab}|${r.row}`);
     const targets = single ? [single] : (trksByCode.get(r.code) ?? []);
+    if (!targets.length) continue;
+    // Cân thùng nằm ở dòng đầu thùng (có thể là dòng của mã khác cùng thùng) -> lấy số đầu tiên có cân của đúng thùng đó.
+    const cartonKg = kgByCarton.get(`${r.tab}|${r.bill} ${r.thung}`.toUpperCase()) ?? null;
+    const cartonId = await getCartonId(r.bill, r.thung, r.date, r.route, cartonKg);
+    if (!cartonId) continue;
     for (const t of targets) {
       const data: { cartonId?: string; packedAt?: Date; packRow?: number } = {};
       // Tự theo đúng BILL/Thùng hiện tại trong sheet (kể cả khi kho đổi tên/số thùng sau này) -
@@ -301,16 +307,21 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const lockedDates = await loadLockedDates();
   const isLocked: IsLocked = (d) => (d ? lockedDates.has(isoDay(d)) : false);
 
+  const readonly = await isWarehouseReadonly();
   const blankedRows = await unpackStaleRowClaims(rows, lockedDates, opts?.recentDays);
-  mergeStaleBlankRows(blankedRows, staleBlank, lockedDates);
-  await clearBlankedRows(sid, blankedRows);
+  if (!readonly) {
+    mergeStaleBlankRows(blankedRows, staleBlank, lockedDates);
+    await clearBlankedRows(sid, blankedRows);
+  }
 
   const dateByCode = new Map<string, Date | null>();
   for (const r of rows) if (!dateByCode.has(r.code)) dateByCode.set(r.code, r.date);
   const codes = [...dateByCode.keys()];
   if (!codes.length) return { matched: 0, updated: 0 };
   const trks: TrackingWithOrder[] = await prisma.tracking.findMany({ where: { code: { in: codes } }, include: TRACKING_WITH_ORDER });
-  await createMissingOrphans(codes, trks, dateByCode, isLocked);
+  // Chỉ đọc (file Global có hàng của khách khác): mã chưa có trong hệ thống KHÔNG tạo mồ côi - hàng của mình mất/sai
+  // tracking sẽ lộ ra ở Kho VN khi quét mà không khớp đơn.
+  if (!readonly) await createMissingOrphans(codes, trks, dateByCode, isLocked);
 
   // 1 mã có thể gắn nhiều đơn khác nhau (nhầm/gộp chuyến) -> gom theo mảng, không lấy đại diện 1 đơn
   const trksByCode = groupBy(trks, (t) => t.code);
@@ -319,7 +330,7 @@ export async function syncPackedFromWarehouse(opts?: { recentDays?: number }): P
   const rowsByCode = groupBy(rows, (r) => r.code);
   const rowMatch = matchRowsToTrackings(trksByCode, rowsByCode);
   await assignCartonsFromRows(rows, rowMatch, trksByCode);
-  await writeBackToWarehouse(sid, rows, lockedDates, { rowMatch, trksByCode, rowsByCode });
+  if (!readonly) await writeBackToWarehouse(sid, rows, lockedDates, { rowMatch, trksByCode, rowsByCode });
 
   return { matched: trks.length, updated };
 }
@@ -341,7 +352,7 @@ export async function clearWarehouseRow(packedAt: Date | null, row: number | nul
   if (!serviceAccountEnabled() || !packedAt || row == null) return;
   try {
     const sid = await getWarehouseSheetId();
-    if (!sid) return;
+    if (!sid || await isWarehouseReadonly()) return;
     const dayKey = packedAt.toISOString().slice(0, 10);
     const found = (await listSheets(sid)).find((s) => tabDate(s.title)?.toISOString().slice(0, 10) === dayKey);
     if (!found) return;

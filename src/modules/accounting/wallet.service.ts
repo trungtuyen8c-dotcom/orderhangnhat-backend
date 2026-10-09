@@ -92,27 +92,69 @@ export function walletsBasic() {
   return prisma.wallet.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true, currency: true } });
 }
 
+// Số dư đầu kỳ / điều chỉnh tay là 1 DÒNG SỔ như mọi giao dịch khác (không sửa thẳng Wallet.balance) -> sao kê, đối soát
+// ngày, báo cáo đều thấy. Thẻ dùng chung nhiều dự án: số dư thật = đầu kỳ + tổng giao dịch của mọi dự án (cột project).
+export const OPENING_REF = "opening";
+
 export async function createWallet(input: { name: string; currency: string; balance?: number }, actor: Actor) {
   return prisma.$transaction(async (tx) => {
     if (await tx.wallet.findUnique({ where: { name: input.name } })) throw new AppError("WALLET_EXISTS", 409);
-    // Số dư ban đầu nhập tay (không có dòng sổ) - giữ như cũ, báo cáo ngày bám mốc wallet.balance.
-    const w = await tx.wallet.create({ data: { id: uuid(), name: input.name, currency: input.currency, balance: input.balance ?? 0 } });
+    const w = await tx.wallet.create({ data: { id: uuid(), name: input.name, currency: input.currency, balance: 0 } });
+    if (input.balance) await postWalletTxn(tx, { walletId: w.id, amount: input.balance, type: "opening", category: "Số dư đầu kỳ", statementRef: OPENING_REF });
     await writeAudit(tx, { actorId: actor.id, targetId: w.id, action: "wallet.created", requestId: actor.requestId, metadata: { balance: input.balance ?? 0 } });
+    return tx.wallet.findUniqueOrThrow({ where: { id: w.id } });
+  });
+}
+
+// Sửa tên/tiền tệ. Gửi kèm balance (đặt số dư tay) -> ghi 1 dòng "Điều chỉnh số dư" đúng phần chênh, không ghi đè.
+export async function updateWallet(id: string, data: { name?: string; currency?: string; balance?: number }, actor: Actor) {
+  return prisma.$transaction(async (tx) => {
+    const before = await tx.wallet.findUnique({ where: { id } });
+    if (!before) throw new AppError("WALLET_NOT_FOUND", 404);
+    const { balance, ...rest } = data;
+    if (Object.keys(rest).length) await tx.wallet.update({ where: { id }, data: rest });
+    if (balance !== undefined && balance !== Number(before.balance)) {
+      await postWalletTxn(tx, { walletId: id, amount: balance - Number(before.balance), type: "adjust", category: "Điều chỉnh số dư" });
+    }
+    const w = await tx.wallet.findUniqueOrThrow({ where: { id } });
+    await writeAudit(tx, {
+      actorId: actor.id, targetId: w.id, action: "wallet.updated", requestId: actor.requestId,
+      ...(balance !== undefined ? { before: { balance: Number(before.balance) }, after: { balance: Number(w.balance) } } : {}),
+    });
     return w;
   });
 }
 
-// Form sửa ví gửi kèm balance (đặt tay số dư) - giữ hành vi cũ, audit ghi số dư trước/sau.
-export async function updateWallet(id: string, data: { name?: string; currency?: string; balance?: number }, actor: Actor) {
+// Đặt số dư đầu kỳ tại 1 ngày: thay dòng đầu kỳ cũ (nếu có) bằng dòng mới ghi đúng 0h ngày đó.
+export async function setWalletOpening(id: string, input: { amount: number; date: Date }, actor: Actor) {
   return prisma.$transaction(async (tx) => {
-    const before = await tx.wallet.findUnique({ where: { id } });
-    const w = await tx.wallet.update({ where: { id }, data });
-    await writeAudit(tx, {
-      actorId: actor.id, targetId: w.id, action: "wallet.updated", requestId: actor.requestId,
-      ...(data.balance !== undefined ? { before: { balance: before ? Number(before.balance) : null }, after: { balance: Number(w.balance) } } : {}),
-    });
-    return w;
+    const w = await tx.wallet.findUnique({ where: { id } });
+    if (!w) throw new AppError("WALLET_NOT_FOUND", 404);
+    await reverseWalletTxns(tx, { walletId: id, statementRef: OPENING_REF });
+    if (input.amount) {
+      await postWalletTxn(tx, { walletId: id, amount: input.amount, type: "opening", category: "Số dư đầu kỳ", statementRef: OPENING_REF, createdAt: input.date });
+    }
+    await writeAudit(tx, { actorId: actor.id, targetId: id, action: "wallet.opening_set", requestId: actor.requestId, metadata: { amount: input.amount, date: input.date } });
+    return tx.wallet.findUniqueOrThrow({ where: { id } });
   });
+}
+
+// Sổ giao dịch thẻ để GỘP với dự án khác dùng chung thẻ: mỗi dòng có tên thẻ + dự án + ngày + số tiền có dấu.
+// Gộp N dự án: số dư thẻ = tổng amount mọi dòng của thẻ đó (đầu kỳ là 1 dòng, chỉ 1 dự án ghi).
+export async function walletLedger(q: { from?: Date; to?: Date; wallet?: string }) {
+  const rows = await prisma.walletTxn.findMany({
+    where: {
+      ...(q.wallet ? { wallet: { name: q.wallet } } : {}),
+      ...(q.from || q.to ? { createdAt: { ...(q.from ? { gte: q.from } : {}), ...(q.to ? { lte: q.to } : {}) } } : {}),
+    },
+    orderBy: { createdAt: "asc" },
+    include: { wallet: { select: { name: true, currency: true } } },
+    take: 20000,
+  });
+  return rows.map((t) => ({
+    id: t.id, wallet: t.wallet.name, currency: t.wallet.currency, project: t.project, date: t.createdAt,
+    amount: Number(t.amount), type: t.type, category: t.category, note: t.note,
+  }));
 }
 
 export async function deleteWallet(id: string, actor: Actor) {

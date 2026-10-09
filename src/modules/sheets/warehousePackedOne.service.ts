@@ -11,9 +11,9 @@ import { bumpOrderStatus } from "../orders/order.state.js";
 import { logError } from "../../infrastructure/systemLog.js";
 import { syncCustomerOrders } from "./customerSheetSync.service.js";
 import { createOrphanTrackingSafe } from "./orphanTracking.js";
-import { isChecked, isTrackingCode, isoDay, tabDate } from "./sheet.utils.js";
+import { isChecked, isTrackingCode, isoDay, seaTabDate, tabDate } from "./sheet.utils.js";
 import {
-  GREEN, LATE_NOTE, ORANGE, PURPLE, TRACKING_WITH_ORDER, WHITE, YELLOW, checkNoteOf, getWarehouseSheetId, itemsForRow, itemsNameAndPrice,
+  GREEN, LATE_NOTE, ORANGE, PURPLE, TRACKING_WITH_ORDER, WHITE, YELLOW, checkNoteOf, getWarehouseSheetId, isWarehouseReadonly, itemsForRow, itemsNameAndPrice,
   linkOf, looksLikeOldMerge, resolveCartonId, uniqueOrders, unpackStaleTracking, xCellRange, type TrackingWithOrder,
 } from "./warehouseSheet.shared.js";
 
@@ -86,7 +86,10 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   const sid = await getWarehouseSheetId();
   if (!sid) return { matched: false };
   const group: TrackingWithOrder[] = await prisma.tracking.findMany({ where: { code: c }, include: TRACKING_WITH_ORDER });
-  const packedAt = (tab ? tabDate(tab) : null) ?? group[0]?.packedAt ?? new Date();
+  // Tab "Biển ThángX" = đường biển, ngày = mùng 1 tháng đó (khớp với cron quét, không tạo trùng kiện).
+  const seaDate = tab && !tabDate(tab) ? seaTabDate(tab) : null;
+  const route: "air" | "sea" = seaDate ? "sea" : "air";
+  const packedAt = (tab ? tabDate(tab) ?? seaDate : null) ?? group[0]?.packedAt ?? new Date();
   const locked = Boolean(await prisma.packDayLock.findUnique({ where: { date: new Date(packedAt.toISOString().slice(0, 10) + "T00:00:00") } }));
 
   // Ngày ĐÃ chốt thì không tự dọn nữa - sửa gì cũng phải khai bổ sung thủ công.
@@ -96,6 +99,8 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
   // thì lấy đúng cái đó, không gộp nhầm tên/giá của đơn khác cùng mã - chỉ 1 tracking thì khỏi cần phân biệt.
   let single = group.length === 1 ? group[0] : (row ? group.find((x) => x.packRow === row) : undefined);
   let t = single ?? group[0];
+  const readonly = await isWarehouseReadonly();
+  if (!t && readonly) return { matched: false };
   if (!t) {
     // Mã quét được nhưng chưa có tracking nào trong hệ thống -> tạo mồ côi để không mất dấu hàng
     // (hiện ở /control/unmatched + board Kho VN "chưa gắn"); gán kiện theo BILL/thùng ngay bên dưới nếu có gửi kèm.
@@ -115,11 +120,11 @@ export async function syncPackedOne(code: string, tab?: string, row?: number, bi
 
   // Gán kiện (BILL/Thùng) ngay tức thì, không đợi cron 2 phút - trừ khi tracking đã cartonManual (gán/gỡ tay).
   if ((bill || thung) && !t.cartonManual) {
-    const cartonId = await resolveCartonId(bill ?? "", thung ?? "", packedAt);
+    const cartonId = await resolveCartonId(bill ?? "", thung ?? "", packedAt, route);
     if (cartonId && t.cartonId !== cartonId) { await prisma.tracking.update({ where: { id: t.id }, data: { cartonId } }); t.cartonId = cartonId; }
   }
 
-  if (tab && row) {
+  if (tab && row && !readonly) {
     try { await writeBackOneRow(sid, tab, row, group, single, t, locked); }
     catch (e) { logError({ err: (e as Error).message }, "gsheets_sync_packed_one_failed"); }
   }

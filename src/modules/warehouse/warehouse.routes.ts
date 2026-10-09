@@ -27,7 +27,7 @@ const vnTotalSchema = z.object({ vnTotalWeightKg: z.number().nonnegative().nulla
 const electronicsSchema = z.object({ electronicsCount: z.number().int().nonnegative().nullable() });
 const storeSchema = z.object({ ids: z.array(z.string().uuid()).min(1) });
 const addManualSchema = z.object({ orderCode: z.string().min(1), code: z.string().min(1), jpWeightKg: z.number().nonnegative().optional(), cartonId: z.string().uuid().optional() });
-const packCfgSchema = z.object({ sheetUrl: z.string().nullable().optional() });
+const packCfgSchema = z.object({ sheetUrl: z.string().nullable().optional(), readonly: z.boolean().optional() });
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const dayLockSchema = z.object({ date: z.string().regex(DATE_RE) });
 const vnTrackSchema = z.object({ trackingId: z.string().uuid(), vnTrackingCode: z.string().min(1) });
@@ -100,7 +100,7 @@ warehouseRouter.get("/pack-config", authorize("system.manage_settings"), asyncHa
 
 warehouseRouter.put("/pack-config", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
   const body = parseOr400(packCfgSchema, req.body);
-  res.json(await svc.setPackConfig(body.sheetUrl, actor(req)));
+  res.json(await svc.setPackConfig(body.sheetUrl, actor(req), body.readonly));
 }));
 
 warehouseRouter.post("/sync-pack", authorize("system.manage_settings"), asyncHandler(async (req, res) => {

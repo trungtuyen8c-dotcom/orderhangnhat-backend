@@ -9,6 +9,8 @@ import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
 import { syncCustomerOrders } from "../sheets/customerSheetSync.service.js";
 import { queueCustomerSheetSync } from "../sheets/sheet.jobs.js";
 import * as repo from "./customers.repository.js";
+import { recomputeOrderTotals } from "../orders/order.totals.js";
+import { computeBalances, emptyBalance, type Balance, type BalanceInputs } from "./customerBalance.js";
 
 export type Actor = { id: string; requestId?: string };
 export type { CustomerSortField } from "./customers.repository.js";
@@ -21,42 +23,30 @@ export type CustomerInput = {
   note?: string | null;
   sheetUrl?: string | null;
   shipRatePerKg?: number | null;
+  shipRateSeaPerKg?: number | null;
   skipVnWeighingDefault?: boolean;
+  code?: string;
+  payCurrency?: "VND" | "JPY";
+  commissionPercentDefault?: number;
 };
 
-type Aggregates = Awaited<ReturnType<typeof repo.customerMoneyAggregates>>;
-
-// Gộp doanh số (tổng VND các đơn) + công nợ theo khách.
-// Công nợ VND = tổng đơn (trừ đơn đã hủy) - (cọc CustomerDeposit đã xác nhận + Payment) - tính giống
-// /accounting/customers/:id/ledger. KHÔNG dùng bảng Debt cho phần VND: bảng đó chỉ tạo/cập nhật khi có
-// Payment qua flow cũ, không biết đến cọc ghi qua Ví khách (flow hiện tại) -> nếu khách chỉ ghi cọc, Debt
-// không có dòng nào, nợ luôn hiện sai là 0.
-// Nợ ¥ (đơn định giá thẳng JPY, khách trả thẳng chưa quy đổi) vẫn lấy từ bảng Debt vì ledger không tách khoản này.
-export function withBalances<C extends { id: string }>(rows: C[], [revenue, debtOrders, debtJpyAgg, deposits, payments]: Aggregates) {
-  const rev = new Map(revenue.map((r) => [r.customerId, Number(r._sum.totalVnd ?? 0)]));
-  const orderTotalMap = new Map(debtOrders.map((r) => [r.customerId, Number(r._sum.totalVnd ?? 0)]));
-  const debtJpyMap = new Map(debtJpyAgg.map((d) => [d.customerId, Number(d._sum.balance ?? 0)]));
-  const paidMap = new Map<string, number>();
-  for (const d of deposits) paidMap.set(d.customerId, (paidMap.get(d.customerId) ?? 0) + Number(d._sum.amountVnd ?? 0));
-  for (const p of payments) {
-    const cid = p.order?.customerId;
-    if (!cid) continue;
-    const v = p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd);
-    paidMap.set(cid, (paidMap.get(cid) ?? 0) + v);
-  }
+// Gộp doanh số + công nợ (₫ và ¥) vào từng dòng khách - công thức ở customerBalance.ts (dùng chung mọi báo cáo).
+export function withBalances<C extends { id: string }>(rows: C[], inp: BalanceInputs) {
+  const bal = computeBalances(inp);
   return rows.map((c) => {
-    const orderTotal = orderTotalMap.get(c.id) ?? 0;
-    const paidTotal = paidMap.get(c.id) ?? 0;
-    return { ...c, revenue: rev.get(c.id) ?? 0, debt: orderTotal - paidTotal, debtJpy: debtJpyMap.get(c.id) ?? 0 };
+    const b = bal.get(c.id) ?? emptyBalance();
+    return { ...c, revenue: b.revenue, debt: b.debt, debtJpy: b.debtJpy };
   });
 }
 
-// Công nợ VND hiện tại của mọi khách có phát sinh (cùng công thức withBalances) - dùng chung cho báo cáo công nợ.
+// Công nợ hiện tại (₫ + ¥) của mọi khách có phát sinh - dùng chung cho báo cáo công nợ / báo cáo tháng / MCP.
+export async function customerDebts(): Promise<Map<string, Balance>> {
+  return computeBalances(await repo.customerMoneyAggregates());
+}
+
+// Chỉ nợ ₫ (giữ cho chỗ cũ chỉ cần ₫).
 export async function customerVndDebts(): Promise<Map<string, number>> {
-  const aggs = await repo.customerMoneyAggregates();
-  const ids = new Set<string>([...aggs[1].map((r) => r.customerId), ...aggs[3].map((d) => d.customerId)]);
-  for (const p of aggs[4]) if (p.order?.customerId) ids.add(p.order.customerId);
-  return new Map(withBalances([...ids].map((id) => ({ id })), aggs).map((r) => [r.id, r.debt]));
+  return new Map([...(await customerDebts())].map(([id, b]) => [id, b.debt]));
 }
 
 // Không có page -> mảng (contract cũ, tối đa 500). Có page -> { items, pagination }, chỉ gộp số liệu cho trang đó.
@@ -80,18 +70,31 @@ function withSheet(d: CustomerInput) {
   return sheetUrl !== undefined ? { ...rest, sheetId: parseSheetId(sheetUrl) } : rest;
 }
 
+async function assertCodeFree(code: string, exceptId?: string) {
+  const dup = await prisma.customer.findFirst({ where: { code: { equals: code, mode: "insensitive" }, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true } });
+  if (dup) throw new AppError("CODE_TAKEN", 409, `Mã khách ${code} đã có`);
+}
+
 export async function createCustomer(input: CustomerInput & { name: string }, actor: Actor) {
-  const code = await repo.nextCustomerCode();
-  const c = await prisma.customer.create({ data: { id: uuid(), code, ...withSheet(input), name: input.name } });
+  if (input.code) await assertCodeFree(input.code);
+  const code = input.code ?? await repo.nextCustomerCode();
+  const c = await prisma.customer.create({ data: { id: uuid(), ...withSheet(input), code, name: input.name } });
   await logAudit({ actorId: actor.id, targetId: c.id, action: "customer.created", requestId: actor.requestId });
   return c;
 }
 
-// Field ảnh hưởng nội dung sheet khách (link sheet, đơn giá ship/kg mặc định).
-const SHEET_FIELDS: (keyof CustomerInput)[] = ["sheetUrl", "shipRatePerKg"];
+// Field ảnh hưởng nội dung sheet khách (link sheet, đơn giá ship/kg mặc định, loại tiền).
+const SHEET_FIELDS: (keyof CustomerInput)[] = ["sheetUrl", "shipRatePerKg", "shipRateSeaPerKg", "payCurrency"];
+// Field đổi cách tính tiền MỌI đơn của khách -> phải tính lại tổng/công nợ từng đơn.
+const TOTALS_FIELDS: (keyof CustomerInput)[] = ["shipRatePerKg", "shipRateSeaPerKg", "payCurrency"];
 
 export async function updateCustomer(id: string, input: CustomerInput, actor: Actor): Promise<Customer> {
+  if (input.code) await assertCodeFree(input.code, id);
   const c = await prisma.customer.update({ where: { id }, data: withSheet(input) });
+  if (TOTALS_FIELDS.some((f) => input[f] !== undefined)) {
+    const orders = await prisma.order.findMany({ where: { customerId: id }, select: { id: true } });
+    for (const o of orders) await recomputeOrderTotals(o.id);
+  }
   await logAudit({ actorId: actor.id, targetId: c.id, action: "customer.updated", requestId: actor.requestId });
   eventBus.publish({ eventName: "customer.updated", actorId: actor.id, entityType: "customer", entityId: c.id, metadata: { fields: Object.keys(input) } });
   if (c.sheetId && SHEET_FIELDS.some((f) => input[f] !== undefined)) await queueCustomerSheetSync(c.id);

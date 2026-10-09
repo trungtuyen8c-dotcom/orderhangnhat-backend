@@ -40,6 +40,7 @@ export const REPORTS: Record<string, (params: ReportParams) => Promise<unknown>>
   accounting_customer_summary: reportsAccounting.accounting_customer_summary,
   accounting_monthly_report: reportsAccounting.accounting_monthly_report,
   accounting_wallets: reportsAccounting.accounting_wallets,
+  accounting_wallet_ledger: reportsAccounting.accounting_wallet_ledger,
   accounting_fund: reportsAccounting.accounting_fund,
   accounting_fund_counts: reportsAccounting.accounting_fund_counts,
   accounting_reconcile: reportsAccounting.accounting_reconcile,
@@ -56,6 +57,6 @@ export const REPORT_SCOPE: Record<string, string> = {
   companycost_report: "reports:companycost", companycost_settlement: "reports:companycost", companycost_reinforce_price: "reports:companycost", companycost_electronics_price: "reports:companycost",
   shipments_tax_audit: "reports:shipments", shipments_invoice_checklist: "reports:shipments", shipments_tax_rows: "reports:shipments", shipments_documents: "reports:shipments",
   accounting_debts: "reports:accounting", accounting_deposits: "reports:accounting", accounting_deposits_counts: "reports:accounting", accounting_opening_balances: "reports:accounting",
-  accounting_customer_summary: "reports:accounting", accounting_monthly_report: "reports:accounting", accounting_wallets: "reports:accounting", accounting_fund: "reports:accounting",
+  accounting_customer_summary: "reports:accounting", accounting_monthly_report: "reports:accounting", accounting_wallets: "reports:accounting", accounting_wallet_ledger: "reports:accounting", accounting_fund: "reports:accounting",
   accounting_fund_counts: "reports:accounting", accounting_reconcile: "reports:accounting", accounting_statement: "reports:accounting",
 };

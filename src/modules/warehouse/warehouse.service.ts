@@ -10,6 +10,7 @@ import { parseSheetId } from "../../integrations/google/googleSheets.client.js";
 import { bumpOrderStatus } from "../orders/order.state.js";
 import { recomputeOrderTotals } from "../orders/order.totals.js";
 import { syncPackedFromWarehouse, setDayLockFromTab } from "../sheets/warehouseSheetSync.service.js";
+import { isWarehouseReadonly } from "../sheets/warehouseSheet.shared.js";
 import { syncPackedOne } from "../sheets/warehousePackedOne.service.js";
 import { queueCustomerSheetSync, queueTrackingSheetRow, queueWarehouseRowClear } from "../sheets/sheet.jobs.js";
 import { cartonWeightLocked, deleteCartonIfEmpty } from "../cartons/carton.service.js";
@@ -68,15 +69,20 @@ export async function getPackConfig(baseUrl: string) {
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   const hookKey = await getHookKey();
   const hookUrl = `${baseUrl}/api/warehouse/sync-hook?key=${hookKey}`;
-  return { sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null, hookUrl };
+  return { sheetUrl: cfg?.value ?? "", sheetId: cfg?.value ? parseSheetId(cfg.value) : null, hookUrl, readonly: await isWarehouseReadonly() };
 }
 
-export async function setPackConfig(sheetUrl: string | null | undefined, actor: Actor) {
+// readonly: file kho của bên vận chuyển (không được ghi) -> hệ thống chỉ đọc, không tô màu/ghi chú/tạo mồ côi.
+export async function setPackConfig(sheetUrl: string | null | undefined, actor: Actor, readonly?: boolean) {
   const url = (sheetUrl ?? "").trim();
   if (url && !parseSheetId(url)) throw new AppError("BAD_URL", 400, "Link Google Sheet không hợp lệ");
   await prisma.appConfig.upsert({ where: { key: "warehouse_sheet_id" }, update: { value: url }, create: { key: "warehouse_sheet_id", value: url } });
-  await logAudit({ actorId: actor.id, action: "warehouse.pack_config_set", requestId: actor.requestId });
-  return { sheetUrl: url, sheetId: url ? parseSheetId(url) : null };
+  if (readonly !== undefined) {
+    const v = readonly ? "true" : "false";
+    await prisma.appConfig.upsert({ where: { key: "warehouse_sheet_readonly" }, update: { value: v }, create: { key: "warehouse_sheet_readonly", value: v } });
+  }
+  await logAudit({ actorId: actor.id, action: "warehouse.pack_config_set", requestId: actor.requestId, metadata: { readonly } });
+  return { sheetUrl: url, sheetId: url ? parseSheetId(url) : null, readonly: await isWarehouseReadonly() };
 }
 
 // Quét file kho ngay: mã trùng -> đóng hàng về (cam). Trả số đếm -> đồng bộ.

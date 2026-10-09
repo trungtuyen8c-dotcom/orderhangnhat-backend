@@ -55,7 +55,8 @@ vi.mock("../../infrastructure/prisma.js", () => ({
     customer: { findUnique: vi.fn() },
     order: { findMany: vi.fn() },
     customerDeposit: { findMany: vi.fn() },
-    companyCost: { groupBy: vi.fn() },
+    companyCost: { findMany: vi.fn() },
+    carton: { findMany: vi.fn() },
   },
 }));
 
@@ -73,15 +74,16 @@ const mPrisma = prisma as unknown as {
   customer: { findUnique: ReturnType<typeof vi.fn> };
   order: { findMany: ReturnType<typeof vi.fn> };
   customerDeposit: { findMany: ReturnType<typeof vi.fn> };
-  companyCost: { groupBy: ReturnType<typeof vi.fn> };
+  companyCost: { findMany: ReturnType<typeof vi.fn> };
+  carton: { findMany: ReturnType<typeof vi.fn> };
 };
 
-// Tiêu đề A..U: template mặc định A..N + các cột khách tự thêm O..U.
+// Tiêu đề A..V: bố cục cũ A..N + các cột khách tự thêm O..U + "Số tiền giảm giá" ở V.
 const FULL_HEADER = [
   "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB",
   "% Công", "Tổng tiền bao gồm tiền công", "Cân-Kg", "Phụ thu", "TRACKING", "Đánh giá", "Ngày giao cho khách hàng",
   "tỉ giá", "Tổng tiền KH quy đổi VND", "Đơn giá vận chuyển", "Tổng tiền vận chuyển", "Tổng tiền VND+ Vận chuyển",
-  "lưu kho", "tracking việt nam",
+  "lưu kho", "tracking việt nam", "Số tiền giảm giá",
 ];
 
 // 10:00 giờ VN ngày 15/03/2026
@@ -92,11 +94,13 @@ const item = (o: Record<string, unknown> = {}) => ({
 });
 const tracking = (o: Record<string, unknown> = {}) => ({
   id: "t1", code: "TRK00001", jpWeightKg: null, vnWeightKg: null, unitPriceVndPerKg: null, shipRateCurrency: "VND",
-  review: null, deliveredAt: null, status: "pending", vnTrackingCode: null, ...o,
+  review: null, deliveredAt: null, status: "pending", vnTrackingCode: null, cartonId: null, ...o,
 });
 const order = (o: Record<string, unknown> = {}) => ({
   id: "o1", code: "ORD1", nick: "acc1", createdAt: MAR15, exchangeRate: null,
   surchargeAmount: 0, surchargeCurrency: "VND", commissionPercent: 0, shipAmount: 0, shipCurrency: "JPY",
+  discountAmount: 0, discountCurrency: "JPY", serviceFeeAmount: 0, serviceFeeCurrency: "JPY", serviceFeeCustomerPays: true,
+  jpDomesticShipAmount: 0, jpDomesticShipCurrency: "JPY", intlShipAmount: 0, intlShipCurrency: "VND",
   items: [item()], trackings: [] as unknown[], payments: [], ...o,
 });
 
@@ -104,7 +108,8 @@ function setup(opts: {
   customer?: Record<string, unknown> | null;
   orders?: unknown[];
   deposits?: unknown[];
-  cod?: { refId: string; _sum: { amountVnd: number } }[];
+  cod?: { refId: string; currency: string; amountOrig: number; amountVnd: number; exchangeRate: number | null }[];
+  cartons?: { id: string; route: string }[];
   tabs?: Record<string, FakeTab>;
 } = {}) {
   fake.tabs.clear();
@@ -115,7 +120,8 @@ function setup(opts: {
   );
   mPrisma.order.findMany.mockResolvedValue(opts.orders ?? []);
   mPrisma.customerDeposit.findMany.mockResolvedValue(opts.deposits ?? []);
-  mPrisma.companyCost.groupBy.mockResolvedValue(opts.cod ?? []);
+  mPrisma.companyCost.findMany.mockResolvedValue(opts.cod ?? []);
+  mPrisma.carton.findMany.mockResolvedValue(opts.cartons ?? []);
 }
 
 // Giá trị đã ghi vào 1 cột (theo chữ cái) của tab, bắt từ updateValues dạng ROWS.
@@ -175,15 +181,35 @@ describe("syncCustomerOrders - rows per month", () => {
     },
   );
 
-  it("syncCustomerOrders_itemInMonthWithoutTab_createsTabAndWritesDefaultHeaderAtA1", async () => {
+  it("syncCustomerOrders_itemInMonthWithoutTab_createsTabWritesTotalsLabelsAndHeaderAtRow5", async () => {
     setup({ orders: [order({ items: [item({ purchaseDate: new Date("2026-04-02T03:00:00Z") })] })], tabs: {} });
 
     await syncCustomerOrders("c1");
 
     expect(mClient.ensureSheetTab).toHaveBeenCalledWith("sid", "Tháng 4");
-    const headerWrite = mClient.updateValues.mock.calls.find(([, t, a1]) => t === "Tháng 4" && a1 === "A1");
-    expect(headerWrite?.[3].values[0][0]).toBe("Mã Link");
-    expect(written("Tháng 4", "A")).toEqual(["ORD1"]);
+    expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 4", "G1:G3", { majorDimension: "COLUMNS", values: [["TỔNG TT", "CỌC", "NỢ"]] });
+    expect(mClient.updateValues.mock.calls.find(([, t, a1]) => t === "Tháng 4" && a1 === "A1")).toBeUndefined();
+    const header = mClient.updateValues.mock.calls.find(([, t, a1]) => t === "Tháng 4" && a1 === "A5")?.[3].values[0];
+    expect(header?.slice(0, 8)).toEqual(["Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB", "Số tiền giảm giá"]);
+    expect(header).toEqual(expect.arrayContaining([
+      "tỉ giá", "Tổng tiền KH quy đổi VND", "Đơn giá vận chuyển", "Tổng tiền vận chuyển", "Phụ thu",
+      "Tổng tiền VND+ Vận chuyển", "lưu kho", "tracking việt nam",
+    ]));
+    expect(header?.slice(-6)).toEqual(["", "Mã", "Ngày", "Tên khoản mục", "Nội dung", "Tiền"]);
+    expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 4", "A6", { majorDimension: "ROWS", values: [["ORD1"]] });
+  });
+
+  it("syncCustomerOrders_newTabWithDeposit_writesDepositRowsUnderTemplateBlock", async () => {
+    setup({
+      deposits: [{ paidAt: new Date("2026-04-03T03:00:00Z"), note: "CK", amountVnd: 100000, amountOrig: 100000, currency: "VND" }],
+      tabs: {},
+    });
+
+    await syncCustomerOrders("c1");
+
+    const call = mClient.updateValues.mock.calls.find(([, t, , body]) => t === "Tháng 4" && body.values[0]?.[1] === "Thu tiền hàng");
+    expect(call?.[2]).toMatch(/^[A-Z]+6$/);
+    expect(call?.[3].values).toEqual([["03/04/2026", "Thu tiền hàng", "CK", 100000]]);
   });
 
   it("syncCustomerOrders_itemsOfOneOrderInDifferentMonths_splitsByEachItemPurchaseDate", async () => {
@@ -405,7 +431,7 @@ describe("syncCustomerOrders - row values", () => {
         items: [item(), item()],
         trackings: [tracking({ id: "tA" }), tracking({ id: "tB", code: "TRK00002" })],
       })],
-      cod: [{ refId: "tB", _sum: { amountVnd: 12000 } }],
+      cod: [{ refId: "tB", currency: "VND", amountOrig: 12000, amountVnd: 12000, exchangeRate: null }],
     });
 
     await syncCustomerOrders("c1");
@@ -418,7 +444,8 @@ describe("syncCustomerOrders - row values", () => {
 
     await syncCustomerOrders("c1");
 
-    expect(mPrisma.companyCost.groupBy).not.toHaveBeenCalled();
+    expect(mPrisma.companyCost.findMany).not.toHaveBeenCalled();
+    expect(mPrisma.carton.findMany).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -609,7 +636,8 @@ describe("syncCustomerOrders - totals H1:H3", () => {
 
     await syncCustomerOrders("c1");
 
-    expect(totalsWrite("Tháng 3")).toEqual([170000, 50000, 120000]);
+    // Cọc ¥ của khách ₫ tính theo amountVnd vào cột ₫
+    expect(totalsWrite("Tháng 3")).toEqual([170000, 67000, 103000]);
     expect(formatPattern()).toBe("#,##0 \"₫\"");
   });
 
@@ -747,5 +775,225 @@ describe("syncCustomerOrders - retry and serialization", () => {
 
     release();
     await Promise.all([p1, p2]);
+  });
+});
+
+describe("syncCustomerOrders - discount, commission and order fees", () => {
+  it("syncCustomerOrders_jpyDiscount_subtractedOnFirstItemBeforeCommission", async () => {
+    setup({
+      orders: [order({
+        commissionPercent: 10, discountAmount: 200, discountCurrency: "JPY",
+        items: [item({ shipJpy: 200 }), item()],
+      })],
+    });
+
+    await syncCustomerOrders("c1");
+
+    // món 1: (1000+200-200) x 10% = 100 -> 1000+200-200+100; món 2: 1000 + 100
+    expect(written("Tháng 3", "V")).toEqual([200, ""]);
+    expect(written("Tháng 3", "I")).toEqual([1100, 1100]);
+  });
+
+  it("syncCustomerOrders_orderLevelJpyFees_mergedIntoFirstItemShipFormulaAndTotal", async () => {
+    setup({
+      orders: [order({
+        exchangeRate: 170, shipAmount: 0,
+        serviceFeeAmount: 300, serviceFeeCurrency: "JPY", jpDomesticShipAmount: 100, jpDomesticShipCurrency: "JPY",
+        intlShipAmount: 50000, intlShipCurrency: "VND", discountAmount: 10000, discountCurrency: "VND",
+        items: [item({ shipJpy: 500 }), item()],
+      })],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "G")).toEqual(["=500+400", ""]);
+    expect(written("Tháng 3", "I")).toEqual([1900, 1000]);
+    // 1900 x 170 + 50000 (ship quốc tế ₫) - 10000 (giảm giá ₫)
+    expect(written("Tháng 3", "P")).toEqual([363000, 170000]);
+    expect(written("Tháng 3", "V")).toEqual(["", ""]);
+  });
+
+  it("syncCustomerOrders_serviceFeeNotPaidByCustomer_excludedFromShipCell", async () => {
+    setup({
+      orders: [order({
+        serviceFeeAmount: 300, serviceFeeCurrency: "JPY", serviceFeeCustomerPays: false,
+        jpDomesticShipAmount: 100, jpDomesticShipCurrency: "JPY", items: [item({ shipJpy: 500 })],
+      })],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "G")).toEqual(["=500+100"]);
+    expect(written("Tháng 3", "I")).toEqual([1600]);
+  });
+});
+
+describe("syncCustomerOrders - COD and ship rate", () => {
+  it("syncCustomerOrders_jpyCodWithAndWithoutRate_vndCustomerWithOrderRate_allConvertedToVnd", async () => {
+    setup({
+      orders: [order({ exchangeRate: 170, trackings: [tracking({ id: "tA" })] })],
+      cod: [
+        { refId: "tA", currency: "JPY", amountOrig: 100, amountVnd: 17500, exchangeRate: 175 },
+        { refId: "tA", currency: "JPY", amountOrig: 50, amountVnd: 0, exchangeRate: null },
+      ],
+    });
+
+    await syncCustomerOrders("c1");
+
+    // 17500 (₫ đã chốt) + 50 x 170
+    expect(written("Tháng 3", "K")).toEqual([26000]);
+  });
+
+  it("syncCustomerOrders_jpyCodNoRateAndNoOrderRate_keepsYenPlusVndPart", async () => {
+    setup({
+      orders: [order({ trackings: [tracking({ id: "tA" })] })],
+      cod: [
+        { refId: "tA", currency: "JPY", amountOrig: 100, amountVnd: 17500, exchangeRate: 175 },
+        { refId: "tA", currency: "JPY", amountOrig: 50, amountVnd: 0, exchangeRate: null },
+      ],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "K")).toEqual(["¥50 + 17500"]);
+  });
+
+  it.each([
+    ["sea", 50000, 100000],
+    ["air", 150000, 300000],
+  ])("syncCustomerOrders_cartonRoute_%s_usesMatchingCustomerRate", async (route, rate, total) => {
+    setup({
+      customer: { id: "c1", sheetId: "sid", shipRatePerKg: 150000, shipRateSeaPerKg: 50000 },
+      orders: [order({ trackings: [tracking({ vnWeightKg: 2, cartonId: "k1" })] })],
+      cartons: [{ id: "k1", route }],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(mPrisma.carton.findMany).toHaveBeenCalledWith({ where: { id: { in: ["k1"] } }, select: { id: true, route: true } });
+    expect(written("Tháng 3", "Q")).toEqual([rate]);
+    expect(written("Tháng 3", "R")).toEqual([total]);
+  });
+
+  it("syncCustomerOrders_seaCartonButNoSeaRate_fallsBackToAirRate", async () => {
+    setup({
+      customer: { id: "c1", sheetId: "sid", shipRatePerKg: 150000, shipRateSeaPerKg: null },
+      orders: [order({ trackings: [tracking({ vnWeightKg: 1, cartonId: "k1" })] })],
+      cartons: [{ id: "k1", route: "sea" }],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "Q")).toEqual([150000]);
+  });
+
+  it("syncCustomerOrders_monthVndTotal_includesShipAndVndSurchargePerRow", async () => {
+    setup({
+      orders: [order({
+        exchangeRate: 170, surchargeAmount: 5000, surchargeCurrency: "VND",
+        trackings: [tracking({ vnWeightKg: 1, unitPriceVndPerKg: 100000 })],
+      })],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "S")).toEqual([270000]);
+    expect(totalsWrite("Tháng 3")).toEqual([275000, "", 275000]);
+  });
+
+  it("syncCustomerOrders_mixedRateAndNoRateRows_jpyTotalOnlyCountsRowsWithoutRate", async () => {
+    setup({
+      orders: [
+        order({ id: "o1", code: "A", exchangeRate: null, items: [item({ unitPriceJpy: 700 })] }),
+        order({ id: "o2", code: "B", exchangeRate: null, items: [item({ unitPriceJpy: 300 })] }),
+      ],
+      deposits: [{ paidAt: MAR15, note: null, amountVnd: 0, amountOrig: 400, currency: "JPY" }],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(totalsWrite("Tháng 3")).toEqual([1000, 400, 600]);
+  });
+});
+
+describe("syncCustomerOrders - JPY-paying customer", () => {
+  const jpyCustomer = { id: "c1", sheetId: "sid", shipRatePerKg: 100000, payCurrency: "JPY" };
+  const withDepositBlock = (): FakeTab => {
+    const grid: string[][] = [[...FULL_HEADER], [], [], [], []];
+    grid[4][22] = "Mã"; grid[4][23] = "Ngày"; grid[4][24] = "Tên khoản mục"; grid[4][25] = "Nội dung"; grid[4][26] = "Tiền";
+    return { grid, sheetId: 7 };
+  };
+
+  it("syncCustomerOrders_jpyCustomer_rateBlankNoConversionAndCodKeptInYen", async () => {
+    setup({
+      customer: jpyCustomer,
+      orders: [order({ exchangeRate: 170, trackings: [tracking({ id: "tA", vnWeightKg: 2 })] })],
+      cod: [
+        { refId: "tA", currency: "JPY", amountOrig: 300, amountVnd: 51000, exchangeRate: 170 },
+        { refId: "tA", currency: "JPY", amountOrig: 500, amountVnd: 0, exchangeRate: null },
+      ],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(written("Tháng 3", "O")).toEqual([""]);
+    expect(written("Tháng 3", "P")).toEqual([""]);
+    expect(written("Tháng 3", "K")).toEqual(["¥800"]);
+    expect(written("Tháng 3", "Q")).toEqual([100000]);
+    expect(written("Tháng 3", "R")).toEqual([200000]);
+    expect(written("Tháng 3", "S")).toEqual([200000]);
+  });
+
+  it("syncCustomerOrders_jpyCustomer_writesYenAndVndTotalsInHAndIWithBothFormats", async () => {
+    setup({
+      customer: jpyCustomer,
+      orders: [order({ trackings: [tracking({ id: "tA", vnWeightKg: 2 })] })],
+      cod: [{ refId: "tA", currency: "JPY", amountOrig: 800, amountVnd: 0, exchangeRate: null }],
+      deposits: [
+        { paidAt: MAR15, note: null, amountVnd: 170000, amountOrig: 1000, currency: "JPY" },
+        { paidAt: MAR15, note: null, amountVnd: 50000, amountOrig: 50000, currency: "VND" },
+      ],
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 3", "H1:I3", {
+      majorDimension: "COLUMNS", values: [[1800, 1000, 800], [200000, 50000, 150000]],
+    });
+    expect(totalsWrite("Tháng 3")).toBeUndefined();
+    expect(mClient.clearValues).toHaveBeenCalledWith("sid", "Tháng 3", "J1:J3");
+    const formats = allRequests().filter((r) => r.repeatCell?.cell?.userEnteredFormat?.numberFormat && r.repeatCell.range.endRowIndex === 3);
+    expect(formats.map((r) => [r.repeatCell.range.startColumnIndex, r.repeatCell.cell.userEnteredFormat.numberFormat.pattern])).toEqual([
+      [7, "\"¥\"#,##0"], [8, "#,##0 \"₫\""],
+    ]);
+  });
+
+  it("syncCustomerOrders_jpyCustomerDeposits_yenDepositWrittenInYenWithNote", async () => {
+    setup({
+      customer: jpyCustomer,
+      deposits: [
+        { paidAt: new Date("2026-03-10T03:00:00Z"), note: "CK", amountVnd: 170000, amountOrig: 1000, currency: "JPY" },
+        { paidAt: new Date("2026-03-11T03:00:00Z"), note: "CK2", amountVnd: 50000, amountOrig: 50000, currency: "VND" },
+      ],
+      tabs: { "Tháng 3": withDepositBlock() },
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 3", "X6", { values: [
+      ["10/03/2026", "Thu tiền hàng", "CK (¥)", 1000],
+      ["11/03/2026", "Thu tiền hàng", "CK2", 50000],
+    ] });
+  });
+
+  it("syncCustomerOrders_vndCustomerYenDeposit_writtenAsVndAmountWithoutYenNote", async () => {
+    setup({
+      deposits: [{ paidAt: new Date("2026-03-10T03:00:00Z"), note: "CK", amountVnd: 170000, amountOrig: 1000, currency: "JPY" }],
+      tabs: { "Tháng 3": withDepositBlock() },
+    });
+
+    await syncCustomerOrders("c1");
+
+    expect(mClient.updateValues).toHaveBeenCalledWith("sid", "Tháng 3", "X6", { values: [["10/03/2026", "Thu tiền hàng", "CK", 170000]] });
   });
 });

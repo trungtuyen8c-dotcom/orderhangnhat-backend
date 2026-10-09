@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const h = vi.hoisted(() => {
   const db: any = {
-    wallet: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    wallet: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     walletTxn: { create: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn(), delete: vi.fn(), updateMany: vi.fn() },
     walletDailyActual: { upsert: vi.fn() },
   };
@@ -23,7 +23,7 @@ import { AppError } from "../../app/errors/AppError.js";
 import { writeAudit } from "./accounting.repository.js";
 import {
   adjustDepositWalletTxn, createWallet, deleteWalletTxnsById, postWalletTxn, reverseFundWalletTxn,
-  reversePaymentWallets, reverseWalletTxns, setDailyActual, updateWallet, walletNames,
+  reversePaymentWallets, reverseWalletTxns, setDailyActual, setWalletOpening, updateWallet, walletLedger, walletNames,
 } from "./wallet.service.js";
 
 const db = h.db;
@@ -140,11 +140,26 @@ describe("createWallet", () => {
     expect(db.wallet.create).not.toHaveBeenCalled();
   });
 
-  it("createWallet_noBalance_createsWithZeroBalance", async () => {
+  it("createWallet_noBalance_createsWithZeroBalanceAndNoOpeningTxn", async () => {
     db.wallet.findUnique.mockResolvedValue(null);
     db.wallet.create.mockResolvedValue({ id: "w1" });
     await createWallet({ name: "VCB", currency: "VND" }, actor);
     expect(db.wallet.create).toHaveBeenCalledWith({ data: { id: expect.any(String), name: "VCB", currency: "VND", balance: 0 } });
+    expect(db.walletTxn.create).not.toHaveBeenCalled();
+    expect(db.wallet.update).not.toHaveBeenCalled();
+  });
+
+  it("createWallet_withBalance_createsZeroThenPostsOpeningTxn", async () => {
+    db.wallet.findUnique.mockResolvedValue(null);
+    db.wallet.create.mockResolvedValue({ id: "w1" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "5000" });
+    const r = await createWallet({ name: "VCB", currency: "VND", balance: 5000 }, actor);
+    expect(db.wallet.create).toHaveBeenCalledWith({ data: expect.objectContaining({ balance: 0 }) });
+    expect(db.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { balance: { increment: 5000 } } });
+    expect(db.walletTxn.create).toHaveBeenCalledWith({
+      data: { id: expect.any(String), walletId: "w1", amount: 5000, type: "opening", category: "Số dư đầu kỳ", statementRef: "opening" },
+    });
+    expect(r).toEqual({ id: "w1", balance: "5000" });
   });
 
   it("createWallet_withBalance_auditsInitialBalance", async () => {
@@ -156,28 +171,123 @@ describe("createWallet", () => {
 });
 
 describe("updateWallet", () => {
+  it("updateWallet_missing_throws404WalletNotFound", async () => {
+    db.wallet.findUnique.mockResolvedValue(null);
+    const err = await updateWallet("w1", { balance: 250 }, actor).catch((e) => e);
+    expect(err).toMatchObject({ code: "WALLET_NOT_FOUND", status: 404 });
+    expect(db.wallet.update).not.toHaveBeenCalled();
+    expect(db.walletTxn.create).not.toHaveBeenCalled();
+  });
+
+  it("updateWallet_balanceChanged_postsAdjustTxnForDeltaWithoutWritingBalance", async () => {
+    db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "100" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "250" });
+    await updateWallet("w1", { balance: 250 }, actor);
+    expect(db.wallet.update).toHaveBeenCalledTimes(1);
+    expect(db.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { balance: { increment: 150 } } });
+    expect(db.walletTxn.create).toHaveBeenCalledWith({
+      data: { id: expect.any(String), walletId: "w1", amount: 150, type: "adjust", category: "Điều chỉnh số dư" },
+    });
+  });
+
+  it("updateWallet_balanceLowered_postsNegativeAdjust", async () => {
+    db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "100" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "40" });
+    await updateWallet("w1", { balance: 40 }, actor);
+    expect(db.walletTxn.create).toHaveBeenCalledWith({ data: expect.objectContaining({ amount: -60, type: "adjust" }) });
+  });
+
+  it("updateWallet_balanceUnchanged_postsNoTxn", async () => {
+    db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "100" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "100" });
+    await updateWallet("w1", { balance: 100 }, actor);
+    expect(db.walletTxn.create).not.toHaveBeenCalled();
+    expect(db.wallet.update).not.toHaveBeenCalled();
+  });
+
   it("updateWallet_balanceChanged_auditsBeforeAndAfterBalance", async () => {
     db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "100" });
-    db.wallet.update.mockResolvedValue({ id: "w1", balance: "250" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "250" });
     await updateWallet("w1", { balance: 250 }, actor);
     expect(writeAudit).toHaveBeenCalledWith(tx, expect.objectContaining({ action: "wallet.updated", before: { balance: 100 }, after: { balance: 250 } }));
   });
 
-  it("updateWallet_nameOnly_auditsWithoutBalanceSnapshot", async () => {
+  it("updateWallet_nameOnly_updatesNameAndAuditsWithoutBalanceSnapshot", async () => {
     db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "100" });
-    db.wallet.update.mockResolvedValue({ id: "w1", balance: "100" });
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "100" });
     await updateWallet("w1", { name: "New" }, actor);
+    expect(db.wallet.update).toHaveBeenCalledWith({ where: { id: "w1" }, data: { name: "New" } });
+    expect(db.walletTxn.create).not.toHaveBeenCalled();
     const audit = vi.mocked(writeAudit).mock.calls[0][1];
     expect(audit.action).toBe("wallet.updated");
     expect(audit).not.toHaveProperty("before");
     expect(audit).not.toHaveProperty("after");
   });
+});
 
-  it("updateWallet_beforeRowMissing_auditsNullBeforeBalance", async () => {
+describe("setWalletOpening", () => {
+  const date = new Date("2026-10-01T00:00:00Z");
+
+  it("setWalletOpening_missing_throws404WalletNotFound", async () => {
     db.wallet.findUnique.mockResolvedValue(null);
-    db.wallet.update.mockResolvedValue({ id: "w1", balance: "250" });
-    await updateWallet("w1", { balance: 250 }, actor);
-    expect(writeAudit).toHaveBeenCalledWith(tx, expect.objectContaining({ before: { balance: null } }));
+    const err = await setWalletOpening("w1", { amount: 100, date }, actor).catch((e) => e);
+    expect(err).toMatchObject({ code: "WALLET_NOT_FOUND", status: 404 });
+    expect(db.walletTxn.findMany).not.toHaveBeenCalled();
+  });
+
+  it("setWalletOpening_existingOpening_reversesOldThenPostsNewAtDate", async () => {
+    db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "1000" });
+    db.walletTxn.findMany.mockResolvedValue([{ id: "old", walletId: "w1", amount: "300" }]);
+    db.wallet.findUniqueOrThrow.mockResolvedValue({ id: "w1", balance: "1200" });
+    const r = await setWalletOpening("w1", { amount: 500, date }, actor);
+    expect(db.walletTxn.findMany).toHaveBeenCalledWith({ where: { walletId: "w1", statementRef: "opening" } });
+    expect(db.walletTxn.deleteMany).toHaveBeenCalledWith({ where: { walletId: "w1", statementRef: "opening" } });
+    expect(db.wallet.update.mock.calls.map((c: any[]) => c[0].data)).toEqual([
+      { balance: { decrement: 300 } },
+      { balance: { increment: 500 } },
+    ]);
+    expect(db.walletTxn.create).toHaveBeenCalledWith({
+      data: { id: expect.any(String), walletId: "w1", amount: 500, type: "opening", category: "Số dư đầu kỳ", statementRef: "opening", createdAt: date },
+    });
+    expect(writeAudit).toHaveBeenCalledWith(tx, expect.objectContaining({ action: "wallet.opening_set", metadata: { amount: 500, date } }));
+    expect(r).toEqual({ id: "w1", balance: "1200" });
+  });
+
+  it("setWalletOpening_zeroAmount_onlyRemovesOldOpening", async () => {
+    db.wallet.findUnique.mockResolvedValue({ id: "w1", balance: "300" });
+    db.walletTxn.findMany.mockResolvedValue([{ id: "old", walletId: "w1", amount: "300" }]);
+    await setWalletOpening("w1", { amount: 0, date }, actor);
+    expect(db.walletTxn.deleteMany).toHaveBeenCalled();
+    expect(db.walletTxn.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("walletLedger", () => {
+  it("walletLedger_filters_queriesByWalletNameAndDateRange", async () => {
+    db.walletTxn.findMany.mockResolvedValue([]);
+    const from = new Date("2026-10-01T00:00:00Z");
+    const to = new Date("2026-10-31T00:00:00Z");
+    await walletLedger({ from, to, wallet: "VCB" });
+    expect(db.walletTxn.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { wallet: { name: "VCB" }, createdAt: { gte: from, lte: to } },
+      orderBy: { createdAt: "asc" },
+    }));
+  });
+
+  it("walletLedger_noFilters_emptyWhere", async () => {
+    db.walletTxn.findMany.mockResolvedValue([]);
+    await walletLedger({});
+    expect(db.walletTxn.findMany.mock.calls[0][0].where).toEqual({});
+  });
+
+  it("walletLedger_rows_mapsWalletNameCurrencyProjectAndNumericAmount", async () => {
+    const d = new Date("2026-10-02T00:00:00Z");
+    db.walletTxn.findMany.mockResolvedValue([
+      { id: "t1", wallet: { name: "VCB", currency: "VND" }, project: "order", createdAt: d, amount: "-1500", type: "expense", category: "Ship", note: null },
+    ]);
+    expect(await walletLedger({})).toEqual([
+      { id: "t1", wallet: "VCB", currency: "VND", project: "order", date: d, amount: -1500, type: "expense", category: "Ship", note: null },
+    ]);
   });
 });
 

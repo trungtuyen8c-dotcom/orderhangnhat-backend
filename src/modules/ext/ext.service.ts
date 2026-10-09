@@ -19,7 +19,7 @@ export async function listOrders(q: { limit: number; status?: string; source?: s
     take: q.limit,
     select: {
       code: true, status: true, source: true, orderDate: true, createdAt: true,
-      totalQuote: true, totalVnd: true, deposit: true,
+      totalQuote: true, totalVnd: true, dueJpy: true, deposit: true,
       customer: { select: { name: true } },
       _count: { select: { trackings: true } },
     },
@@ -28,7 +28,7 @@ export async function listOrders(q: { limit: number; status?: string; source?: s
     total_matched: orders.length, returned: orders.length,
     orders: orders.map((o) => ({
       code: o.code, status: o.status, source: o.source, customer: o.customer.name,
-      orderDate: o.orderDate, totalVnd: o.totalVnd, deposit: o.deposit, trackingCount: o._count.trackings,
+      orderDate: o.orderDate, totalVnd: o.totalVnd, dueJpy: o.dueJpy, deposit: o.deposit, trackingCount: o._count.trackings,
     })),
   };
 }
@@ -37,8 +37,9 @@ export function getOrder(code: string) {
   return prisma.order.findUnique({
     where: { code },
     select: {
-      code: true, status: true, source: true, orderDate: true, totalQuote: true, totalVnd: true, deposit: true,
-      customer: { select: { name: true, phone: true } },
+      code: true, status: true, source: true, orderDate: true, totalQuote: true, totalVnd: true, dueJpy: true, deposit: true,
+      couponAmount: true, couponCurrency: true, commissionPercent: true,
+      customer: { select: { name: true, phone: true, payCurrency: true } },
       trackings: { select: { code: true, vnTrackingCode: true, jpWeightKg: true, vnWeightKg: true, packedAt: true, deliveredAt: true } },
     },
   });

@@ -19,7 +19,7 @@ import {
 import * as repo from "./order.repository.js";
 import { scopeWhere, toOrderBy, toOrderSql, toOrderWhere, type OrderListFilter, type OrderSort } from "./order.listFilter.js";
 import {
-  chargesLater, isPayLater, PRICING_FIELDS,
+  chargesLater, isPayLater, PRICING_FIELDS, CARD_FIELDS,
   type ConsignmentInput, type CreateOrderInput, type EditOrderInput,
 } from "./order.validation.js";
 
@@ -140,11 +140,10 @@ export async function getOrderDetail(id: string) {
 export async function createOrder(d: CreateOrderInput, actor: Actor) {
   assertMarketplaceMatches(d.source ?? "normal", d.items);
   // Không tự chỉ định skipVnWeighing -> lấy mặc định theo khách (khách chỉ lấy thuế, không cân ở Kho VN).
-  let skipVnWeighing = d.skipVnWeighing;
-  if (skipVnWeighing === undefined) {
-    const customer = await prisma.customer.findUnique({ where: { id: d.customerId }, select: { skipVnWeighingDefault: true } });
-    skipVnWeighing = customer?.skipVnWeighingDefault ?? false;
-  }
+  // % công không nhập -> lấy mặc định của khách (cài ở trang Khách).
+  const customer = await prisma.customer.findUnique({ where: { id: d.customerId }, select: { skipVnWeighingDefault: true, commissionPercentDefault: true } });
+  const skipVnWeighing = d.skipVnWeighing ?? customer?.skipVnWeighingDefault ?? false;
+  const commissionPercent = d.commissionPercent ?? Number(customer?.commissionPercentDefault ?? 0);
   const baseData = {
     customerId: d.customerId,
     saleId: actor.id,
@@ -165,7 +164,10 @@ export async function createOrder(d: CreateOrderInput, actor: Actor) {
     jpDomesticShipCurrency: d.jpDomesticShipCurrency ?? "JPY",
     intlShipAmount: d.intlShipAmount ?? 0,
     intlShipCurrency: d.intlShipCurrency ?? "VND",
-    commissionPercent: d.commissionPercent ?? 0,
+    commissionPercent,
+    couponAmount: d.couponAmount ?? 0,
+    couponCurrency: d.couponCurrency ?? "JPY",
+    serviceFeeCustomerPays: d.serviceFeeCustomerPays ?? true,
     needsCheck: d.needsCheck ?? false,
     checkNote: d.checkNote ?? null,
     externalWarehouse: d.externalWarehouse ?? false,
@@ -184,7 +186,7 @@ export async function createOrder(d: CreateOrderInput, actor: Actor) {
     }
     // Yahoo (thanh toán sau): KHÔNG trừ thẻ lúc tạo, chỉ trừ khi bấm "Đã thanh toán". Mercari/đơn thường: trừ ngay.
     if (!chargesLater(d.source ?? "normal"))
-      await applyOrderCardCharges(tx, { orderId: o.id, code: o.code, items: d.items, exchangeRate: d.exchangeRate, fallbackDate: o.orderDate });
+      await applyOrderCardCharges(tx, { orderId: o.id, code: o.code, items: d.items, exchangeRate: d.exchangeRate, fallbackDate: o.orderDate, adjust: o });
     return { order: o, totals: await recomputeOrderTotals(o.id, tx) };
   });
   await queueCustomerSheetSync(order.customerId);
@@ -358,9 +360,11 @@ export async function editOrder(id: string, d: EditOrderInput, actor: Actor) {
     // ngay, chưa có giao dịch tự động - có thể kế toán đã ghi tay) -> không tự trừ khi sửa, tránh trừ trùng.
     const recharge = chargesLater(order.source) ? !!order.yahooPaidAt
       : order.source === "mercari" ? await hasOrderCardCharges(tx, order.id) : true;
-    if (d.items && recharge) {
+    const cardChanged = !!d.items || CARD_FIELDS.some((f) => d[f] !== undefined);
+    if (cardChanged && recharge) {
+      const fresh = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
       await reverseOrderCardCharges(tx, order.id);
-      await applyOrderCardCharges(tx, { orderId: order.id, code: order.code, items: d.items, exchangeRate: d.exchangeRate ?? order.exchangeRate, fallbackDate: d.orderDate ?? order.orderDate });
+      await applyOrderCardCharges(tx, { orderId: order.id, code: order.code, items: fresh.items, exchangeRate: fresh.exchangeRate, fallbackDate: fresh.orderDate, adjust: fresh });
     }
     const totals = await recomputeOrderTotals(order.id, tx);
     return { totals, updated: await tx.order.findUnique({ where: { id: order.id } }) };
@@ -395,7 +399,7 @@ export async function payLaterOrder(id: string, input: { walletId: string; paidA
     await tx.orderItem.updateMany({ where: { orderId: order.id }, data: { paymentMethod: wallet.name } });
     // Ngày ghi sổ ưu tiên: ngày mua món (nếu có) -> ngày đặt đơn -> KHÔNG dùng ngày bấm "Đã thanh toán"
     // (kế toán có thể xác nhận trễ nhiều ngày, dồn hết giao dịch vào 1 ngày là sai thực tế).
-    await applyOrderCardCharges(tx, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate, fallbackDate: order.orderDate });
+    await applyOrderCardCharges(tx, { orderId: order.id, code: order.code, items, exchangeRate: order.exchangeRate, fallbackDate: order.orderDate, adjust: order });
   });
   await audit(actor, order.id, "order.yahoo_paid", { wallet: wallet.name });
   await logOrder({ orderId: order.id, actorId: actor.id, action: "updated", changes: { yahooThanhToan: wallet.name } });

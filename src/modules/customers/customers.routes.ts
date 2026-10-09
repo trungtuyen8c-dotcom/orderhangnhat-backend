@@ -36,7 +36,12 @@ const schema = z.object({
   note: z.string().nullable().optional(),
   sheetUrl: z.string().nullable().optional(),
   shipRatePerKg: z.number().nonnegative().nullable().optional(),
+  shipRateSeaPerKg: z.number().nonnegative().nullable().optional(),
   skipVnWeighingDefault: z.boolean().optional(),
+  // Mã khách nhập tay (giữ đúng mã đang dùng trên sheet, vd KL-BIALEJP); bỏ trống -> tự sinh KH-xxxx.
+  code: z.string().trim().min(1).max(60).optional(),
+  payCurrency: z.enum(["VND", "JPY"]).optional(),
+  commissionPercentDefault: z.number().min(0).max(100).optional(),
 });
 
 customersRouter.post("/", authorize("customers.create"), asyncHandler(async (req, res) => {

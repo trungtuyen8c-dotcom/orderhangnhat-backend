@@ -15,12 +15,16 @@ vi.mock("../../../infrastructure/prisma.js", () => ({
   },
 }));
 
-vi.mock("../../customers/customers.service.js", () => ({ customerVndDebts: vi.fn() }));
+vi.mock("../../customers/customers.service.js", () => ({ customerDebts: vi.fn() }));
+vi.mock("../../accounting/wallet.service.js", () => ({ walletLedger: vi.fn() }));
 
-import { customerVndDebts } from "../../customers/customers.service.js";
+import { customerDebts } from "../../customers/customers.service.js";
+import { emptyBalance, type Balance } from "../../customers/customerBalance.js";
+import { walletLedger } from "../../accounting/wallet.service.js";
+import * as reports from "../../accounting/report.service.js";
 import {
   accounting_customer_summary, accounting_debts, accounting_deposits, accounting_fund, accounting_monthly_report,
-  accounting_opening_balances, accounting_statement,
+  accounting_opening_balances, accounting_statement, accounting_wallet_ledger,
 } from "./accounting.js";
 import { prisma } from "../../../infrastructure/prisma.js";
 
@@ -30,10 +34,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const model of Object.values(mp) as any[]) for (const fn of Object.values(model) as any[]) fn.mockResolvedValue([]);
   mp.fund.findUnique.mockResolvedValue(null);
-  vi.mocked(customerVndDebts).mockResolvedValue(new Map());
+  vi.mocked(customerDebts).mockResolvedValue(new Map());
 });
-const debts = (entries: [string, number][]) => vi.mocked(customerVndDebts).mockResolvedValue(new Map(entries));
-afterEach(() => vi.useRealTimers());
+const bal = (over: Partial<Balance>): Balance => {
+  const b = { ...emptyBalance(), ...over };
+  return { ...b, debt: over.debt ?? b.orderVnd - b.paidVnd, debtJpy: over.debtJpy ?? b.orderJpy - b.paidJpy };
+};
+const debts = (entries: [string, number | Partial<Balance>][]) =>
+  vi.mocked(customerDebts).mockResolvedValue(new Map(entries.map(([id, v]) => [id, typeof v === "number" ? bal({ debt: v }) : bal(v)])));
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("accounting_debts", () => {
   it("accounting_debts_noDebts_returnsEmptyWithoutCustomerLookup", async () => {
@@ -46,6 +55,12 @@ describe("accounting_debts", () => {
     mp.customer.findMany.mockResolvedValue([{ id: "c3", name: "Lan", phone: "090" }]);
     const out = await accounting_debts();
     expect(out.map((r) => [r.customerId, r.name, r.balance])).toEqual([["c3", "Lan", 900], ["c1", "?", 100]]);
+  });
+
+  it("accounting_debts_jpyCustomer_includesBalanceJpyAndNoCode", async () => {
+    debts([["j1", { debt: 0, debtJpy: 3000 }]]);
+    mp.customer.findMany.mockResolvedValue([{ id: "j1", code: "KJ1", name: "Yen", phone: null }]);
+    expect(await accounting_debts()).toEqual([{ customerId: "j1", name: "Yen", phone: null, balance: 0, balanceJpy: 3000, updatedAt: null }]);
   });
 });
 
@@ -95,16 +110,19 @@ describe("accounting_opening_balances", () => {
 });
 
 describe("accounting_customer_summary", () => {
-  it("accounting_customer_summary_depositsPaymentsRefunds_noIsMuaMinusCocSortedDesc", async () => {
-    mp.order.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { totalVnd: "1000" } }, { customerId: "c2", _sum: { totalVnd: "5000" } }]);
-    mp.customerDeposit.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { amountVnd: "300" } }]);
-    mp.payment.findMany.mockResolvedValue([
-      { amountVnd: "200", type: "deposit", order: { customerId: "c1" } },
-      { amountVnd: "50", type: "refund", order: { customerId: "c1" } },
-      { amountVnd: "999", type: "deposit", order: null },
-    ]);
+  it("accounting_customer_summary_any_delegatesToReportServiceCustomerSummary", async () => {
+    const spy = vi.spyOn(reports, "customerSummary").mockResolvedValue([{ customerId: "x" }] as any);
+    expect(await accounting_customer_summary()).toEqual([{ customerId: "x" }]);
+    expect(spy).toHaveBeenCalledOnce();
+  });
+
+  it("accounting_customer_summary_balances_vndAndJpyColumnsSortedByNoDesc", async () => {
+    debts([["c1", { orderVnd: 1000, paidVnd: 450 }], ["c2", { orderVnd: 5000, orderJpy: 2000, paidJpy: 500 }]]);
     const out = await accounting_customer_summary();
-    expect(out.map((r) => [r.customerId, r.mua, r.coc, r.no])).toEqual([["c2", 5000, 0, 5000], ["c1", 1000, 450, 550]]);
+    expect(out.map((r) => [r.customerId, r.mua, r.coc, r.no, r.muaJpy, r.cocJpy, r.noJpy])).toEqual([
+      ["c2", 5000, 0, 5000, 2000, 500, 1500],
+      ["c1", 1000, 450, 550, 0, 0, 0],
+    ]);
   });
 });
 
@@ -137,7 +155,26 @@ describe("accounting_monthly_report", () => {
     debts([["c1", 400], ["c2", 0]]);
     const r = await accounting_monthly_report({ month: "2026-03" });
     expect(r.rows.map((x) => [x.customerId, x.canKg, x.traTrongThang, x.congNo])).toEqual([["c1", 3.5, 900, 400]]);
-    expect(r.totals).toEqual({ mua: 0, canKg: 3.5, traTrongThang: 900, congNo: 400 });
+    expect(r.totals).toEqual({ mua: 0, canKg: 3.5, traTrongThang: 900, congNo: 400, muaJpy: 0, traJpy: 0, congNoJpy: 0 });
+  });
+
+  it("accounting_monthly_report_month_passedThroughToReportService", async () => {
+    const spy = vi.spyOn(reports, "monthlyReport");
+    await accounting_monthly_report({ month: "2026-05" });
+    expect(spy).toHaveBeenCalledWith("2026-05");
+  });
+});
+
+describe("accounting_wallet_ledger", () => {
+  it("accounting_wallet_ledger_fromToWallet_convertedToVnDayBounds", async () => {
+    vi.mocked(walletLedger).mockResolvedValue([{ id: "t" }] as any);
+    expect(await accounting_wallet_ledger({ from: "2026-03-01", to: "2026-03-31", wallet: "MB" })).toEqual([{ id: "t" }]);
+    expect(walletLedger).toHaveBeenCalledWith({ from: new Date("2026-02-28T17:00:00.000Z"), to: new Date("2026-03-31T16:59:59.999Z"), wallet: "MB" });
+  });
+
+  it("accounting_wallet_ledger_emptyParams_allUndefined", async () => {
+    await accounting_wallet_ledger({ wallet: "" });
+    expect(walletLedger).toHaveBeenCalledWith({ from: undefined, to: undefined, wallet: undefined });
   });
 });
 

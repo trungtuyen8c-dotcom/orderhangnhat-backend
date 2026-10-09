@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../../infrastructure/prisma.js", () => {
   const p: any = {
-    tracking: { findFirst: vi.fn(), findUnique: vi.fn() },
+    tracking: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn() },
     order: { findUnique: vi.fn() },
     packDayLock: { findUnique: vi.fn() },
     companyCost: { create: vi.fn(), findUnique: vi.fn(), delete: vi.fn(), update: vi.fn() },
@@ -47,24 +47,34 @@ describe("createEntry", () => {
   it("createEntry_chakubaraiByTracking_createsCostRecomputesDebtInSameTxThenQueuesSheetAfterCommit", async () => {
     mp.tracking.findFirst.mockResolvedValue({ id: "t1", orderId: "o1" });
     const c = await createEntry({ ...base, trackingCode: " T1 " }, actor);
-    expect(mp.tracking.findFirst).toHaveBeenCalledWith({ where: { code: "T1" }, select: { id: true, orderId: true } });
+    expect(mp.tracking.findFirst).toHaveBeenCalledWith({ where: { code: "T1" }, select: { id: true } });
     expect(c).toMatchObject({ refId: "t1", amountVnd: 50000, lateAfterLock: false });
     expect(recomputeOrderTotals).toHaveBeenCalledWith("o1", mp);
     expect(order).toEqual(["tx:start", "create", "lock", "recompute", "audit", "tx:commit", "queue"]);
     expect(queueCustomerSheetSync).toHaveBeenCalledWith("c1");
   });
 
-  it("createEntry_trackingNotFound_throws400WithMessageAndWritesNothing", async () => {
+  it("createEntry_unknownTrackingCode_createsOrphanTrackingAndLinksCostWithoutDebt", async () => {
     mp.tracking.findFirst.mockResolvedValue(null);
-    const e = await rejection(createEntry({ ...base, trackingCode: "X" }, actor));
-    expect(e.toBody()).toEqual({ error: "BAD_REQUEST", message: "Không tìm thấy mã tracking này" });
-    expect(mp.companyCost.create).not.toHaveBeenCalled();
+    mp.tracking.create.mockImplementation(async ({ data }: any) => data);
+    mp.tracking.findUnique.mockImplementation(async ({ select }: any) => (select.orderId ? { orderId: null } : { packedAt: null }));
+    const c = await createEntry({ ...base, trackingCode: " NEW1 " }, actor);
+    expect(mp.tracking.create).toHaveBeenCalledWith({ data: { id: expect.any(String), code: "NEW1", status: "new" } });
+    const orphanId = mp.tracking.create.mock.calls[0][0].data.id;
+    expect(c).toMatchObject({ refId: orphanId, amountVnd: 50000 });
+    expect(lockOrder).not.toHaveBeenCalled();
+    expect(recomputeOrderTotals).not.toHaveBeenCalled();
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
   });
 
-  it("createEntry_trackingWithoutOrder_throws400", async () => {
-    mp.tracking.findFirst.mockResolvedValue({ id: "t1", orderId: null });
-    const e = await rejection(createEntry({ ...base, trackingCode: "T1" }, actor));
-    expect(e.message).toBe("Mã tracking chưa gắn đơn nào");
+  it("createEntry_trackingWithoutOrder_acceptedAndNotAppliedToCustomer", async () => {
+    mp.tracking.findFirst.mockResolvedValue({ id: "t1" });
+    mp.tracking.findUnique.mockImplementation(async ({ select }: any) => (select.orderId ? { orderId: null } : { packedAt: null }));
+    const c = await createEntry({ ...base, trackingCode: "T1" }, actor);
+    expect(c).toMatchObject({ refId: "t1" });
+    expect(mp.tracking.create).not.toHaveBeenCalled();
+    expect(recomputeOrderTotals).not.toHaveBeenCalled();
+    expect(queueCustomerSheetSync).not.toHaveBeenCalled();
   });
 
   it("createEntry_orderCodeWithMultipleTrackings_throws400AskingForTrackingCode", async () => {
@@ -79,9 +89,26 @@ describe("createEntry", () => {
     expect(c).toMatchObject({ refId: "t9" });
   });
 
-  it("createEntry_jpyWithoutRate_throws400", async () => {
-    const e = await rejection(createEntry({ ...base, currency: "JPY" }, actor));
+  it("createEntry_nonCodJpyWithoutRate_throws400", async () => {
+    const e = await rejection(createEntry({ ...base, kind: "weight", currency: "JPY" }, actor));
     expect(e.toBody()).toEqual({ error: "BAD_REQUEST", message: "Nhập JPY cần tỉ giá" });
+  });
+
+  it.each(["chakubarai", "daibiki_topup"] as const)("createEntry_%s_jpyWithoutRate_acceptedWithZeroVnd", async (kind) => {
+    const c = await createEntry({ ...base, kind, currency: "JPY", amount: 1200 }, actor);
+    expect(c).toMatchObject({ kind, currency: "JPY", amountOrig: 1200, amountVnd: 0, exchangeRate: null });
+  });
+
+  it("createEntry_chakubaraiJpyWithRate_convertsVnd", async () => {
+    const c = await createEntry({ ...base, currency: "JPY", amount: 1000, exchangeRate: 170 }, actor);
+    expect(c).toMatchObject({ amountVnd: 170000, exchangeRate: 170 });
+  });
+
+  it("createEntry_paymentKind_savedUnlinkedWithoutTrackingLookup", async () => {
+    const c = await createEntry({ ...base, kind: "payment", amount: 2000000, trackingCode: "T1" }, actor);
+    expect(c).toMatchObject({ kind: "payment", amountVnd: 2000000, refId: null });
+    expect(mp.tracking.findFirst).not.toHaveBeenCalled();
+    expect(mp.tracking.create).not.toHaveBeenCalled();
   });
 
   it("createEntry_jpyWithRate_roundsVndAmount", async () => {

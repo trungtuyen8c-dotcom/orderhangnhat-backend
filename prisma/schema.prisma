@@ -156,6 +156,13 @@ model Customer {
   note                  String?
   sheetId               String?           @map("sheet_id")
   shipRatePerKg         Decimal?          @map("ship_rate_per_kg") @db.Decimal(14, 2)
+  // Giá cân/kg đường biển (chuyến tab "Biển" file kho Global). null -> dùng shipRatePerKg (giá bay).
+  shipRateSeaPerKg      Decimal?          @map("ship_rate_sea_per_kg") @db.Decimal(14, 2)
+  // "VND" = khách trả theo tỉ giá từng đơn (công nợ ₫). "JPY" = khách trả bằng yên: tiền hàng/công/COD nợ ¥,
+  // cọc ghi JPY trừ nợ ¥ (tiền thật vào ví ₫ = yên x tỉ giá lúc chuyển); cân/vận chuyển vẫn nợ ₫.
+  payCurrency           String            @default("VND") @map("pay_currency")
+  // % công mặc định - tự điền vào đơn mới của khách (vẫn sửa được từng đơn).
+  commissionPercentDefault Decimal        @default(0) @map("commission_percent_default") @db.Decimal(5, 2)
   // Khách chỉ lấy chứng từ/thuế, không cân ở Kho VN - đơn mới tạo cho khách này tự bật sẵn Order.skipVnWeighing.
   skipVnWeighingDefault Boolean           @default(false) @map("skip_vn_weighing_default")
   createdAt             DateTime          @default(now()) @map("created_at")
@@ -204,6 +211,13 @@ model Order {
   intlShipCurrency       String        @default("VND") @map("intl_ship_currency")
   // % công tính trên tổng tiền JPY (món + ship món), cộng thêm vào totalVnd khi tính lại
   commissionPercent      Decimal       @default(0) @map("commission_percent") @db.Decimal(5, 2)
+  // Kupon/điểm giảm lúc mua: thẻ trừ ít đi, khách vẫn trả đủ giá gốc, không hiện trên sheet khách (= lãi).
+  couponAmount           Decimal       @default(0) @map("coupon_amount") @db.Decimal(14, 2)
+  couponCurrency         String        @default("JPY") @map("coupon_currency")
+  // Phí thanh toán (serviceFee*): luôn trừ thẻ/ví theo PTTT; chỉ cộng vào công nợ + sheet khách khi khách chịu phí.
+  serviceFeeCustomerPays Boolean       @default(true) @map("service_fee_customer_pays")
+  // Khách trả yên (Customer.payCurrency=JPY): phần nợ ¥ của đơn (hàng + công + phí ¥ + COD ¥). totalVnd khi đó chỉ là phần ₫.
+  dueJpy                 Decimal?      @map("due_jpy") @db.Decimal(14, 2)
   totalVnd               Decimal?      @map("total_vnd") @db.Decimal(16, 2)
   deposit                Decimal       @default(0) @db.Decimal(14, 2)
   paidAt                 DateTime?     @map("paid_at")
@@ -351,6 +365,8 @@ model Carton {
   // Kho VN bấm xác nhận sau khi đếm thực tế khớp electronicsCount. Sửa lại electronicsCount thì reset về null.
   electronicsConfirmedAt DateTime?  @map("electronics_confirmed_at")
   packedDate             DateTime?  @map("packed_date")
+  // "air" (tab ngày) | "sea" (tab "Biển ...") theo file kho Global - chọn giá cân bay/biển của khách + giá Global.
+  route                  String     @default("air")
   note                   String?
   createdAt              DateTime   @default(now()) @map("created_at")
   trackings              Tracking[]
@@ -501,6 +517,8 @@ model WalletTxn {
   refFundTxnId  String?              @map("ref_fund_txn_id") @db.Uuid
   reconciled    Boolean              @default(false)
   statementRef  String?              @map("statement_ref")
+  // Dự án ghi giao dịch - thẻ dùng chung nhiều dự án: số dư thật = đầu kỳ + tổng giao dịch mọi dự án.
+  project       String               @default("order")
   createdAt     DateTime             @default(now()) @map("created_at")
   wallet        Wallet               @relation(fields: [walletId], references: [id], onDelete: Cascade)
   refOrder      Order?               @relation(fields: [refOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)

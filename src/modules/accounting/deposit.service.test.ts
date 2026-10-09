@@ -408,18 +408,45 @@ describe("setOpeningBalance", () => {
     vi.mocked(lockCustomer).mockResolvedValue({ id: "c1" } as any);
     const r = await setOpeningBalance("c1", { amount: 0, currency: "VND" }, actor);
     expect(r).toEqual({ cleared: true });
-    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true } });
+    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true, currency: "VND" } });
     expect(db.customerDeposit.create).not.toHaveBeenCalled();
   });
 
   it("setOpeningBalance_negativeJpy_replacesWithConfirmedOpeningRowAtCutoff", async () => {
     vi.mocked(lockCustomer).mockResolvedValue({ id: "c1" } as any);
     await setOpeningBalance("c1", { amount: -500, currency: "JPY", exchangeRate: 170 }, actor);
-    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true } });
+    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true, currency: "JPY" } });
     expect(db.customerDeposit.create.mock.calls[0][0].data).toMatchObject({
       customerId: "c1", amountVnd: -85000, amountOrig: -500, currency: "JPY", note: "Số dư đầu kỳ",
       paidAt: new Date("2026-06-30T00:00:00.000Z"), confirmed: true, isOpening: true, recordedBy: "u1",
     });
+  });
+
+  it("setOpeningBalance_vndCustomerJpyWithoutRate_throws400", async () => {
+    vi.mocked(lockCustomer).mockResolvedValue({ id: "c1", payCurrency: "VND" } as any);
+    const err = await setOpeningBalance("c1", { amount: 100, currency: "JPY" }, actor).catch((e) => e);
+    expect(err).toMatchObject({ code: "BAD_REQUEST", status: 400 });
+  });
+
+  it("setOpeningBalance_jpyCustomerJpyWithoutRate_createsJpyOpeningWithZeroVnd", async () => {
+    vi.mocked(lockCustomer).mockResolvedValue({ id: "c1", payCurrency: "JPY" } as any);
+    await setOpeningBalance("c1", { amount: 3000, currency: "JPY" }, actor);
+    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true, currency: "JPY" } });
+    expect(db.customerDeposit.create.mock.calls[0][0].data).toMatchObject({ amountVnd: 0, amountOrig: 3000, currency: "JPY", exchangeRate: null, isOpening: true });
+  });
+
+  it("setOpeningBalance_jpyCustomerVndOpening_onlyReplacesVndRow", async () => {
+    vi.mocked(lockCustomer).mockResolvedValue({ id: "c1", payCurrency: "JPY" } as any);
+    await setOpeningBalance("c1", { amount: 50000, currency: "VND" }, actor);
+    expect(db.customerDeposit.deleteMany).toHaveBeenCalledWith({ where: { customerId: "c1", isOpening: true, currency: "VND" } });
+    expect(db.customerDeposit.create.mock.calls[0][0].data).toMatchObject({ amountVnd: 50000, currency: "VND" });
+  });
+
+  it("setOpeningBalance_dateGiven_usedAsPaidAt", async () => {
+    vi.mocked(lockCustomer).mockResolvedValue({ id: "c1" } as any);
+    const date = new Date("2026-07-15T00:00:00.000Z");
+    await setOpeningBalance("c1", { amount: 1000, currency: "VND", date }, actor);
+    expect(db.customerDeposit.create.mock.calls[0][0].data.paidAt).toEqual(date);
   });
 
   it("setOpeningBalance_success_auditsAndQueuesSync", async () => {

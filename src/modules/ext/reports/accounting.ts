@@ -3,14 +3,14 @@ import { prisma } from "../../../infrastructure/prisma.js";
 import { vnDayStart, vnMonthKey } from "../helpers.js";
 
 import { vnDayEnd } from "../../../app/vnTime.js";
-import { debtsByCustomer } from "../../accounting/report.service.js";
-import { customerVndDebts } from "../../customers/customers.service.js";
+import * as reports from "../../accounting/report.service.js";
+import { walletLedger } from "../../accounting/wallet.service.js";
 const OPENING_CUTOFF = new Date("2026-06-30T00:00:00.000Z");
 void OPENING_CUTOFF; // giữ tham chiếu comment gốc - opening balance nhận diện qua isOpening, không cần lọc theo mốc này ở đây
 
 // Cùng công thức nợ với /accounting/debts (tổng đơn - cọc đã xác nhận - thanh toán).
 export async function accounting_debts() {
-  return (await debtsByCustomer()).map(({ customerId, name, phone, balance, updatedAt }) => ({ customerId, name, phone, balance, updatedAt }));
+  return (await reports.debtsByCustomer()).map(({ customerId, name, phone, balance, balanceJpy, updatedAt }) => ({ customerId, name, phone, balance, balanceJpy, updatedAt }));
 }
 
 export async function accounting_deposits(params: { status?: string; from?: string; to?: string }) {
@@ -53,54 +53,20 @@ export async function accounting_opening_balances() {
   return rows.map((r) => ({ customerId: r.customerId, amountOrig: Number(r.amountOrig), currency: r.currency, exchangeRate: r.exchangeRate != null ? Number(r.exchangeRate) : null, amountVnd: Number(r.amountVnd) }));
 }
 
-export async function accounting_customer_summary() {
-  const [orderAgg, depAgg, payments, customers] = await Promise.all([
-    prisma.order.groupBy({ by: ["customerId"], where: { status: { not: "cancelled" } }, _sum: { totalVnd: true } }),
-    prisma.customerDeposit.groupBy({ by: ["customerId"], where: { confirmed: true }, _sum: { amountVnd: true } }),
-    prisma.payment.findMany({ select: { amountVnd: true, type: true, order: { select: { customerId: true } } } }),
-    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-  ]);
-  const cmap = new Map(customers.map((c) => [c.id, c]));
-  const mua = new Map<string, number>();
-  for (const o of orderAgg) mua.set(o.customerId, Number(o._sum.totalVnd ?? 0));
-  const coc = new Map<string, number>();
-  for (const d of depAgg) coc.set(d.customerId, Number(d._sum.amountVnd ?? 0));
-  for (const p of payments) {
-    const cid = p.order?.customerId; if (!cid) continue;
-    coc.set(cid, (coc.get(cid) ?? 0) + (p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd)));
-  }
-  const ids = new Set<string>([...mua.keys(), ...coc.keys()]);
-  return [...ids].map((id) => {
-    const m = mua.get(id) ?? 0, c = coc.get(id) ?? 0;
-    return { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, mua: m, coc: c, no: m - c };
-  }).sort((a, b) => b.no - a.no);
-}
+// Dùng lại đúng báo cáo của trang Kế toán (1 công thức công nợ, ₫ + ¥) - không copy logic riêng cho MCP.
+export const accounting_customer_summary = () => reports.customerSummary();
 
 export async function accounting_monthly_report(params: { month?: string }) {
-  const month = params.month && /^\d{4}-\d{2}$/.test(params.month) ? params.month : vnMonthKey(new Date());
-  const [orders, trks, deposits, payments, customers, debts] = await Promise.all([
-    prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, createdAt: true } }),
-    prisma.tracking.findMany({ where: { packedAt: { not: null }, orderId: { not: null } }, select: { jpWeightKg: true, vnWeightKg: true, packedAt: true, order: { select: { customerId: true } } } }),
-    prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
-    prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
-    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-    customerVndDebts(),
-  ]);
-  const cmap = new Map(customers.map((c) => [c.id, c]));
-  type Row = { mua: number; canKg: number; traTrongThang: number; congNo: number };
-  const rows = new Map<string, Row>();
-  const get = (id: string) => { let r = rows.get(id); if (!r) { r = { mua: 0, canKg: 0, traTrongThang: 0, congNo: 0 }; rows.set(id, r); } return r; };
-  for (const o of orders) if (vnMonthKey(o.createdAt) === month) get(o.customerId).mua += Number(o.totalVnd ?? 0);
-  for (const t of trks) { const cid = t.order?.customerId; if (cid && t.packedAt && vnMonthKey(t.packedAt) === month) get(cid).canKg += t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0); }
-  for (const d of deposits) if (vnMonthKey(d.paidAt) === month) get(d.customerId).traTrongThang += Number(d.amountVnd);
-  for (const p of payments) { const cid = p.order?.customerId; if (cid && vnMonthKey(p.createdAt) === month) get(cid).traTrongThang += p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd); }
-  for (const [cid, bal] of debts) if (bal !== 0) get(cid).congNo = bal;
-  const out = [...rows.entries()]
-    .filter(([, r]) => r.mua !== 0 || r.canKg !== 0 || r.traTrongThang !== 0 || r.congNo !== 0)
-    .map(([id, r]) => ({ customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, ...r }))
-    .sort((a, b) => b.mua - a.mua);
-  const totals = out.reduce((s, r) => ({ mua: s.mua + r.mua, canKg: s.canKg + r.canKg, traTrongThang: s.traTrongThang + r.traTrongThang, congNo: s.congNo + r.congNo }), { mua: 0, canKg: 0, traTrongThang: 0, congNo: 0 });
-  return { month, rows: out, totals };
+  return reports.monthlyReport(params.month);
+}
+
+// Sổ giao dịch thẻ (gộp với dự án khác dùng chung thẻ). from/to = YYYY-MM-DD giờ VN, wallet = tên thẻ.
+export function accounting_wallet_ledger(params: { from?: string; to?: string; wallet?: string }) {
+  return walletLedger({
+    from: params.from ? vnDayStart(params.from) : undefined,
+    to: params.to ? vnDayEnd(params.to) : undefined,
+    wallet: params.wallet || undefined,
+  });
 }
 
 export function accounting_wallets() {

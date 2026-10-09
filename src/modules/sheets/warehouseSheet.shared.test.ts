@@ -3,24 +3,28 @@ import { Prisma } from "@prisma/client";
 
 vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
-    carton: { findFirst: vi.fn(), create: vi.fn() },
-    tracking: { update: vi.fn(), delete: vi.fn() },
+    carton: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    tracking: { update: vi.fn(), delete: vi.fn(), findMany: vi.fn() },
     trackingLog: { deleteMany: vi.fn() },
+    appConfig: { findUnique: vi.fn() },
   },
 }));
 vi.mock("../cartons/carton.service.js", () => ({ deleteCartonIfEmpty: vi.fn() }));
+vi.mock("../orders/order.totals.js", () => ({ recomputeOrderTotals: vi.fn() }));
 
 import { prisma } from "../../infrastructure/prisma.js";
 import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
+import { recomputeOrderTotals } from "../orders/order.totals.js";
 import {
   WHITE, blankRowFormatRequests, blankRowValueData, checkNoteOf, itemForTracking, itemsForRow, itemsNameAndPrice, linkOf,
-  looksLikeOldMerge, resolveCartonId, uniqueOrders, unpackStaleTracking, type TrackingWithOrder,
+  isWarehouseReadonly, looksLikeOldMerge, resolveCartonId, uniqueOrders, unpackStaleTracking, type TrackingWithOrder,
 } from "./warehouseSheet.shared.js";
 
 const db = prisma as unknown as {
-  carton: { findFirst: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
-  tracking: { update: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
+  carton: { findFirst: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+  tracking: { update: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn>; findMany: ReturnType<typeof vi.fn> };
   trackingLog: { deleteMany: ReturnType<typeof vi.fn> };
+  appConfig: { findUnique: ReturnType<typeof vi.fn> };
 };
 
 type Ord = NonNullable<TrackingWithOrder["order"]>;
@@ -197,7 +201,75 @@ describe("resolveCartonId", () => {
     const data = db.carton.create.mock.calls[0][0].data;
     expect(data.code).toBe("GA");
     expect(data.packedDate).toBe(day);
+    expect(data.route).toBe("air");
+    expect(data.declaredWeightKg).toBeNull();
     expect(id).toBe(data.id);
+  });
+
+  it("resolveCartonId_noCartonYetWithSeaRouteAndKg_createsWithRouteAndDeclaredWeight", async () => {
+    db.carton.findFirst.mockResolvedValue(null);
+    db.carton.create.mockImplementation(async ({ data }: { data: { id: string } }) => ({ id: data.id }));
+    await resolveCartonId("ga", "3", day, "sea", 12.6);
+    expect(db.carton.create.mock.calls[0][0].data).toMatchObject({ code: "GA 3", route: "sea", declaredWeightKg: 12.6 });
+  });
+
+  it("resolveCartonId_existingCartonWithoutDeclaredKg_fillsDeclaredWeight", async () => {
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: null });
+    db.carton.update.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: 12.6 });
+    expect(await resolveCartonId("ga", "3", day, "air", 12.6)).toBe("c-old");
+    expect(db.carton.update).toHaveBeenCalledWith({ where: { id: "c-old" }, data: { declaredWeightKg: 12.6 } });
+  });
+
+  it("resolveCartonId_existingCartonWithDeclaredKg_doesNotOverwriteManualWeight", async () => {
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: 15 });
+    await resolveCartonId("ga", "3", day, "air", 12.6);
+    expect(db.carton.update).not.toHaveBeenCalled();
+  });
+
+  it("resolveCartonId_existingCartonRouteChanged_updatesRouteAndRecomputesItsOrders", async () => {
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: 10 });
+    db.carton.update.mockResolvedValue({ id: "c-old", route: "sea", declaredWeightKg: 10 });
+    db.tracking.findMany.mockResolvedValue([{ orderId: "o1" }, { orderId: "o2" }, { orderId: "o1" }]);
+    await resolveCartonId("ga", "3", day, "sea");
+    expect(db.carton.update).toHaveBeenCalledWith({ where: { id: "c-old" }, data: { route: "sea" } });
+    expect(db.tracking.findMany).toHaveBeenCalledWith({ where: { cartonId: "c-old", orderId: { not: null } }, select: { orderId: true } });
+    expect(vi.mocked(recomputeOrderTotals).mock.calls.map((c) => c[0])).toEqual(["o1", "o2"]);
+  });
+
+  it("resolveCartonId_weightMissingAndRouteChanged_fillsWeightAndUpdatesRouteSameRun", async () => {
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: null });
+    db.carton.update
+      .mockResolvedValueOnce({ id: "c-old", route: "air", declaredWeightKg: 12.6 })
+      .mockResolvedValueOnce({ id: "c-old", route: "sea", declaredWeightKg: 12.6 });
+    db.tracking.findMany.mockResolvedValue([{ orderId: "o1" }]);
+    await resolveCartonId("ga", "3", day, "sea", 12.6);
+    expect(db.carton.update).toHaveBeenNthCalledWith(1, { where: { id: "c-old" }, data: { declaredWeightKg: 12.6 } });
+    expect(db.carton.update).toHaveBeenNthCalledWith(2, { where: { id: "c-old" }, data: { route: "sea" } });
+    expect(recomputeOrderTotals).toHaveBeenCalledWith("o1");
+  });
+
+  it("resolveCartonId_existingCartonSameRoute_noUpdateNoRecompute", async () => {
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "sea", declaredWeightKg: 10 });
+    await resolveCartonId("ga", "3", day, "sea");
+    expect(db.carton.update).not.toHaveBeenCalled();
+    expect(recomputeOrderTotals).not.toHaveBeenCalled();
+  });
+});
+
+describe("isWarehouseReadonly", () => {
+  it.each([
+    ["true", true],
+    ["false", false],
+    ["TRUE", false],
+  ])("isWarehouseReadonly_configValue_%s_returns%s", async (value, expected) => {
+    db.appConfig.findUnique.mockResolvedValue({ key: "warehouse_sheet_readonly", value });
+    expect(await isWarehouseReadonly()).toBe(expected);
+    expect(db.appConfig.findUnique).toHaveBeenCalledWith({ where: { key: "warehouse_sheet_readonly" } });
+  });
+
+  it("isWarehouseReadonly_noConfig_returnsFalse", async () => {
+    db.appConfig.findUnique.mockResolvedValue(null);
+    expect(await isWarehouseReadonly()).toBe(false);
   });
 });
 

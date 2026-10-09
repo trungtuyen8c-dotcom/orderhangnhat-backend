@@ -24,13 +24,18 @@ const pricingSchema = {
   intlShipAmount: z.number().nonnegative().optional(),
   intlShipCurrency: curEnum.optional(),
   commissionPercent: z.number().min(0).max(100).optional(),
+  couponAmount: z.number().nonnegative().optional(),
+  couponCurrency: curEnum.optional(),
+  serviceFeeCustomerPays: z.boolean().optional(),
 };
 export const PRICING_FIELDS = [
   "exchangeRate", "shipAmount", "shipCurrency", "surchargeAmount", "surchargeCurrency",
   "discountAmount", "discountCurrency", "serviceFeeAmount", "serviceFeeCurrency",
   "jpDomesticShipAmount", "jpDomesticShipCurrency", "intlShipAmount", "intlShipCurrency",
-  "commissionPercent",
+  "commissionPercent", "couponAmount", "couponCurrency", "serviceFeeCustomerPays",
 ] as const;
+// Field đổi tiền thẻ của cả đơn (ngoài món) -> sửa là phải tính lại giao dịch "Mua hàng" auto.
+export const CARD_FIELDS = ["exchangeRate", "couponAmount", "couponCurrency", "serviceFeeAmount", "serviceFeeCurrency"] as const;
 
 const trackingsField = z.array(z.object({
   id: z.string().uuid().optional(),

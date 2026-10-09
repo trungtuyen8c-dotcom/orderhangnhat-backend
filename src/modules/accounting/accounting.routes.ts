@@ -138,7 +138,7 @@ accountingRouter.delete("/customer-deposits/:id", authorize("accounting.record_p
 }));
 
 // ===== Số dư đầu kỳ =====
-const openingSchema = z.object({ amount: z.number(), currency: z.enum(["VND", "JPY"]).default("VND"), exchangeRate: z.number().positive().optional(), note: z.string().optional() });
+const openingSchema = z.object({ amount: z.number(), currency: z.enum(["VND", "JPY"]).default("VND"), exchangeRate: z.number().positive().optional(), note: z.string().optional(), date: z.coerce.date().optional() });
 
 accountingRouter.get("/opening-balances", authorize("orders.read"), asyncHandler(async (_req, res) => {
   res.json(await deposits.listOpeningBalances());
@@ -301,6 +301,12 @@ accountingRouter.post("/wallets", authorize("wallets.manage"), asyncHandler(asyn
 accountingRouter.patch("/wallets/:id", authorize("wallets.manage"), asyncHandler(async (req, res) => {
   const body = parseOr400(walletSchema.partial(), req.body);
   res.json(await wallets.updateWallet(req.params.id, body, actor(req)));
+}));
+
+const walletOpeningSchema = z.object({ amount: z.number(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
+accountingRouter.put("/wallets/:id/opening", authorize("wallets.manage"), asyncHandler(async (req, res) => {
+  const body = parseOr400(walletOpeningSchema, req.body);
+  res.json(await wallets.setWalletOpening(req.params.id, { amount: body.amount, date: vnDayStart(body.date) }, actor(req)));
 }));
 
 accountingRouter.delete("/wallets/:id", authorize("wallets.manage"), asyncHandler(async (req, res) => {

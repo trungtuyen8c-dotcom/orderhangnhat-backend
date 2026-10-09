@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tabDate } from "./sheet.utils.js";
+import { seaTabDate, tabDate } from "./sheet.utils.js";
 
 describe("tabDate", () => {
   it("tabDate_nonDateTitle_returnsNull", () => {
@@ -29,5 +29,30 @@ describe("tabDate", () => {
   it("tabDate_decemberTabScannedEarlyNextJanuary_usesPreviousYearNotCurrent", () => {
     const now = new Date(2027, 0, 5); // 5/1/2027
     expect(tabDate("31.12", now)?.getTime()).toBe(new Date(2026, 11, 31).getTime());
+  });
+});
+
+describe("seaTabDate", () => {
+  const now = new Date(2026, 9, 9); // 9/10/2026
+
+  it.each([
+    ["Biển Tháng10", 9],
+    ["bien t9", 8],
+    ["biển T6", 5],
+    ["bien tháng 4 chuyến 2(Tháng5)", 3],
+    ["Bien thang 03", 2],
+  ])("seaTabDate_%s_returnsFirstDayOfThatMonth", (title, monthIdx) => {
+    expect(seaTabDate(title, now)?.getTime()).toBe(new Date(2026, monthIdx, 1).getTime());
+  });
+
+  it.each(["9.10", "TRANG MẪU", "Biển", "bien t13", "bien t0", "Malaysia t9", "biểnT9"])(
+    "seaTabDate_%s_returnsNull",
+    (title) => {
+      expect(seaTabDate(title, now)).toBeNull();
+    },
+  );
+
+  it("seaTabDate_decemberTabScannedInJanuary_usesPreviousYear", () => {
+    expect(seaTabDate("Biển Tháng12", new Date(2027, 0, 5))?.getTime()).toBe(new Date(2026, 11, 1).getTime());
   });
 });

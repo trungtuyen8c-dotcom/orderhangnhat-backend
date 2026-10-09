@@ -4,6 +4,7 @@ import { prisma } from "../../infrastructure/prisma.js";
 import { backgroundRequest, clearValidationRequest, parseSheetId, quotedRange, rowRange } from "../../integrations/google/googleSheets.client.js";
 import type { SheetsRequest, ValueRangeUpdate } from "../../integrations/google/google.types.js";
 import { deleteCartonIfEmpty } from "../cartons/carton.service.js";
+import { recomputeOrderTotals } from "../orders/order.totals.js";
 
 // Dùng chung cho quét file kho (cron) và khớp 1 mã (webhook).
 
@@ -22,6 +23,13 @@ export const WHITE = { red: 1, green: 1, blue: 1 };
 
 export const LATE_NOTE = "Quét SAU KHI đã chốt ngày - cần khai bổ sung hải quan riêng";
 
+// File kho của bên vận chuyển (Global) không được ghi -> chỉ đọc: không tô màu/ghi chú/checkbox, không tạo tracking
+// mồ côi từ dòng của khách khác trong file. Bật bằng AppConfig warehouse_sheet_readonly = "true".
+export async function isWarehouseReadonly(): Promise<boolean> {
+  const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_readonly" } });
+  return cfg?.value === "true";
+}
+
 export async function getWarehouseSheetId(): Promise<string | null> {
   const cfg = await prisma.appConfig.findUnique({ where: { key: "warehouse_sheet_id" } });
   return cfg?.value ? parseSheetId(cfg.value) : null;
@@ -29,11 +37,21 @@ export async function getWarehouseSheetId(): Promise<string | null> {
 
 // Tự tạo/tìm Carton (kiện) theo BILL + Số thùng - dùng chung cho cả quét cron lẫn webhook tức thì.
 // Chuẩn hóa hoa/thường (kho gõ lúc "GA" lúc "ga") -> tránh tách thành 2 kiện khác nhau cho cùng 1 kiện thực.
-export async function resolveCartonId(bill: string, thung: string, date: Date | null): Promise<string | null> {
+// route: tuyến của tab (bay/biển) - kiện đổi tuyến (kho chuyển tab) thì cập nhật theo + tính lại tiền cân các đơn trong kiện.
+// declaredKg: cân thùng đọc từ file kho - chỉ điền khi kiện CHƯA có (không đè số kho VN/kế toán đã nhập tay).
+export async function resolveCartonId(bill: string, thung: string, date: Date | null, route?: "air" | "sea", declaredKg?: number | null): Promise<string | null> {
   const code = `${bill} ${thung}`.trim().toUpperCase();
   if (!code) return null;
   let carton = await prisma.carton.findFirst({ where: { code, packedDate: date } });
-  if (!carton) carton = await prisma.carton.create({ data: { id: uuid(), code, packedDate: date } });
+  if (!carton) carton = await prisma.carton.create({ data: { id: uuid(), code, packedDate: date, route: route ?? "air", declaredWeightKg: declaredKg ?? null } });
+  else {
+    if (declaredKg && carton.declaredWeightKg == null) carton = await prisma.carton.update({ where: { id: carton.id }, data: { declaredWeightKg: declaredKg } });
+    if (route && carton.route !== route) {
+      carton = await prisma.carton.update({ where: { id: carton.id }, data: { route } });
+      const trks = await prisma.tracking.findMany({ where: { cartonId: carton.id, orderId: { not: null } }, select: { orderId: true } });
+    for (const id of new Set(trks.map((t) => t.orderId!))) await recomputeOrderTotals(id);
+    }
+  }
   return carton.id;
 }
 

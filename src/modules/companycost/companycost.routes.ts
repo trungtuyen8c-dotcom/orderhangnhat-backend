@@ -22,7 +22,7 @@ companyCostRouter.get("/settlement", authorize("companycost.view"), asyncHandler
 }));
 
 const entrySchema = z.object({
-  kind: z.enum(["chakubarai", "weight", "other"]),
+  kind: z.enum(["chakubarai", "weight", "other", "payment", "daibiki_topup"]),
   month: z.string().regex(/^\d{4}-\d{2}$/),
   amount: z.number().positive(),
   currency: z.enum(["VND", "JPY"]).default("VND"),
@@ -47,6 +47,15 @@ companyCostRouter.delete("/:id", authorize("accounting.record_payment"), asyncHa
 }));
 
 const unitSchema = z.object({ unit: z.number().nonnegative() });
+
+// Đơn giá cân công ty vận chuyển (₫/kg) theo tuyến bay/biển. null = xóa (chưa có giá).
+const globalPriceSchema = z.object({ air: z.number().nonnegative().nullable().optional(), sea: z.number().nonnegative().nullable().optional() });
+companyCostRouter.get("/global-price", authorize("companycost.view"), asyncHandler(async (_req, res) => {
+  res.json(await svc.globalPrices());
+}));
+companyCostRouter.put("/global-price", authorize("system.manage_settings"), asyncHandler(async (req, res) => {
+  res.json(await svc.setGlobalPrices(parseOr400(globalPriceSchema, req.body)));
+}));
 
 // Cấu hình đơn giá gia cố
 companyCostRouter.get("/reinforce-price", authorize("companycost.view"), asyncHandler(async (_req, res) => {

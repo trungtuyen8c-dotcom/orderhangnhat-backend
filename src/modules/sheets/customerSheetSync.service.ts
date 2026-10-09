@@ -5,7 +5,8 @@ import {
   listSheetTitles, numberFormatRequest, protectedRangeRequest, sleep, updateValues,
 } from "../../integrations/google/googleSheets.client.js";
 import type { RgbColor, SheetsRequest } from "../../integrations/google/google.types.js";
-import { trackingShipVnd } from "../orders/order.totals.js";
+import { customerShipRate, trackingShipVnd } from "../orders/order.totals.js";
+import { depositCredit, type DepositLike } from "../customers/customerBalance.js";
 import { logWarn, logError } from "../../infrastructure/systemLog.js";
 import { fmtDate, vnDate } from "./sheet.utils.js";
 
@@ -13,17 +14,23 @@ import { fmtDate, vnDate } from "./sheet.utils.js";
 // Template MẶC ĐỊNH khi tạo tab mới (A→N). Nhiều khách tự chèn thêm cột riêng (vd "Đơn giá vận chuyển") vào
 // giữa các cột này -> KHÔNG ghi theo vị trí cố định nữa, mà dò đúng cột theo TÊN tiêu đề thực tế của từng khách
 // (xem readHeaderColumns/FIELD_HEADER bên dưới), để không bao giờ ghi lệch cột dù khách chèn/xóa cột tùy ý.
+// Template tab mới: đủ mọi cột hệ thống ghi (khớp công nợ). Dòng 1-3 dành cho khối TỔNG (H1:H3, khách yên thêm I1:I3)
+// -> tiêu đề đặt ở dòng 5, không đè lên khối tổng.
 const ORDER_HEADER = [
-  "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB",
-  "% Công", "Tổng tiền bao gồm tiền công", "Cân-Kg", "Phụ thu", "TRACKING", "Đánh giá", "Ngày giao cho khách hàng",
+  "Mã Link", "Ngày đặt", "ACC", "LINK đặt", "Phương thức thanh toán", "GIÁ WEB", "SHIP WEB", "Số tiền giảm giá",
+  "Tổng tiền bao gồm tiền công", "tỉ giá", "Tổng tiền KH quy đổi VND", "Cân-Kg", "Đơn giá vận chuyển", "Tổng tiền vận chuyển",
+  "Phụ thu", "Tổng tiền VND+ Vận chuyển", "TRACKING", "Đánh giá", "Ngày giao cho khách hàng", "lưu kho", "tracking việt nam",
+  // Sổ thu tiền (cọc) cùng dòng tiêu đề, cách 1 cột - findDepositHeader dò theo "Ngày" + "Tên khoản mục".
+  "", "Mã", "Ngày", "Tên khoản mục", "Nội dung", "Tiền",
 ];
+const TEMPLATE_HEADER_ROW = 5;
 
 // Các trường hệ thống TỰ QUẢN LÝ - chỉ ghi vào đúng cột có tiêu đề khớp tên bên dưới, tuyệt đối không đụng
 // cột khác (vd "% Công") vì đó là kế toán tự nhập tay, không phải hệ thống ghi.
 // 3 dòng cuối (shipRate/shipTotal/grandTotal) là cột MỚI 1 số khách tự thêm - chỉ ghi nếu khách CÓ cột đó.
 const FIELD_HEADER = {
   code: "Mã Link", date: "Ngày đặt", acc: "ACC", url: "LINK đặt", method: "Phương thức thanh toán",
-  giaWeb: "GIÁ WEB", ship: "SHIP WEB", total: "Tổng tiền bao gồm tiền công",
+  giaWeb: "GIÁ WEB", ship: "SHIP WEB", discount: "Số tiền giảm giá", total: "Tổng tiền bao gồm tiền công",
   rate: "tỉ giá", vndConverted: "Tổng tiền KH quy đổi VND",
   weight: "Cân-Kg", surcharge: "Phụ thu", tracking: "TRACKING", review: "Đánh giá",
   deliveredAt: "Ngày giao cho khách hàng",
@@ -50,64 +57,90 @@ function loadDeposits(customerId: string) {
 // Dòng data theo TỪNG MÓN, gom theo THÁNG NGÀY MUA của chính món đó (không theo ngày tạo đơn).
 // Trả field-key -> giá trị (không phải mảng theo vị trí cột) - runCustomerSync tự dò đúng cột theo tiêu đề thực
 // của từng khách để ghi, tránh lệch cột khi khách chèn thêm cột riêng.
-// Trả map: tháng -> { rows, jpyTotal: tổng ¥ (mirror "Tổng tiền"), vndTotal: tổng quy đổi ₫ các món có tỉ giá }.
+// Số tiền khớp đúng công nợ (orderCharges ở order.totals.ts): Tổng = giá + ship món - giảm giá ¥ + khoản ¥ cả đơn,
+// Công = (giá + ship - giảm) x %, ₫ quy đổi = Tổng x tỉ giá + khoản ₫ cả đơn. Kupon KHÔNG hiện (khách trả đủ).
+// Khách trả yên: không quy đổi (tỉ giá để trống), tổng tháng tính ¥ + phần ₫ (cân/vận chuyển) riêng.
+// Trả map: tháng -> { rows, jpyTotal, vndTotal } - vndTotal = tổng nợ ₫ cả tháng (gồm cân + phụ thu), khớp công nợ.
 // Khóa tháng có năm ("2026-03") - đơn tháng 3/2025 và 3/2026 là 2 tháng khác nhau, không dồn chung 1 tab.
 const monthKeyOf = (d: Date) => { const v = vnDate(d); return `${v.getUTCFullYear()}-${String(v.getUTCMonth() + 1).padStart(2, "0")}`; };
 
-function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, number>, custShipRateVnd?: number | null): Map<string, MonthRows> {
+// COD của 1 tracking tách theo cách tính (giống recompute ở order.totals.ts):
+// vnd = COD nhập ₫; jpyRated/jpyRatedVnd = COD ¥ nhập kèm tỉ giá (số ₫ đã chốt); jpyNoRate = COD ¥ không tỉ giá.
+export type CodAmounts = { vnd: number; jpyRated: number; jpyRatedVnd: number; jpyNoRate: number };
+
+function buildRowsByMonth(
+  orders: OrderFull[], codByTracking?: Map<string, CodAmounts>,
+  customer?: { shipRatePerKg?: unknown; shipRateSeaPerKg?: unknown; payCurrency?: string | null } | null,
+  routeByCarton?: Map<string, string>,
+): Map<string, MonthRows> {
+  const jpyCustomer = customer?.payCurrency === "JPY";
   const byMonth = new Map<string, { date: Date; row: FieldRow; jpy: number; vnd: number }[]>();
   const bucket = (m: string) => { let b = byMonth.get(m); if (!b) { b = []; byMonth.set(m, b); } return b; };
   for (const o of orders) {
-    const rate = Number(o.exchangeRate ?? 0);
-    const surchargeVnd = o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount) * rate : Number(o.surchargeAmount);
-    // Phụ thu ¥ mà đơn chưa có tỉ giá -> không quy đổi được: giữ nguyên số ¥ (ghi rõ "¥"), không để thành 0.
-    const surchargeJpyRaw = o.surchargeCurrency === "JPY" && !rate ? Number(o.surchargeAmount ?? 0) : 0;
-    // % công (order.commissionPercent) - tính trên giá món + ship món (không gồm ship cả đơn), giống recomputeOrderTotals.
+    // Khách yên trả ¥ -> sheet không quy đổi, kể cả khi đơn lỡ có tỉ giá.
+    const rate = jpyCustomer ? 0 : Number(o.exchangeRate ?? 0);
     const commissionPercent = Number(o.commissionPercent ?? 0);
+    // Khoản cả đơn (chỉ ghi ở món đầu, tránh nhân đôi khi đơn nhiều món): ship tay / phí khách chịu / ship nội địa / quốc tế.
+    const orderJpy = { v: 0 }, orderVnd = { v: 0 };
+    const addOrder = (amt: unknown, cur: string) => { const v = Number(amt ?? 0); if (!v) return; if (cur === "JPY") orderJpy.v += v; else orderVnd.v += v; };
+    addOrder(o.shipAmount, o.shipCurrency);
+    if (o.serviceFeeCustomerPays !== false) addOrder(o.serviceFeeAmount, o.serviceFeeCurrency);
+    addOrder(o.jpDomesticShipAmount, o.jpDomesticShipCurrency);
+    addOrder(o.intlShipAmount, o.intlShipCurrency);
+    const discountJpy = o.discountCurrency === "JPY" ? Number(o.discountAmount ?? 0) : 0;
+    const discountVnd = o.discountCurrency !== "JPY" ? Number(o.discountAmount ?? 0) : 0;
     o.items.forEach((it, idx) => {
+      const first = idx === 0;
       const giaWeb = it.qty * Number(it.unitPriceJpy);
       const ship = Number(it.shipJpy ?? 0);
-      const commissionJpy = (giaWeb + ship) * (commissionPercent / 100);
+      const disc = first ? discountJpy : 0;
+      const commissionJpy = (giaWeb + ship - disc) * (commissionPercent / 100);
       const trk = o.trackings[idx];
       const purchaseDate = it.purchaseDate ?? o.createdAt;
       const m = monthKeyOf(purchaseDate);
-      // Phụ thu = phụ thu tay của cả đơn (chỉ món đầu) + 着払い/COD kho báo riêng cho đúng mã tracking của món này
-      const codVnd = trk ? (codByTracking?.get(trk.id) ?? 0) : 0;
-      const surchargeCell = (idx === 0 ? surchargeVnd : 0) + codVnd;
-      // Ship của cả đơn (order.shipAmount - phí ship/thanh toán tay, vd COMBINI) chỉ cộng vào món đầu (tránh nhân đôi
-      // khi đơn nhiều món). Cùng đơn vị ¥ với ship món -> ghép thành công thức "=shipMón+shipĐơn" để khách bấm vào
-      // sheet thấy rõ 2 khoản cộng ra sao; khác đơn vị (VND) thì cộng thẳng vào ₫ quy đổi, không ghép công thức được.
-      const orderShipJpy = idx === 0 && o.shipCurrency === "JPY" ? Number(o.shipAmount ?? 0) : 0;
-      const orderShipVndOnly = idx === 0 && o.shipCurrency !== "JPY" ? Number(o.shipAmount ?? 0) : 0;
-      const shipCell: string | number = orderShipJpy > 0 ? (ship > 0 ? `=${ship}+${orderShipJpy}` : orderShipJpy) : (ship || "");
-      // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd),
-      // không phải cân JP khai báo ban đầu, tránh sheet khách hiện cân khác với cân đã tính tiền.
+      // Phụ thu = phụ thu tay của cả đơn (món đầu) + 着払い/COD kho báo theo đúng mã tracking của món này.
+      // ¥ không quy đổi được (khách yên, hoặc chưa có tỉ giá) -> giữ "¥" để khách thấy đúng số, không thành 0.
+      const cod = trk ? codByTracking?.get(trk.id) : undefined;
+      let surJpy = first && o.surchargeCurrency === "JPY" ? Number(o.surchargeAmount ?? 0) : 0;
+      let surVnd = first && o.surchargeCurrency !== "JPY" ? Number(o.surchargeAmount ?? 0) : 0;
+      if (cod) {
+        surVnd += cod.vnd;
+        // Khách yên: mọi COD ¥ giữ ¥. Khách ₫: COD ¥ có tỉ giá dùng số ₫ đã chốt, không tỉ giá thì quy theo tỉ giá đơn.
+        if (jpyCustomer) surJpy += cod.jpyRated + cod.jpyNoRate;
+        else { surVnd += cod.jpyRatedVnd; surJpy += cod.jpyNoRate; }
+      }
+      if (!jpyCustomer && rate && surJpy) { surVnd += surJpy * rate; surJpy = 0; }
+      const oJ = first ? orderJpy.v : 0;
+      const oV = first ? orderVnd.v - discountVnd : 0;
+      // Ship món + khoản ¥ cả đơn ghép thành công thức "=shipMón+khoảnĐơn" để khách bấm vào thấy rõ 2 khoản.
+      const shipCell: string | number = oJ ? (ship > 0 ? `=${ship}+${oJ}` : oJ) : (ship || "");
+      // Ưu tiên cân VN (đã cân lại thực tế) nếu có - khớp đúng cân dùng để tính phí ship thật (trackingShipVnd).
       const weight = trk?.vnWeightKg != null ? Number(trk.vnWeightKg) : (trk?.jpWeightKg != null ? Number(trk.jpWeightKg) : null);
-      // Quy đổi đúng ra ₫/kg để hiện khớp với "Tổng tiền vận chuyển" (= cân x đơn giá này) - đơn giá tracking có
-      // thể để theo ¥ (shipRateCurrency) nên phải nhân tỉ giá, đơn giá mặc định của khách luôn tính sẵn theo ₫.
-      // usingCustRate: đang fallback sang giá mặc định khách (luôn VND) -> KHÔNG được nhân tỉ giá dù
-      // trk.shipRateCurrency cũ còn ghi "JPY" (đó là cờ cho giá riêng của tracking, không áp dụng cho giá khách).
+      // usingCustRate: fallback sang giá mặc định khách (luôn VND, theo tuyến bay/biển) -> KHÔNG nhân tỉ giá dù
+      // trk.shipRateCurrency cũ còn ghi "JPY" (cờ đó chỉ dành cho giá riêng của tracking).
       const usingCustRate = trk?.unitPriceVndPerKg == null;
-      const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custShipRateVnd ?? null;
-      const shipVndPerKg = rawShipRate != null ? (!usingCustRate && trk?.shipRateCurrency === "JPY" ? rawShipRate * rate : rawShipRate) : null;
+      const custRate = customerShipRate(customer, trk?.cartonId ? routeByCarton?.get(trk.cartonId) : null);
+      const orderRate = Number(o.exchangeRate ?? 0);
+      const rawShipRate = trk?.unitPriceVndPerKg != null ? Number(trk.unitPriceVndPerKg) : custRate;
+      const shipVndPerKg = rawShipRate != null ? (!usingCustRate && trk?.shipRateCurrency === "JPY" ? rawShipRate * orderRate : rawShipRate) : null;
       const shipTotal = trk ? trackingShipVnd(
-        { ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custShipRateVnd ?? null, shipRateCurrency: usingCustRate ? "VND" : trk.shipRateCurrency },
-        rate,
+        { ...trk, unitPriceVndPerKg: trk.unitPriceVndPerKg ?? custRate, shipRateCurrency: usingCustRate ? "VND" : trk.shipRateCurrency },
+        orderRate,
       ) : 0;
-      const jpy = giaWeb + ship + commissionJpy + orderShipJpy;
-      const vnd = (rate ? Math.round(jpy * rate) : 0) + orderShipVndOnly;
+      const jpy = giaWeb + ship - disc + commissionJpy + oJ;
+      const vnd = (rate ? Math.round(jpy * rate) : 0) + oV;
       const grandTotal = vnd + Math.round(shipTotal);
       const row: FieldRow = {
         code: o.items.length > 1 ? `${o.code}.${idx + 1}` : o.code,
         date: fmtDate(purchaseDate),
         acc: String(o.nick ?? ""),
         url: String(it.url ?? ""), method: String(it.paymentMethod ?? ""),
-        giaWeb: giaWeb || "", ship: shipCell, total: jpy,
+        giaWeb: giaWeb || "", ship: shipCell, discount: disc || "", total: jpy,
         rate: rate || "", vndConverted: vnd || "",
         weight: weight ?? "",
-        surcharge: idx === 0 && surchargeJpyRaw
-          ? `¥${surchargeJpyRaw.toLocaleString("ja-JP")}${codVnd ? ` + ${Math.round(codVnd)}` : ""}`
-          : (surchargeCell ? Math.round(surchargeCell) : ""),
+        surcharge: surJpy
+          ? `¥${Math.round(surJpy).toLocaleString("ja-JP")}${surVnd ? ` + ${Math.round(surVnd)}` : ""}`
+          : (surVnd ? Math.round(surVnd) : ""),
         shipRate: shipVndPerKg ? Math.round(shipVndPerKg) : "",
         shipTotal: shipTotal ? Math.round(shipTotal) : "",
         tracking: String(trk?.code ?? ""), review: String(trk?.review ?? ""),
@@ -118,7 +151,8 @@ function buildRowsByMonth(orders: OrderFull[], codByTracking?: Map<string, numbe
         stored: (trk?.status === "stored" && !trk?.vnTrackingCode) ? "lưu kho" : "",
         vnTrack: String(trk?.vnTrackingCode ?? ""),
       };
-      bucket(m).push({ date: purchaseDate, row, jpy, vnd });
+      // Tổng tháng: ₫ = quy đổi + cân + phụ thu ₫ (khớp công nợ ₫); ¥ = tổng ¥ chưa quy đổi + phụ thu/COD ¥.
+      bucket(m).push({ date: purchaseDate, row, jpy: rate ? 0 : jpy + surJpy, vnd: grandTotal + Math.round(surVnd) });
     });
   }
   const result = new Map<string, MonthRows>();
@@ -213,8 +247,12 @@ function colorForDate(dateStr: string): RgbColor {
 // Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế "Mã/Ngày/Tên khoản mục/Nội dung/Tiền" (khách chèn
 // thêm cột ở phần đơn hàng phía trước làm cả khối này bị đẩy lệch chỗ) - không dùng vị trí cố định W:Z nữa.
 // Cột "Mã" để khách tự điền. 3 ô TỔNG TT/CỌC/NỢ (H1:H3) là công thức riêng -> tự nhảy, không đụng ở đây.
-function buildDepositRows(deps: { paidAt: Date; note: string | null; amountVnd: unknown }[]): (string | number)[][] {
-  return deps.map((d) => [fmtDate(d.paidAt), "Thu tiền hàng", String(d.note ?? ""), Number(d.amountVnd)]);
+// Khách trả yên + cọc ghi ¥ -> ghi số ¥ (trừ nợ ¥), còn lại ghi số ₫ thực vào ví.
+function buildDepositRows(deps: (DepositLike & { paidAt: Date; note: string | null })[], payCurrency?: string | null): (string | number)[][] {
+  return deps.map((d) => {
+    const c = depositCredit(payCurrency, d);
+    return [fmtDate(d.paidAt), "Thu tiền hàng", c.jpy ? `${d.note ?? ""} (¥)`.trim() : String(d.note ?? ""), c.jpy || c.vnd];
+  });
 }
 
 type DepositHeader = { row: number; dateCol: number; amtCol: number };
@@ -256,13 +294,20 @@ async function protectManagedRanges(sid: string, gsid: number, headerRow: number
   }
 }
 
-// 着払い/COD kho báo riêng theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng vào cột Phụ thu đúng dòng đó
-async function loadCodByTracking(orders: OrderFull[]): Promise<Map<string, number>> {
+// 着払い/COD kho báo riêng theo từng mã tracking (nhập ở "Phải trả kho/cty") -> cộng vào cột Phụ thu đúng dòng đó.
+async function loadCodByTracking(orders: OrderFull[]): Promise<Map<string, CodAmounts>> {
   const trackingIds = orders.flatMap((o) => o.trackings.map((t) => t.id));
-  const codByTracking = new Map<string, number>();
+  const codByTracking = new Map<string, CodAmounts>();
   if (trackingIds.length) {
-    const codRows = await prisma.companyCost.groupBy({ by: ["refId"], where: { kind: "chakubarai", refId: { in: trackingIds } }, _sum: { amountVnd: true } });
-    for (const r of codRows) if (r.refId) codByTracking.set(r.refId, Number(r._sum.amountVnd ?? 0));
+    const rows = await prisma.companyCost.findMany({ where: { kind: "chakubarai", refId: { in: trackingIds } }, select: { refId: true, currency: true, amountOrig: true, amountVnd: true, exchangeRate: true } });
+    for (const r of rows) {
+      if (!r.refId) continue;
+      const cur = codByTracking.get(r.refId) ?? { vnd: 0, jpyRated: 0, jpyRatedVnd: 0, jpyNoRate: 0 };
+      if (r.currency !== "JPY") cur.vnd += Number(r.amountVnd);
+      else if (r.exchangeRate != null) { cur.jpyRated += Number(r.amountOrig); cur.jpyRatedVnd += Number(r.amountVnd); }
+      else cur.jpyNoRate += Number(r.amountOrig);
+      codByTracking.set(r.refId, cur);
+    }
   }
   return codByTracking;
 }
@@ -273,14 +318,15 @@ function groupDepositsByMonth(deposits: Deposit[]): Map<string, Deposit[]> {
   return depsByMonth;
 }
 
-// Dòng tiêu đề đơn hàng. Tab trống hẳn -> ghi template mặc định ở dòng 1. Tab đã có nội dung mà không thấy
+// Dòng tiêu đề đơn hàng. Tab trống hẳn -> ghi template mặc định ở dòng 5 (+ nhãn khối tổng G1:G3). Tab đã có nội dung mà không thấy
 // "Mã Link" -> trả 0: KHÔNG ghi gì vào tab đó (không đè nội dung khách), để người dùng tự sửa tiêu đề.
 async function ensureOrderHeader(sid: string, tab: string): Promise<number> {
   const header = await findHeaderRow(sid, tab);
   if (header.row) return header.row;
   if (!header.empty) return 0;
-  await updateValues(sid, tab, "A1", { values: [ORDER_HEADER] });
-  return 1;
+  await updateValues(sid, tab, "G1:G3", { majorDimension: "COLUMNS", values: [["TỔNG TT", "CỌC", "NỢ"]] });
+  await updateValues(sid, tab, `A${TEMPLATE_HEADER_ROW}`, { values: [ORDER_HEADER] });
+  return TEMPLATE_HEADER_ROW;
 }
 
 // Ghi đơn hàng: đúng cột theo TÊN tiêu đề thực tế của khách (không theo vị trí cố định A→N).
@@ -319,7 +365,7 @@ async function paintStatusColumns(sid: string, gsid: number, start: number, head
 }
 
 // Sổ thu tiền (cọc): dò đúng cột theo tiêu đề thực tế, để trống cột Mã. Trả header sổ cọc (null nếu tab không có).
-async function writeDeposits(sid: string, tab: string, monthDeposits: Deposit[]): Promise<DepositHeader | null> {
+async function writeDeposits(sid: string, tab: string, monthDeposits: Deposit[], payCurrency?: string | null): Promise<DepositHeader | null> {
   const depHeader = await findDepositHeader(sid, tab);
   if (depHeader) {
     const depStart = depHeader.row + 1;
@@ -327,30 +373,40 @@ async function writeDeposits(sid: string, tab: string, monthDeposits: Deposit[])
     const c1 = colLetter(depHeader.amtCol);
     await clearValues(sid, tab, `${c0}${depStart}:${c1}100000`);
     if (monthDeposits.length) {
-      await updateValues(sid, tab, `${c0}${depStart}`, { values: buildDepositRows(monthDeposits) });
+      await updateValues(sid, tab, `${c0}${depStart}`, { values: buildDepositRows(monthDeposits, payCurrency) });
     }
   }
   return depHeader;
 }
 
-// Khối TỔNG TT/CỌC/NỢ (H1/H2/H3): có tỉ giá -> thay hẳn sang ₫; không có -> giữ nguyên ¥.
-async function writeTotals(sid: string, tab: string, gsid: number | null, jpyTotal: number, vndTotal: number, monthDeposits: Deposit[]): Promise<void> {
-  const jpyDepositTotal = monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);
-  const vndDepositTotal = monthDeposits.filter((d) => d.currency === "VND").reduce((s, d) => s + Number(d.amountVnd), 0);
+// Khối TỔNG TT/CỌC/NỢ (H1/H2/H3) - cùng quy tắc công nợ (customerBalance.ts).
+// Khách ₫: H = ₫ (có tỉ giá) hoặc ¥ (tháng chưa có tỉ giá nào). Khách yên: H = nợ ¥ (hàng), I = nợ ₫ (cân/vận chuyển).
+async function writeTotals(sid: string, tab: string, gsid: number | null, jpyTotal: number, vndTotal: number, monthDeposits: Deposit[], payCurrency?: string | null): Promise<void> {
+  const paid = monthDeposits.reduce((s, d) => { const c = depositCredit(payCurrency, d); return { vnd: s.vnd + c.vnd, jpy: s.jpy + c.jpy }; }, { vnd: 0, jpy: 0 });
+  const fmt = (col: number, pattern: string) => numberFormatRequest({ sheetId: gsid!, startRowIndex: 0, endRowIndex: 3, startColumnIndex: col, endColumnIndex: col + 1 }, pattern);
+  if (payCurrency === "JPY") {
+    await updateValues(sid, tab, "H1:I3", { majorDimension: "COLUMNS", values: [
+      [jpyTotal || "", paid.jpy || "", jpyTotal - paid.jpy || ""],
+      [vndTotal || "", paid.vnd || "", vndTotal - paid.vnd || ""],
+    ] });
+    await clearValues(sid, tab, "J1:J3");
+    if (gsid != null) await batchUpdate(sid, [fmt(7, "\"¥\"#,##0"), fmt(8, "#,##0 \"₫\"")]);
+    return;
+  }
   const useVnd = vndTotal > 0;
   const h1 = useVnd ? vndTotal : jpyTotal;
-  const h2 = useVnd ? vndDepositTotal : jpyDepositTotal;
+  // Cọc ¥ của khách ₫ đã quy ra ₫ (amountVnd) -> tính vào cột ₫, không bỏ sót như bản cũ (chỉ lấy cọc currency=VND).
+  const h2 = useVnd ? paid.vnd : monthDeposits.filter((d) => d.currency === "JPY").reduce((s, d) => s + Number(d.amountOrig), 0);
   const h3 = h1 - h2;
   await updateValues(sid, tab, "H1:H3", { majorDimension: "COLUMNS", values: [[h1 || "", h2 || "", h3 || ""]] });
-  // Dọn ô "Tổng/Nợ quy đổi ₫" cũ (bản trước ghi ở I:J, giờ gộp thẳng vào H nên không cần nữa)
   await clearValues(sid, tab, "I1:J3");
-  if (gsid != null) {
-    const pattern = useVnd ? "#,##0 \"₫\"" : "\"¥\"#,##0";
-    await batchUpdate(sid, [numberFormatRequest({ sheetId: gsid, startRowIndex: 0, endRowIndex: 3, startColumnIndex: 7, endColumnIndex: 8 }, pattern)]);
-  }
+  // Tháng lẫn món chưa có tỉ giá (chưa tính được ₫, chưa vào công nợ) -> hiện riêng số ¥ đó ở I1 để không bị khuất.
+  const mixedJpy = useVnd && jpyTotal > 0;
+  if (mixedJpy) await updateValues(sid, tab, "I1:J1", { values: [[jpyTotal, "¥ chưa có tỉ giá"]] });
+  if (gsid != null) await batchUpdate(sid, [fmt(7, useVnd ? "#,##0 \"₫\"" : "\"¥\"#,##0"), ...(mixedJpy ? [fmt(8, "\"¥\"#,##0")] : [])]);
 }
 
-async function syncMonthTab(sid: string, tab: string, create: boolean, monthRows: MonthRows, monthDeposits: Deposit[]): Promise<void> {
+async function syncMonthTab(sid: string, tab: string, create: boolean, monthRows: MonthRows, monthDeposits: Deposit[], payCurrency?: string | null): Promise<void> {
   if (create) await ensureSheetTab(sid, tab);
   const { rows: fieldRows, jpyTotal, vndTotal } = monthRows;
 
@@ -365,12 +421,12 @@ async function syncMonthTab(sid: string, tab: string, create: boolean, monthRows
     await paintStatusColumns(sid, gsid, start, headerCols, fieldRows);
   }
 
-  const depHeader = await writeDeposits(sid, tab, monthDeposits);
+  const depHeader = await writeDeposits(sid, tab, monthDeposits, payCurrency);
 
   // Khóa các cột hệ thống tự ghi - khách/staff share file không sửa/xóa được, chỉ hệ thống ghi
   if (gsid != null) await protectManagedRanges(sid, gsid, header, headerCols, depHeader);
 
-  await writeTotals(sid, tab, gsid, jpyTotal, vndTotal, monthDeposits);
+  await writeTotals(sid, tab, gsid, jpyTotal, vndTotal, monthDeposits, payCurrency);
 }
 
 async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
@@ -385,14 +441,15 @@ async function runCustomerSync(customerId: string, attempt = 1): Promise<void> {
     const codByTracking = await loadCodByTracking(orders);
 
     // Mỗi MÓN nhảy vào tháng theo ngày mua của chính nó
-    const custShipRateVnd = customer.shipRatePerKg != null ? Number(customer.shipRatePerKg) : null;
-    const rowsByMonth = buildRowsByMonth(orders, codByTracking, custShipRateVnd);
+    const cartonIds = [...new Set(orders.flatMap((o) => o.trackings.map((t) => t.cartonId)).filter((x): x is string => !!x))];
+    const cartons = cartonIds.length ? await prisma.carton.findMany({ where: { id: { in: cartonIds } }, select: { id: true, route: true } }) : [];
+    const rowsByMonth = buildRowsByMonth(orders, codByTracking, customer, new Map(cartons.map((c) => [c.id, c.route])));
     const depsByMonth = groupDepositsByMonth(deposits);
 
     // Gồm cả các tab tháng đang tồn tại -> tháng không còn dữ liệu sẽ được dọn (tránh dòng cũ ở lại khi món đổi tháng theo ngày mua)
     const plan = planMonthTabs([...rowsByMonth.keys(), ...depsByMonth.keys()], await listMonthTabs(sid));
     for (const { key, tab, create } of plan) {
-      await syncMonthTab(sid, tab, create, rowsByMonth.get(key) ?? { rows: [], jpyTotal: 0, vndTotal: 0 }, depsByMonth.get(key) ?? []);
+      await syncMonthTab(sid, tab, create, rowsByMonth.get(key) ?? { rows: [], jpyTotal: 0, vndTotal: 0 }, depsByMonth.get(key) ?? [], customer.payCurrency);
     }
   } catch (e) {
     // Còn 1 phần dở dang (lỗi API giữa chừng) -> thử lại cả lượt sync 1 lần, tránh để lại dữ liệu cũ trên sheet khách

@@ -8,7 +8,7 @@ vi.mock("../../infrastructure/prisma.js", () => ({
     packDayLock: { findMany: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
     tracking: { findMany: vi.fn(), update: vi.fn(), delete: vi.fn(), create: vi.fn(), findFirst: vi.fn() },
     trackingLog: { deleteMany: vi.fn() },
-    carton: { findFirst: vi.fn(), create: vi.fn() },
+    carton: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
   },
 }));
 vi.mock("../../integrations/google/googleAuth.js", () => ({ serviceAccountEnabled: vi.fn(() => true) }));
@@ -41,7 +41,7 @@ type Fn = ReturnType<typeof vi.fn>;
 const db = prisma as unknown as {
   appConfig: { findUnique: Fn }; packDayLock: { findMany: Fn; upsert: Fn; deleteMany: Fn };
   tracking: { findMany: Fn; update: Fn; delete: Fn; create: Fn; findFirst: Fn };
-  trackingLog: { deleteMany: Fn }; carton: { findFirst: Fn; create: Fn };
+  trackingLog: { deleteMany: Fn }; carton: { findFirst: Fn; create: Fn; update: Fn };
 };
 const mList = vi.mocked(listSheets);
 const mGet = vi.mocked(batchGetValues);
@@ -69,15 +69,16 @@ function trk(id: string, ord: Ord | null, extra: Partial<TrackingWithOrder> = {}
   return t;
 }
 
-// 1 tab kho: phần tử thứ i = dòng i+1 (A=BILL, B=thùng, E=mã, F=tên, X=đã xử lý).
-type Cell = { A?: string; B?: string; E?: string; F?: string; X?: string };
+// 1 tab kho: phần tử thứ i = dòng i+1 (A=BILL, B=thùng, E=mã, F=tên, J=tổng cân, X=đã xử lý).
+type Cell = { A?: string; B?: string; E?: string; F?: string; J?: string; X?: string };
 function tabColumns(rows: Cell[]): string[][] {
   const cols: string[][] = Array.from({ length: 24 }, () => []);
-  rows.forEach((r, j) => { cols[0][j] = r.A ?? ""; cols[1][j] = r.B ?? ""; cols[4][j] = r.E ?? ""; cols[5][j] = r.F ?? ""; cols[23][j] = r.X ?? ""; });
+  rows.forEach((r, j) => { cols[0][j] = r.A ?? ""; cols[1][j] = r.B ?? ""; cols[4][j] = r.E ?? ""; cols[5][j] = r.F ?? ""; cols[9][j] = r.J ?? ""; cols[23][j] = r.X ?? ""; });
   return cols;
 }
-function setup(o: { tabs: Record<string, Cell[]>; trks?: TrackingWithOrder[]; candidates?: unknown[]; locked?: Date[] }) {
-  db.appConfig.findUnique.mockResolvedValue({ value: "1234567890abcdefghijXYZ" });
+function setup(o: { tabs: Record<string, Cell[]>; trks?: TrackingWithOrder[]; candidates?: unknown[]; locked?: Date[]; readonly?: boolean }) {
+  db.appConfig.findUnique.mockImplementation(async ({ where }: { where: { key: string } }) =>
+    where.key === "warehouse_sheet_readonly" ? (o.readonly ? { value: "true" } : null) : { value: "1234567890abcdefghijXYZ" });
   const titles = Object.keys(o.tabs);
   mList.mockResolvedValue(titles.map((title, i) => ({ title, sheetId: 100 + i })));
   mGet.mockImplementation(async (_sid, ranges) => ranges.map((r) => ({ values: tabColumns(o.tabs[r.slice(1, r.indexOf("'!"))]) })));
@@ -247,6 +248,40 @@ describe("syncPackedFromWarehouse - cartons", () => {
     expect(trackingUpdates()[0].data.packedAt).toEqual(D26);
   });
 
+  it("syncPackedFromWarehouse_seaTab_createsCartonWithSeaRoute", async () => {
+    const t = trk("t1", null, { packedAt: new Date("2026-06-01T00:00:00Z"), packRow: 1 });
+    setup({ tabs: { "Biển Tháng6": [{ E: CODE, A: "GA", B: "3" }] }, trks: [t] });
+    await syncPackedFromWarehouse();
+    expect(db.carton.create.mock.calls[0][0].data).toMatchObject({ code: "GA 3", route: "sea", packedDate: new Date("2026-06-01T00:00:00Z") });
+  });
+
+  it("syncPackedFromWarehouse_cartonWeightOnFirstRowOfOtherCode_usedAsDeclaredWeight", async () => {
+    const t = trk("t1", null, { code: "BBB22222", packRow: 2 });
+    setup({
+      tabs: { "26.6": [{ E: "AAA11111", A: "GA", B: "3", J: "12,6" }, { E: "BBB22222", A: "ga", B: "3" }, { E: "CCC33333", A: "GA", B: "4", J: "7" }] },
+      trks: [t], readonly: true,
+    });
+    await syncPackedFromWarehouse();
+    expect(db.carton.create).toHaveBeenCalledTimes(1);
+    expect(db.carton.create.mock.calls[0][0].data).toMatchObject({ code: "GA 3", route: "air", declaredWeightKg: 12.6 });
+  });
+
+  it("syncPackedFromWarehouse_sameBillThungOnOtherTab_doesNotBorrowItsWeight", async () => {
+    const t = trk("t1", null, { packRow: 1 });
+    setup({ tabs: { "25.6": [{ E: "AAA11111", A: "GA", B: "3", J: "9" }], "26.6": [{ E: CODE, A: "GA", B: "3" }] }, trks: [t], readonly: true });
+    await syncPackedFromWarehouse();
+    expect(db.carton.create.mock.calls[0][0].data).toMatchObject({ code: "GA 3", packedDate: D26, declaredWeightKg: null });
+  });
+
+  it("syncPackedFromWarehouse_existingCartonWithoutWeight_fillsDeclaredWeight", async () => {
+    const t = trk("t1", null, { packRow: 1, cartonId: "c-old" });
+    setup({ tabs: { "26.6": [{ E: CODE, A: "GA", B: "3", J: "5.5" }] }, trks: [t] });
+    db.carton.findFirst.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: null });
+    db.carton.update.mockResolvedValue({ id: "c-old", route: "air", declaredWeightKg: 5.5 });
+    await syncPackedFromWarehouse();
+    expect(db.carton.update).toHaveBeenCalledWith({ where: { id: "c-old" }, data: { declaredWeightKg: 5.5 } });
+  });
+
   it("syncPackedFromWarehouse_rowWithoutBillAndThung_doesNotTouchCarton", async () => {
     const t = trk("t1", null, { packRow: 1 });
     setup({ tabs: { "26.6": [{ E: CODE }] }, trks: [t] });
@@ -395,6 +430,38 @@ describe("syncPackedFromWarehouse - write back", () => {
   });
 });
 
+describe("syncPackedFromWarehouse - readonly warehouse file", () => {
+  it("syncPackedFromWarehouse_readonlyUnknownCode_createsNoOrphanAndNoCarton", async () => {
+    setup({ tabs: { "26.6": [{ E: CODE, A: "GA", B: "3" }] }, trks: [], readonly: true });
+    const res = await syncPackedFromWarehouse();
+    expect(db.tracking.create).not.toHaveBeenCalled();
+    expect(db.carton.create).not.toHaveBeenCalled();
+    expect(res).toEqual({ matched: 0, updated: 0 });
+  });
+
+  it("syncPackedFromWarehouse_readonlyKnownCode_marksPackedAndAssignsCartonWithoutWritingSheet", async () => {
+    const t = trk("t1", order("O1", [{ name: "Bag", price: 1000 }], { needsCheck: true }), { packedAt: null });
+    setup({ tabs: { "26.6": [{ E: CODE, A: "GA", B: "3" }] }, trks: [t], readonly: true });
+    const res = await syncPackedFromWarehouse();
+    expect(res).toEqual({ matched: 1, updated: 1 });
+    expect(trackingUpdates()).toContainEqual({ where: { id: "t1" }, data: { packedAt: D26, lateAfterLock: false, needsTax: true } });
+    expect(trackingUpdates()).toContainEqual({ where: { id: "t1" }, data: { cartonId: "carton-GA 3", packRow: 1 } });
+    expect(mValues).not.toHaveBeenCalled();
+    expect(mFormat).not.toHaveBeenCalled();
+  });
+
+  it("syncPackedFromWarehouse_readonlyErasedRowAndLeftoverName_doesNotClearSheetRows", async () => {
+    setup({
+      tabs: { "26.6": [{ E: "NEW11111" }, { E: "" }, { E: "", F: "Bag" }] },
+      candidates: [{ id: "old", code: CODE, orderId: null, cartonId: null, packRow: 2, packedAt: D26 }],
+      readonly: true,
+    });
+    await syncPackedFromWarehouse();
+    expect(mValues).not.toHaveBeenCalled();
+    expect(mFormat).not.toHaveBeenCalled();
+  });
+});
+
 describe("setDayLockFromTab", () => {
   it("setDayLockFromTab_nonDateTab_doesNothing", async () => {
     await setDayLockFromTab("TRANG MẪU", true);
@@ -433,6 +500,14 @@ describe("clearWarehouseRow", () => {
     setup({ tabs: { "25.6": [] } });
     await clearWarehouseRow(D26, 3);
     expect(mValues).not.toHaveBeenCalled();
+  });
+
+  it("clearWarehouseRow_readonlyWarehouseFile_writesNothing", async () => {
+    setup({ tabs: { "26.6": [] }, readonly: true });
+    await clearWarehouseRow(D26, 3);
+    expect(mList).not.toHaveBeenCalled();
+    expect(mValues).not.toHaveBeenCalled();
+    expect(mFormat).not.toHaveBeenCalled();
   });
 
   it("clearWarehouseRow_tabFound_clearsSystemCellsOfRow", async () => {

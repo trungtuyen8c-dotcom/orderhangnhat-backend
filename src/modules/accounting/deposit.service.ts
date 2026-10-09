@@ -1,4 +1,5 @@
 import { v4 as uuid } from "uuid";
+import { depositCreditsJpy } from "../customers/customerBalance.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { logAudit } from "../../app/audit.js";
 import { AppError } from "../../app/errors/AppError.js";
@@ -197,7 +198,8 @@ export async function depositFixRequests() {
   return rows.map((r) => ({ id: r.id, fixRequest: r.fixRequest, customer: cmap.get(r.customerId)?.name ?? "?" }));
 }
 
-// ===== Số dư đầu kỳ: 1 bản ghi/khách, dương = khách dư tiền, âm = khách nợ. Không vào ví công ty. =====
+// ===== Số dư đầu kỳ: 1 bản ghi/khách/loại tiền, dương = khách dư tiền, âm = khách nợ. Không vào ví công ty. =====
+// Khách trả yên có thể có 2 dòng: đầu kỳ ¥ (tiền hàng) và đầu kỳ ₫ (tiền cân) - xem customerBalance.ts.
 const OPENING_CUTOFF = new Date("2026-06-30T00:00:00.000Z");
 
 export async function listOpeningBalances() {
@@ -207,22 +209,24 @@ export async function listOpeningBalances() {
 
 export async function setOpeningBalance(
   customerId: string,
-  input: { amount: number; currency: "VND" | "JPY"; exchangeRate?: number; note?: string },
+  input: { amount: number; currency: "VND" | "JPY"; exchangeRate?: number; note?: string; date?: Date },
   actor: Actor,
 ) {
   const dep = await prisma.$transaction(async (tx) => {
     // Khoá khách: 2 lần lưu đồng thời không tạo ra 2 dòng đầu kỳ.
     const customer = await lockCustomer(tx, customerId);
     if (!customer) throw notFound();
-    if (input.currency === "JPY" && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Đầu kỳ JPY cần nhập tỉ giá");
-    const amountVnd = input.currency === "JPY" ? Math.round(input.amount * input.exchangeRate!) : input.amount;
-    await tx.customerDeposit.deleteMany({ where: { customerId, isOpening: true } });
+    // Khách trả yên: đầu kỳ ¥ trừ thẳng nợ ¥, không cần tỉ giá. Khách ₫ nhập ¥ thì phải có tỉ giá để quy ra nợ ₫.
+    const jpyLedger = depositCreditsJpy(customer.payCurrency, input.currency);
+    if (input.currency === "JPY" && !jpyLedger && !input.exchangeRate) throw new AppError("BAD_REQUEST", 400, "Đầu kỳ JPY cần nhập tỉ giá");
+    const amountVnd = input.currency === "JPY" ? Math.round(input.amount * (input.exchangeRate ?? 0)) : input.amount;
+    await tx.customerDeposit.deleteMany({ where: { customerId, isOpening: true, currency: input.currency } });
     let d = null;
     if (input.amount !== 0) {
       d = await tx.customerDeposit.create({
         data: {
           id: uuid(), customerId, amountVnd, currency: input.currency, amountOrig: input.amount,
-          exchangeRate: input.exchangeRate ?? null, note: input.note || "Số dư đầu kỳ", paidAt: OPENING_CUTOFF,
+          exchangeRate: input.exchangeRate ?? null, note: input.note || "Số dư đầu kỳ", paidAt: input.date ?? OPENING_CUTOFF,
           confirmed: true, confirmedAt: new Date(), confirmedBy: actor.id, isOpening: true, recordedBy: actor.id,
         },
       });

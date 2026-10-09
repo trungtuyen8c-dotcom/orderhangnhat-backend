@@ -27,6 +27,20 @@ export function tabDate(title: string, now: Date = new Date()): Date | null {
   return isNaN(dt.getTime()) ? null : dt;
 }
 
+// Tab đường biển của file kho Global: "Biển Tháng10", "bien t9", "biển T6", "bien tháng 4 chuyến 2(Tháng5)"...
+// -> ngày = mùng 1 của tháng ghi trong tên (lấy số tháng ĐẦU TIÊN sau chữ "tháng"/"t"), năm suy như tabDate.
+export function seaTabDate(title: string, now: Date = new Date()): Date | null {
+  const t = title.trim().toLowerCase();
+  if (!/^bi[eể]n\b/.test(t)) return null;
+  const m = t.match(/(?:tháng|thang|t)\s*0*(\d{1,2})/);
+  if (!m) return null;
+  const mo = Number(m[1]);
+  if (mo < 1 || mo > 12) return null;
+  let dt = new Date(now.getFullYear(), mo - 1, 1);
+  if (dt.getTime() - now.getTime() > 30 * 86400000) dt = new Date(now.getFullYear() - 1, mo - 1, 1);
+  return dt;
+}
+
 // Mã tracking hợp lệ: không rỗng, không có dấu cách, >= 8 ký tự chữ-số (bỏ "0", tiêu đề, GK/GH...)
 export function isTrackingCode(v: string): boolean {
   const c = (v ?? "").trim();

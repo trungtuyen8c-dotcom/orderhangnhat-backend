@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../../infrastructure/prisma.js", () => ({
   prisma: {
     debt: { groupBy: vi.fn() },
-    customer: { findMany: vi.fn() },
+    customer: { findMany: vi.fn(), findUnique: vi.fn() },
     order: { findMany: vi.fn(), groupBy: vi.fn() },
     customerDeposit: { findMany: vi.fn(), groupBy: vi.fn() },
     payment: { findMany: vi.fn() },
@@ -15,9 +15,10 @@ vi.mock("../../infrastructure/prisma.js", () => ({
   },
 }));
 
-vi.mock("../customers/customers.service.js", () => ({ customerVndDebts: vi.fn() }));
+vi.mock("../customers/customers.service.js", () => ({ customerDebts: vi.fn() }));
 
-import { customerVndDebts } from "../customers/customers.service.js";
+import { customerDebts } from "../customers/customers.service.js";
+import { emptyBalance, type Balance } from "../customers/customerBalance.js";
 import { customerLedger, customerSummary, debtsByCustomer, expensesMonthly, monthlyReport, statement, walletDailySummary } from "./report.service.js";
 import { prisma } from "../../infrastructure/prisma.js";
 import { AppError } from "../../app/errors/AppError.js";
@@ -28,9 +29,16 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const model of Object.values(mp) as any[]) for (const fn of Object.values(model) as any[]) fn.mockResolvedValue([]);
   mp.wallet.findUnique.mockResolvedValue(null);
-  vi.mocked(customerVndDebts).mockResolvedValue(new Map());
+  mp.customer.findUnique.mockResolvedValue(null);
+  vi.mocked(customerDebts).mockResolvedValue(new Map());
 });
-const debts = (entries: [string, number][]) => vi.mocked(customerVndDebts).mockResolvedValue(new Map(entries));
+// Số -> chỉ nợ ₫; object -> Balance đầy đủ (debt/debtJpy tự tính nếu không truyền).
+const bal = (over: Partial<Balance>): Balance => {
+  const b = { ...emptyBalance(), ...over };
+  return { ...b, debt: over.debt ?? b.orderVnd - b.paidVnd, debtJpy: over.debtJpy ?? b.orderJpy - b.paidJpy };
+};
+const debts = (entries: [string, number | Partial<Balance>][]) =>
+  vi.mocked(customerDebts).mockResolvedValue(new Map(entries.map(([id, v]) => [id, typeof v === "number" ? bal({ debt: v }) : bal(v)])));
 afterEach(() => vi.useRealTimers());
 
 // 2026-03-01 03:00 giờ VN = 2026-02-28 20:00 UTC: tháng hiện tại theo VN là 2026-03, theo UTC là 2026-02.
@@ -62,11 +70,24 @@ describe("debtsByCustomer", () => {
     expect(row).toMatchObject({ name: "?", phone: null });
   });
 
-  it("debtsByCustomer_any_codeIsFirst8CharsOfIdUppercased", async () => {
+  it("debtsByCustomer_customerHasNoCode_codeFallsBackToFirst8CharsOfIdUppercased", async () => {
     debts([["abcdef12-3456", 10]]);
-    mp.customer.findMany.mockResolvedValue([{ id: "abcdef12-3456", name: "Lan", phone: "090" }]);
+    mp.customer.findMany.mockResolvedValue([{ id: "abcdef12-3456", code: null, name: "Lan", phone: "090" }]);
     const [row] = await debtsByCustomer();
     expect(row).toMatchObject({ code: "ABCDEF12", name: "Lan", phone: "090" });
+  });
+
+  it("debtsByCustomer_customerHasCode_usesRealCustomerCode", async () => {
+    debts([["abcdef12-3456", 10]]);
+    mp.customer.findMany.mockResolvedValue([{ id: "abcdef12-3456", code: "KH07", name: "Lan", phone: "090" }]);
+    const [row] = await debtsByCustomer();
+    expect(row.code).toBe("KH07");
+  });
+
+  it("debtsByCustomer_jpyOnlyDebt_keptWithBalanceJpy", async () => {
+    debts([["j1", { debt: 0, debtJpy: 5000 }], ["z", { debt: 0, debtJpy: 0 }]]);
+    const out = await debtsByCustomer();
+    expect(out.map((r) => [r.customerId, r.balance, r.balanceJpy])).toEqual([["j1", 0, 5000]]);
   });
 
   it("debtsByCustomer_noDebts_returnsEmpty", async () => {
@@ -110,10 +131,11 @@ describe("customerLedger", () => {
     ]);
     mp.customerDeposit.findMany.mockResolvedValue([{ amountVnd: "1500", confirmed: true, paidAt: new Date("2026-03-10T05:00:00Z") }]);
     const r = await customerLedger("c1");
+    const jpy0 = { orderJpy: 0, paidJpy: 0, balanceJpy: 0 };
     expect(r.byMonth).toEqual([
-      { month: "2026-02", order: 1000, paid: 0, balance: -1000 },
-      { month: "2026-03", order: 0, paid: 1500, balance: 500 },
-      { month: "2026-04", order: 500, paid: 0, balance: 0 },
+      { month: "2026-02", order: 1000, paid: 0, balance: -1000, ...jpy0 },
+      { month: "2026-03", order: 0, paid: 1500, balance: 500, ...jpy0 },
+      { month: "2026-04", order: 500, paid: 0, balance: 0, ...jpy0 },
     ]);
   });
 
@@ -126,28 +148,56 @@ describe("customerLedger", () => {
     mp.customerDeposit.findMany.mockResolvedValue([{ amountVnd: "1500", confirmed: false, paidAt: new Date("2026-03-10T05:00:00Z") }]);
     expect((await customerLedger("c1")).byMonth).toEqual([]);
   });
+
+  it("customerLedger_customerMissing_payCurrencyDefaultsVnd", async () => {
+    expect((await customerLedger("c1")).payCurrency).toBe("VND");
+  });
+
+  it("customerLedger_vndCustomerJpyDeposit_creditsVndLedgerWithAmountVnd", async () => {
+    mp.customer.findUnique.mockResolvedValue({ payCurrency: "VND" });
+    mp.order.findMany.mockResolvedValue([{ totalVnd: "1000000", dueJpy: null, createdAt: new Date("2026-03-05T05:00:00Z") }]);
+    mp.customerDeposit.findMany.mockResolvedValue([{ currency: "JPY", amountOrig: "5000", amountVnd: "850000", confirmed: true, paidAt: new Date("2026-03-06T05:00:00Z") }]);
+    const r = await customerLedger("c1");
+    expect(r).toMatchObject({ payCurrency: "VND", depositTotal: 850000, debt: 150000, depositTotalJpy: 0, debtJpy: 0 });
+  });
+
+  it("customerLedger_jpyCustomer_jpyDepositCreditsJpyLedgerAndVndDepositCreditsVnd", async () => {
+    mp.customer.findUnique.mockResolvedValue({ payCurrency: "JPY" });
+    mp.order.findMany.mockResolvedValue([
+      { totalVnd: "200000", dueJpy: "10000", createdAt: new Date("2026-03-05T05:00:00Z") },
+      { totalVnd: "100000", dueJpy: "2000", createdAt: new Date("2026-04-05T05:00:00Z") },
+    ]);
+    mp.customerDeposit.findMany.mockResolvedValue([
+      { currency: "JPY", amountOrig: "7000", amountVnd: "1190000", confirmed: true, paidAt: new Date("2026-03-06T05:00:00Z") },
+      { currency: "VND", amountOrig: "150000", amountVnd: "150000", confirmed: true, paidAt: new Date("2026-03-07T05:00:00Z") },
+      { currency: "JPY", amountOrig: "1000", amountVnd: "170000", confirmed: false, paidAt: new Date("2026-03-08T05:00:00Z") },
+    ]);
+    const r = await customerLedger("c1");
+    expect(r).toMatchObject({
+      payCurrency: "JPY",
+      orderTotal: 300000, depositTotal: 150000, pendingTotal: 0, debt: 150000,
+      orderTotalJpy: 12000, depositTotalJpy: 7000, pendingTotalJpy: 1000, debtJpy: 5000,
+    });
+    expect(r.byMonth).toEqual([
+      { month: "2026-03", order: 200000, paid: 150000, balance: -50000, orderJpy: 10000, paidJpy: 7000, balanceJpy: -3000 },
+      { month: "2026-04", order: 100000, paid: 0, balance: -150000, orderJpy: 2000, paidJpy: 0, balanceJpy: -5000 },
+    ]);
+  });
 });
 
 describe("customerSummary", () => {
-  it("customerSummary_depositsPaymentsAndRefunds_cocSumsAllAndNoIsMuaMinusCoc", async () => {
-    mp.order.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { totalVnd: "1000" } }]);
-    mp.customerDeposit.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { amountVnd: "300" } }]);
-    mp.payment.findMany.mockResolvedValue([
-      { amountVnd: "200", type: "deposit", order: { customerId: "c1" } },
-      { amountVnd: "50", type: "refund", order: { customerId: "c1" } },
-    ]);
+  it("customerSummary_balances_mapsVndAndJpyFieldsFromCustomerDebts", async () => {
+    debts([["c1", { orderVnd: 1000, paidVnd: 450, orderJpy: 8000, paidJpy: 3000 }]]);
     const [row] = await customerSummary();
-    expect(row).toMatchObject({ mua: 1000, coc: 450, no: 550 });
+    expect(row).toMatchObject({ mua: 1000, coc: 450, no: 550, muaJpy: 8000, cocJpy: 3000, noJpy: 5000 });
   });
 
-  it("customerSummary_paymentWithoutOrder_ignored", async () => {
-    mp.payment.findMany.mockResolvedValue([{ amountVnd: "200", type: "deposit", order: null }]);
+  it("customerSummary_noBalances_empty", async () => {
     expect(await customerSummary()).toEqual([]);
   });
 
   it("customerSummary_customerOnlyHasDeposit_appearsWithNegativeDebtAndSortedLast", async () => {
-    mp.order.groupBy.mockResolvedValue([{ customerId: "c1", _sum: { totalVnd: "1000" } }]);
-    mp.customerDeposit.groupBy.mockResolvedValue([{ customerId: "c2", _sum: { amountVnd: "300" } }]);
+    debts([["c2", { paidVnd: 300 }], ["c1", { orderVnd: 1000 }]]);
     mp.customer.findMany.mockResolvedValue([{ id: "c2", name: "Mai", code: "KH2" }]);
     const out = await customerSummary();
     expect(out.map((r) => [r.customerId, r.no])).toEqual([["c1", 1000], ["c2", -300]]);
@@ -220,7 +270,28 @@ describe("monthlyReport", () => {
     mp.customer.findMany.mockResolvedValue([{ id: "c2", name: "B", code: "K2" }]);
     const r = await monthlyReport("2026-03");
     expect(r.rows.map((x) => x.customerId)).toEqual(["c2", "c1"]);
-    expect(r.totals).toEqual({ canKg: 0, mua: 400, traTrongThang: 0, congNo: 50 });
+    expect(r.totals).toEqual({ canKg: 0, mua: 400, traTrongThang: 0, congNo: 50, muaJpy: 0, traJpy: 0, congNoJpy: 0 });
+  });
+
+  it("monthlyReport_jpyCustomer_jpyColumnsSeparateAndVndCustomerJpyDepositCountsAsVnd", async () => {
+    const inMonth = new Date("2026-03-10T05:00:00Z");
+    mp.customer.findMany.mockResolvedValue([{ id: "j", name: "Yen", code: "KJ", payCurrency: "JPY" }, { id: "v", name: "Dong", code: "KV", payCurrency: "VND" }]);
+    mp.order.findMany.mockResolvedValue([
+      { customerId: "j", totalVnd: "100", dueJpy: "9000", createdAt: inMonth },
+      { customerId: "v", totalVnd: "50", dueJpy: null, createdAt: inMonth },
+    ]);
+    mp.customerDeposit.findMany.mockResolvedValue([
+      { customerId: "j", currency: "JPY", amountOrig: "4000", amountVnd: "680000", paidAt: inMonth },
+      { customerId: "j", currency: "VND", amountOrig: "30", amountVnd: "30", paidAt: inMonth },
+      { customerId: "v", currency: "JPY", amountOrig: "1000", amountVnd: "170", paidAt: inMonth },
+    ]);
+    debts([["j", { debt: 70, debtJpy: 5000 }], ["v", { debt: -120 }]]);
+    const r = await monthlyReport("2026-03");
+    expect(r.rows.map((x) => [x.customerId, x.mua, x.traTrongThang, x.congNo, x.muaJpy, x.traJpy, x.congNoJpy])).toEqual([
+      ["j", 100, 30, 70, 9000, 4000, 5000],
+      ["v", 50, 170, -120, 0, 0, 0],
+    ]);
+    expect(r.totals).toMatchObject({ muaJpy: 9000, traJpy: 4000, congNoJpy: 5000 });
   });
 });
 

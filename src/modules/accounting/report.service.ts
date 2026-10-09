@@ -1,122 +1,123 @@
 import { prisma } from "../../infrastructure/prisma.js";
 import { AppError } from "../../app/errors/AppError.js";
 import { vnDayEnd, vnDayStart, vnMonthKey } from "../../app/vnTime.js";
-import { customerVndDebts } from "../customers/customers.service.js";
+import { customerDebts } from "../customers/customers.service.js";
+import { depositCredit } from "../customers/customerBalance.js";
 
 // Báo cáo chỉ đọc. Mốc ngày/tháng luôn theo giờ VN (vnMonthKey / vnDayStart / vnDayEnd).
 
 const monthOr = (m: unknown) => (typeof m === "string" && /^\d{4}-\d{2}$/.test(m) ? m : vnMonthKey(new Date()));
 
-// Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu (₫). Tính như trang Khách / Ví khách: tổng đơn - (cọc đã xác nhận
-// + thanh toán), KHÔNG dùng bảng Debt (bảng đó không biết đến cọc ghi qua Ví khách -> nợ hiện cao hơn thực tế).
+// Công nợ gộp theo khách: mỗi khách còn nợ bao nhiêu (₫, và ¥ với khách trả yên). Công thức chung ở customerBalance.ts.
 export async function debtsByCustomer() {
-  const debts = await customerVndDebts();
+  const debts = await customerDebts();
   const ids = [...debts.keys()];
-  const customers = ids.length ? await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, phone: true } }) : [];
+  const customers = ids.length ? await prisma.customer.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, name: true, phone: true } }) : [];
   const map = new Map(customers.map((c) => [c.id, c]));
   return ids
     .map((id) => ({
       customerId: id,
-      code: id.slice(0, 8).toUpperCase(),
+      code: map.get(id)?.code ?? id.slice(0, 8).toUpperCase(),
       name: map.get(id)?.name ?? "?",
       phone: map.get(id)?.phone ?? null,
-      balance: debts.get(id) ?? 0,
+      balance: debts.get(id)?.debt ?? 0,
+      balanceJpy: debts.get(id)?.debtJpy ?? 0,
       updatedAt: null as Date | null, // nợ tính từ đơn + cọc + thanh toán, không còn 1 mốc "cập nhật" riêng như bảng Debt
     }))
-    .filter((r) => r.balance !== 0)
+    .filter((r) => r.balance !== 0 || r.balanceJpy !== 0)
     .sort((a, b) => b.balance - a.balance);
 }
 
 // ===== Ví khách: cọc cục + đối soát theo tháng =====
-// Còn nợ khách = tổng đơn (VND) - (cọc cục + thanh toán theo đơn).
+// Còn nợ khách = tổng đơn - (cọc đã xác nhận + thanh toán theo đơn), tách ₫ / ¥ (khách trả yên).
 export async function customerLedger(customerId: string) {
-  const orders = await prisma.order.findMany({
-    where: { customerId, status: { not: "cancelled" } },
-    select: { totalVnd: true, createdAt: true },
-  });
-  const deposits = await prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "desc" } });
-  const payments = await prisma.payment.findMany({ where: { order: { customerId } }, select: { amountVnd: true, type: true, createdAt: true } });
+  const [customer, orders, deposits, payments] = await Promise.all([
+    prisma.customer.findUnique({ where: { id: customerId }, select: { payCurrency: true } }),
+    prisma.order.findMany({ where: { customerId, status: { not: "cancelled" } }, select: { totalVnd: true, dueJpy: true, createdAt: true } }),
+    prisma.customerDeposit.findMany({ where: { customerId }, orderBy: { paidAt: "desc" } }),
+    prisma.payment.findMany({ where: { order: { customerId } }, select: { amountVnd: true, type: true, createdAt: true } }),
+  ]);
+  const pay = customer?.payCurrency ?? "VND";
 
   // Chỉ cọc đã xác nhận (tiền thật vào) mới trừ công nợ. Cọc chờ -> pendingTotal.
   const confirmed = deposits.filter((d) => d.confirmed);
+  const sumCredit = (rows: typeof deposits) => rows.reduce((s, d) => { const c = depositCredit(pay, d); return { vnd: s.vnd + c.vnd, jpy: s.jpy + c.jpy }; }, { vnd: 0, jpy: 0 });
   const orderTotal = orders.reduce((s, o) => s + Number(o.totalVnd ?? 0), 0);
-  const depositTotal = confirmed.reduce((s, d) => s + Number(d.amountVnd), 0);
-  const pendingTotal = deposits.filter((d) => !d.confirmed).reduce((s, d) => s + Number(d.amountVnd), 0);
+  const orderTotalJpy = orders.reduce((s, o) => s + Number(o.dueJpy ?? 0), 0);
+  const dep = sumCredit(confirmed);
+  const pend = sumCredit(deposits.filter((d) => !d.confirmed));
   const paymentTotal = payments.reduce((s, p) => s + (p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd)), 0);
-  const paidTotal = depositTotal + paymentTotal;
+  const paidTotal = dep.vnd + paymentTotal;
   const debt = orderTotal - paidTotal;
+  const debtJpy = orderTotalJpy - dep.jpy;
 
   const mk = vnMonthKey;
-  const months = new Map<string, { order: number; paid: number }>();
-  const bump = (k: string, f: "order" | "paid", v: number) => { const m = months.get(k) ?? { order: 0, paid: 0 }; m[f] += v; months.set(k, m); };
-  for (const o of orders) bump(mk(o.createdAt), "order", Number(o.totalVnd ?? 0));
-  for (const d of confirmed) bump(mk(d.paidAt), "paid", Number(d.amountVnd));
+  const months = new Map<string, { order: number; paid: number; orderJpy: number; paidJpy: number }>();
+  const bump = (k: string, f: "order" | "paid" | "orderJpy" | "paidJpy", v: number) => {
+    const m = months.get(k) ?? { order: 0, paid: 0, orderJpy: 0, paidJpy: 0 }; m[f] += v; months.set(k, m);
+  };
+  for (const o of orders) { bump(mk(o.createdAt), "order", Number(o.totalVnd ?? 0)); bump(mk(o.createdAt), "orderJpy", Number(o.dueJpy ?? 0)); }
+  for (const d of confirmed) { const c = depositCredit(pay, d); bump(mk(d.paidAt), "paid", c.vnd); bump(mk(d.paidAt), "paidJpy", c.jpy); }
   for (const p of payments) bump(mk(p.createdAt), "paid", p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd));
 
-  let run = 0;
+  let run = 0, runJpy = 0;
   const byMonth = [...months.keys()].sort().map((month) => {
     const m = months.get(month)!;
     run += m.paid - m.order;
-    return { month, order: m.order, paid: m.paid, balance: run };
+    runJpy += m.paidJpy - m.orderJpy;
+    return { month, order: m.order, paid: m.paid, balance: run, orderJpy: m.orderJpy, paidJpy: m.paidJpy, balanceJpy: runJpy };
   });
-  return { orderTotal, depositTotal, pendingTotal, paymentTotal, paidTotal, debt, deposits, byMonth };
+  return {
+    payCurrency: pay, orderTotal, depositTotal: dep.vnd, pendingTotal: pend.vnd, paymentTotal, paidTotal, debt,
+    orderTotalJpy, depositTotalJpy: dep.jpy, pendingTotalJpy: pend.jpy, debtJpy, deposits, byMonth,
+  };
 }
 
-// Bảng tổng quan: mỗi khách mua bao nhiêu / cọc (đã xác nhận) / còn nợ
+// Bảng tổng quan: mỗi khách mua bao nhiêu / cọc (đã xác nhận) / còn nợ - ₫ và ¥ (khách trả yên).
 export async function customerSummary() {
-  const [orderAgg, depAgg, payments, customers] = await Promise.all([
-    prisma.order.groupBy({ by: ["customerId"], where: { status: { not: "cancelled" } }, _sum: { totalVnd: true } }),
-    prisma.customerDeposit.groupBy({ by: ["customerId"], where: { confirmed: true }, _sum: { amountVnd: true } }),
-    prisma.payment.findMany({ select: { amountVnd: true, type: true, order: { select: { customerId: true } } } }),
-    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-  ]);
+  const [debts, customers] = await Promise.all([customerDebts(), prisma.customer.findMany({ select: { id: true, name: true, code: true } })]);
   const cmap = new Map(customers.map((c) => [c.id, c]));
-  const mua = new Map<string, number>();
-  for (const o of orderAgg) mua.set(o.customerId, Number(o._sum.totalVnd ?? 0));
-  const coc = new Map<string, number>();
-  for (const d of depAgg) coc.set(d.customerId, Number(d._sum.amountVnd ?? 0));
-  for (const p of payments) {
-    const cid = p.order?.customerId; if (!cid) continue;
-    coc.set(cid, (coc.get(cid) ?? 0) + (p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd)));
-  }
-  const ids = new Set<string>([...mua.keys(), ...coc.keys()]);
-  return [...ids].map((id) => {
-    const m = mua.get(id) ?? 0, c = coc.get(id) ?? 0;
-    return { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, mua: m, coc: c, no: m - c };
-  }).sort((a, b) => b.no - a.no);
+  return [...debts.entries()].map(([id, b]) => ({
+    customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null,
+    mua: b.orderVnd, coc: b.paidVnd, no: b.debt, muaJpy: b.orderJpy, cocJpy: b.paidJpy, noJpy: b.debtJpy,
+  })).sort((a, b) => b.no - a.no);
 }
 
 // Báo cáo theo tháng: tổng cân, tổng tiền mua, đã trả - từng khách + tổng. Kèm công nợ hiện tại (luỹ kế).
 // Tiền mua theo createdAt của đơn; cân theo packedAt của tracking (cân VN ưu tiên, chưa có dùng cân JP); đã trả = cọc xác nhận + thanh toán đơn trong tháng.
+// ₫ và ¥ tách cột (khách trả yên: mua/trả/nợ ¥ riêng).
 export async function monthlyReport(monthQ: unknown) {
   const mk = vnMonthKey;
   const month = monthOr(monthQ);
 
   const [orders, trks, deposits, payments, customers, debts] = await Promise.all([
-    prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, createdAt: true } }),
+    prisma.order.findMany({ where: { status: { not: "cancelled" } }, select: { customerId: true, totalVnd: true, dueJpy: true, createdAt: true } }),
     prisma.tracking.findMany({ where: { packedAt: { not: null }, orderId: { not: null } }, select: { jpWeightKg: true, vnWeightKg: true, packedAt: true, order: { select: { customerId: true } } } }),
-    prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, amountVnd: true, paidAt: true } }),
+    prisma.customerDeposit.findMany({ where: { confirmed: true }, select: { customerId: true, currency: true, amountVnd: true, amountOrig: true, paidAt: true } }),
     prisma.payment.findMany({ select: { amountVnd: true, type: true, createdAt: true, order: { select: { customerId: true } } } }),
-    prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
-    customerVndDebts(),
+    prisma.customer.findMany({ select: { id: true, name: true, code: true, payCurrency: true } }),
+    customerDebts(),
   ]);
 
   const cmap = new Map(customers.map((c) => [c.id, c]));
-  type Row = { customerId: string; name: string; code: string | null; canKg: number; mua: number; traTrongThang: number; congNo: number };
+  type Row = { customerId: string; name: string; code: string | null; canKg: number; mua: number; traTrongThang: number; congNo: number; muaJpy: number; traJpy: number; congNoJpy: number };
   const rows = new Map<string, Row>();
   const get = (id: string): Row => {
     let r = rows.get(id);
-    if (!r) { r = { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, canKg: 0, mua: 0, traTrongThang: 0, congNo: 0 }; rows.set(id, r); }
+    if (!r) { r = { customerId: id, name: cmap.get(id)?.name ?? "?", code: cmap.get(id)?.code ?? null, canKg: 0, mua: 0, traTrongThang: 0, congNo: 0, muaJpy: 0, traJpy: 0, congNoJpy: 0 }; rows.set(id, r); }
     return r;
   };
-  for (const o of orders) if (mk(o.createdAt) === month) get(o.customerId).mua += Number(o.totalVnd ?? 0);
+  for (const o of orders) if (mk(o.createdAt) === month) { const r = get(o.customerId); r.mua += Number(o.totalVnd ?? 0); r.muaJpy += Number(o.dueJpy ?? 0); }
   for (const t of trks) { const cid = t.order?.customerId; if (cid && t.packedAt && mk(t.packedAt) === month) get(cid).canKg += t.vnWeightKg != null ? Number(t.vnWeightKg) : Number(t.jpWeightKg ?? 0); }
-  for (const d of deposits) if (mk(d.paidAt) === month) get(d.customerId).traTrongThang += Number(d.amountVnd);
+  for (const d of deposits) if (mk(d.paidAt) === month) { const c = depositCredit(cmap.get(d.customerId)?.payCurrency, d); const r = get(d.customerId); r.traTrongThang += c.vnd; r.traJpy += c.jpy; }
   for (const p of payments) { const cid = p.order?.customerId; if (cid && mk(p.createdAt) === month) get(cid).traTrongThang += p.type === "refund" ? -Number(p.amountVnd) : Number(p.amountVnd); }
-  for (const [cid, bal] of debts) if (bal !== 0) get(cid).congNo = bal;
+  for (const [cid, b] of debts) if (b.debt !== 0 || b.debtJpy !== 0) { const r = get(cid); r.congNo = b.debt; r.congNoJpy = b.debtJpy; }
 
-  const list = [...rows.values()].filter((r) => r.canKg || r.mua || r.traTrongThang || r.congNo).sort((a, b) => b.mua - a.mua);
-  const totals = list.reduce((s, r) => ({ canKg: s.canKg + r.canKg, mua: s.mua + r.mua, traTrongThang: s.traTrongThang + r.traTrongThang, congNo: s.congNo + r.congNo }), { canKg: 0, mua: 0, traTrongThang: 0, congNo: 0 });
+  const list = [...rows.values()].filter((r) => r.canKg || r.mua || r.traTrongThang || r.congNo || r.muaJpy || r.traJpy || r.congNoJpy).sort((a, b) => b.mua - a.mua);
+  const totals = list.reduce((s, r) => ({
+    canKg: s.canKg + r.canKg, mua: s.mua + r.mua, traTrongThang: s.traTrongThang + r.traTrongThang, congNo: s.congNo + r.congNo,
+    muaJpy: s.muaJpy + r.muaJpy, traJpy: s.traJpy + r.traJpy, congNoJpy: s.congNoJpy + r.congNoJpy,
+  }), { canKg: 0, mua: 0, traTrongThang: 0, congNo: 0, muaJpy: 0, traJpy: 0, congNoJpy: 0 });
   return { month, rows: list, totals };
 }
 

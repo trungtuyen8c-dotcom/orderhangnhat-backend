@@ -2,3 +2,6 @@ node_modules
 dist
 .env
 *.log
+
+# Tài khoản nhập dữ liệu từ sheet (mật khẩu) - chỉ để local
+.env.import
